@@ -28,9 +28,6 @@ jobs:
       - name: Xcode のバージョンを表示
         run: xcodebuild -version
 
-      - name: 作れるスキーム(ビルド対象)の一覧を表示
-        run: xcodebuild -list || true
-
       - name: ビルド (署名なし)
         run: |
           set -o pipefail
@@ -44,18 +41,55 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             2>&1 | tee build.log
 
-      - name: .app を探して ipa にまとめる
+      # xcodebuild は Swift Playgrounds 形式のパッケージから「実行ファイル」までしか作ってくれず、
+      # .app (アプリの入れ物) は作ってくれない。なので、.app は自分で組み立てる。
+      - name: 実行ファイルから .app を組み立てて ipa にまとめる
         run: |
-          APP=$(find build/Build/Products -maxdepth 2 -name "*.app" -type d | head -n 1)
-          if [ -z "$APP" ]; then
-            echo "error: .app が見つかりませんでした。build/Build/Products の中身:"
+          BIN=build/Build/Products/Release-iphoneos/MalodySlideEditor
+          if [ ! -f "$BIN" ]; then
+            echo "error: 実行ファイルが見つかりません: $BIN"
             find build/Build/Products -maxdepth 3 || true
             exit 1
           fi
-          echo "見つかった: $APP"
+          file "$BIN"
           rm -rf Payload MalodySlideEditor.ipa
-          mkdir Payload
-          cp -R "$APP" Payload/
+          mkdir -p Payload/MalodySlideEditor.app
+          cp "$BIN" Payload/MalodySlideEditor.app/MalodySlideEditor
+          chmod +x Payload/MalodySlideEditor.app/MalodySlideEditor
+          cat > Payload/MalodySlideEditor.app/Info.plist <<'PLISTEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key><string>en</string>
+            <key>CFBundleExecutable</key><string>MalodySlideEditor</string>
+            <key>CFBundleIdentifier</key><string>local.malody.slideeditor</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>MalodySlideEditor</string>
+            <key>CFBundleDisplayName</key><string>MalodySlideEditor</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>1.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+            <key>MinimumOSVersion</key><string>16.0</string>
+            <key>LSRequiresIPhoneOS</key><true/>
+            <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+            <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
+            <key>UILaunchScreen</key><dict/>
+            <key>UISupportedInterfaceOrientations</key>
+            <array>
+              <string>UIInterfaceOrientationLandscapeRight</string>
+              <string>UIInterfaceOrientationLandscapeLeft</string>
+            </array>
+            <key>UISupportedInterfaceOrientations~ipad</key>
+            <array>
+              <string>UIInterfaceOrientationLandscapeRight</string>
+              <string>UIInterfaceOrientationLandscapeLeft</string>
+            </array>
+          </dict>
+          </plist>
+          PLISTEOF
+          plutil -lint Payload/MalodySlideEditor.app/Info.plist
           zip -qry MalodySlideEditor.ipa Payload
           ls -lh MalodySlideEditor.ipa
 
