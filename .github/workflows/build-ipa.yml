@@ -1,0 +1,85 @@
+# MalodySlideEditor を GitHub の Mac で自動ビルドして、SideStore 用の ipa を作る設定ファイルです。
+# このファイルは、リポジトリの  .github/workflows/build-ipa.yml  という場所に置きます。
+#
+# 動くタイミング:
+#   1) main ブランチに変更を保存(Commit)したとき  2) Actions タブの「Run workflow」ボタンを押したとき
+# 結果:
+#   リポジトリの Releases に「latest」が作られ、その中に MalodySlideEditor.ipa が入ります。
+
+name: ipaを作る
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # Releases に ipa を載せるために必要
+
+jobs:
+  build:
+    runs-on: macos-15    # GitHub が貸してくれる Mac (Xcode 入り)
+    timeout-minutes: 30
+
+    steps:
+      - name: ソースを取ってくる
+        uses: actions/checkout@v4
+
+      - name: Xcode のバージョンを表示
+        run: xcodebuild -version
+
+      - name: 作れるスキーム(ビルド対象)の一覧を表示
+        run: xcodebuild -list || true
+
+      - name: ビルド (署名なし)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -scheme MalodySlideEditor \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build.log
+
+      - name: .app を探して ipa にまとめる
+        run: |
+          APP=$(find build/Build/Products -maxdepth 2 -name "*.app" -type d | head -n 1)
+          if [ -z "$APP" ]; then
+            echo "error: .app が見つかりませんでした。build/Build/Products の中身:"
+            find build/Build/Products -maxdepth 3 || true
+            exit 1
+          fi
+          echo "見つかった: $APP"
+          rm -rf Payload MalodySlideEditor.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry MalodySlideEditor.ipa Payload
+          ls -lh MalodySlideEditor.ipa
+
+      - name: Releases に載せる (ipa を直接ダウンロードできるようにする)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest MalodySlideEditor.ipa \
+            --target "$GITHUB_SHA" \
+            --title "最新ビルド" \
+            --notes "SideStore で入れる用の ipa です (署名なし)。"
+
+      - name: ipa を Actions の成果物としても保存 (予備)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MalodySlideEditor-ipa
+          path: MalodySlideEditor.ipa
+
+      # 失敗したときだけ動く。ここに出る文章を、そのままコピーして Claude に貼ってください
+      - name: 失敗したときの要点
+        if: failure()
+        run: |
+          echo "=== error の行 ==="
+          grep -n "error:" build.log | head -40 || true
+          echo "=== ログの最後 40 行 ==="
+          tail -40 build.log || true
