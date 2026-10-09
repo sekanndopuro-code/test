@@ -1,0 +1,300 @@
+# Malody Slide Editor (Swift Playgrounds / iPad)
+
+## 開き方
+1. `MalodySlideEditor.swiftpm` を iPad の「ファイル」に置き、Swift Playgrounds で開く
+   (開けない場合: Playgrounds で新規 App を作り、既存の .swift を削除して、このフォルダ内の `*.swift` を全てコピー)
+2. **プレビュー欄ではなく、右上の「アプリを実行」でフルスクリーン実行**してください(プレビュー接続エラー回避)
+3. 起動画面で mc → ogg(→ 背景画像は任意)を選び「エディタを開く」
+
+## ファイル構成 (機能追加の入口)
+| ファイル | 役割 |
+|---|---|
+| Beat.swift | [整数,分子,分母] の拍。0拍始まり |
+| ChartModel.swift | mc の読み書き。未知のキーは保存時に温存 / BPM(TimeMap) / effect (`EffectPoint`: scroll / jump) |
+| ZipWriter.swift | mcz(zip) 書き出し |
+| AudioController.swift | 音源。AVAudioPlayer → ダメなら WebKit でデコード。曲の音量 `volume` |
+| KeySound.swift | ノーツ音(キー音)。鈴くらいの高さの短い音をコードで合成して鳴らす |
+| EditorState.swift | 状態・再生クロック・Undo・オートセーブ・エクスポート |
+| EditorState+Tools.swift | ノーツ配置/削除/範囲コピー/反転/Slide<->Wipe/BPM/effect/seg編集 |
+| Renderers.swift | レーン・縦タイムライン・シークバーの描画 (Canvas) |
+| EditorView.swift | 画面レイアウト・右ボタン列・ポップアップ |
+| Sheets.swift | BPM list / Effect list / Grid settings / Slide modify (レーンに重ねる横長の窓) / メタデータ (META: Back / Information / mcz エクスポート / エディタを閉じる) |
+| RootView.swift | 起動時のファイル選択 |
+| TestPlay.swift | テストプレイ。MalodySlideTestplayer の判定・音声・描画をそのまま組み込み (Note→PlayNote に改名) |
+| PCMCache.swift | 曲全体を背景スレッドで先に PCM へ展開しておく `CachedPCMSource` (再生ボタンの待ち時間を縮める。エディタの再生だけで使う) |
+| Effects.swift | effect (scroll / jump) から「表示位置 P(t)」を決める `EffectMap` (テストプレイの見た目だけが変わる。判定は変わらない) |
+| PluginPanel.swift | **Adv. メニュー** (`AdvPanel`: プラグイン一覧・読み込みボタン・出力欄) と、プラグインが出すダイアログ (`PluginDialogLayer`) |
+| PluginStore.swift | プラグイン一覧 (`PluginStore.shared`)。内蔵 + 読み込んだもの (`Documents/MalodySlideEditor/Plugins/` にフォルダごと保存・次回起動時に自動で再読み込み)。.lua / .zip / 画像の取り込みもここ |
+| PluginFilePicker.swift | 「ファイル」アプリを開くピッカー (UIKit の `UIDocumentPickerViewController` を、いちばん手前の画面から直接出す) |
+| PluginSession.swift | **操作型プラグイン (PluginType 2)** の実行 (`PluginSession`)、レーンの上に出す画像 (`PluginSprite`)、画像の読み込み (`PluginImageCache`) |
+| PluginBridge.swift | Lua → エディタの橋渡し。`Editor:〇〇()` の中身 (ノーツ・BPM・effect・スプライト・クリック位置) はここ |
+| LuaEngine.swift | JavaScriptCore の起動と Lua の実行 (別スレッド・停止可能) |
+| LuaEngineSource.swift | **自動生成**。Lua→JavaScript 変換器 + Lua 標準ライブラリ + `Editor` の定義 (JavaScript) を文字列で埋め込んだもの |
+| BuiltinPlugins.swift | 内蔵プラグイン 6 つ (`quad_InOut` / `quad_OutIn` / `Join Slides (Fixed)` / `終点と始点を繋げる` / `折り返し敷` / `枝分かれ敷`) |
+| EditorState+Plugins.swift | プラグインの実行 (`runPlugin`) / 停止 (`stopPlugin`) と、Order ボタン (「順番に選択」) のタップ処理 (`orderTap`) |
+
+## 画面の比率 / 背景画像 (iPad Air 4 の横画面 1180×820pt を基準に、本家の画面を測って合わせている)
+- 左から: **左の帯 145pt** (`StripView.width`。拍の番号と目盛り) → シークバー 66pt → 時刻表示 38pt → レーン (右の余白を含めて 約 865pt。譜面の左端 `LaneGeo.trackL` = 25.2pt、幅 `trackW` = ビューの幅 − 27.4pt (約 837.6pt)。どちらも本家の縦線 (32分割) を実測した値) → 右ボタン列 66pt。再生ボタンは縦長の長方形のまま (`SeekPanel`)
+- **背景画像**: 起動画面で選んだ背景画像を、`EditorBackground` (EditorView.swift) が画面全体 (ホームインジケータの下まで) に敷き、黒を重ねて暗くする。レーン・右ボタン列は背景を塗らず (右ボタン列は半透明の黒)、画像が透けて見える。左の帯とシークバーは、本家と同じ単色の暗い灰色 (`StripRenderer.faceColor`) で塗り、時刻表示の欄からレーンの番号欄までは明るい半透明のパネル (`Color.timePanel`) を敷く。画像が無いときは、これまでどおり黒
+  - 暗さは SETTING の **背景画像の暗さ** (0〜95%、初期値 70%。背景画像があるときだけ表示。保存される: UserDefaults `editor.bgDim`。本家の画面を測ると、背景は このエディタの 60% 設定より約 0.72 倍暗い → 70% が近い)。`EditorState.bgDim`
+  - 画像は長辺 2048px 以内に縮めて読み込む (`EditorState.makeBackground`)。mcz 書き出しには、元の画像をそのまま入れる (従来どおり)
+- 拍の番号は、本家と同じく **N 拍目と N+1 拍目の線の真ん中**に置く (左の帯も、レーンも、標準の書体を横に 0.77〜0.78 倍に潰した細長い数字。帯は数字の高さ 約24.5pt、レーンは 約14.5pt。`drawNumber`)。左の帯の細かい目盛りは、左から 約 27pt の長さ
+- **左の帯の倍率は固定**: 本家はレーンのズームに連動せず、1拍 = 約 178pt (高さ 820pt で 約 4.6拍。`EditorState.stripBeats`)。帯の右には暗い側面 (斜めの面取り、約10.5pt) が続く。側面は帯の枠の外なので `SeekRenderer` が描く
+- **拡大/縮小ボタン**: 左端が画面の外で切れた五角形 (`ZoomButtonShape`、幅 39 × 高さ 45pt、先端は x=37.7)。塗りは不透明な (127, 131, 138)、縁は白 1.5pt、記号は 25 × 3.3pt の白い棒。上端は − が 10.75pt、＋が 68pt (`ZoomButton` / EditorView.swift)
+- **右ボタン列のアイコン** (`PanelIcons.swift`): 本家は高さ約 36pt の太い白線 (線の太さ 約 4pt、角は丸い)。EDIT=えんぴつ / BPM=メトロノーム / TEST=カチンコ / META=一覧 は、本家のスクリーンショットから輪郭を起こした (`PanelIconData`)。本家に無い SETTING (歯車) は同じ太さで描いた。EFFECT は文字の「✦」のまま (アイコン未作成)。アイコンは `PanelButton` の `icon:` に `PanelIconView(kind:color:)` を渡す。本家のフロッピー (保存) は、自作では保存が文字表示なので、まだ使っていない
+- **時刻表示**: 細い字 (25.5pt) を 1文字 20.25pt の送りで並べ、白くやわらかく光らせる (`TimeLabelRenderer`)。「:」「.」は 3pt の四角で、1文字ぶんの枠を取る。上の時刻 (総時間) は画面の上端から、下の時刻 (現在時刻) は下端から、どちらも 113.5pt が中心。書体は標準の書体なので、本家の字形とは少し違う
+- ステータスバー: `MalodySlideEditorApp.swift` の `.statusBarHidden(true)` で隠す指定になっている。Swift Playgrounds の実行中は、Playgrounds 側が出すため消えないことがある
+
+## ノーツの描画 (本家 Malody のスクリーンショットから実測して合わせている)
+`Renderers.swift` の `LaneRenderer.drawNotes` と `Color` の拡張 (`tapOuter` など) が、本家の見た目の入口。変えたいときは、この色の数値と下の定数を触る。
+- **タップ**: 高さ 約 12pt。外側の明るい水色の縁 (1.5pt) → 濃い青緑の帯 (1.5pt) → 白に近い水色の芯 (5pt)。角は丸く、外側にごく弱い水色のにじみ (`drawTap`)
+- **ウィップ**: 左右の端がとがった六角形の棒 (黄色の縁 2pt → オリーブ色の帯 1.5pt → 淡い黄色の芯)。さらに外側に「<」「>」の矢印がつく。ノーツの端 = 矢印の先 (`drawWipe`)
+- **スライドの点**: 外側の白い輪 (半径 11.4pt、透明度 α=0.86) → 水色の輪 (〜7.8pt、α=0.60) → 中心の白 (〜4.5pt、α=0.94) (`drawDot`)。本家は輪ごとに透け具合が違うので (23個の点を背景との回帰で実測)、重ねずに輪の形で塗り分けている。リボンは 白に近い水色 を 約 40% の濃さで重ねる (`Color.ribbonFill`。本家の単スライドを実測した値。以前の 55% はスライドが二重に重なった所を測っていた)。点は、リボンを全部描いたあとで重ねるので、いつもリボンの手前に見える
+- **選択中**: 水色の部分が赤になる (`selTapOuter` など。形・明るさは通常と同じ)
+- `LaneRenderer.barLift` (初期値 8pt): 本家は、タップ / ウィップの棒の下端が拍の線のすぐ上に乗る (棒の真ん中が線に重ならない)。0 にすると、これまでどおり棒の真ん中が線に重なる。当たり判定 (`noteHit`) と LASSO の判定も、この分だけ棒に合わせて動く
+- `LaneRenderer.drawSlideHeadBar` (初期値 false): 本家はスライドの始点に棒を描かない (リボンと点だけ)。true にすると、これまでどおり始点にも棒を描く
+- 縦の拍の線は、本家に合わせて白く濃くした (背景に対して約 60%)。横の線 (1/2 = シアン / 1/4 = マゼンタ) も濃くした (`lineStyle`)
+
+## 画面の下端 / 幅スライダー
+- `RootView` で、下の安全領域 (ホームインジケータの所) も無視して、UI を画面の下端まで続けている。本家は帯・シークバー・レーン・右ボタン列がすべて下端まで途切れない。再生ライン (シアンの横棒) は画面の高さの 91.3% (`LaneGeo.playY`。本家の実測)。右ボタン列だけは、ホームインジケータに重ならないよう下を 24pt 空けている
+- **幅スライダー** (`LaneWidthSlider`): 本家と同じ、透明な白 (約 50%) の単色の帯だけ。レーンの左端 (x=0) から、置かれるノーツの幅の位置までを塗る。つまみ・暗い土台・文字は無い。帯は画面の下端から 約 19pt 上、高さ 18pt。指で触れる範囲は、その周りの下端までの 52pt
+
+## 仕様メモ
+- 拍表示は mc と同じ 0 始まり。x は中心座標(0〜255)、w は幅
+- 音源の同期: 音源位置 = 譜面時間 − offset(ms)  (editor.html と同じ)
+- オートセーブ: 編集の1.2秒後に元の .mc へ上書き + アプリ内 Documents/MalodySlideEditor/ にバックアップ
+- mcz は `<mc名>/` フォルダ内に mc・音源・背景を無圧縮zipで格納
+- 再生中の描画: レーン等の Canvas は `FrameCanvas`(EditorView.swift) 経由で毎フレーム描き直す
+- テストプレイ: 右の TEST ボタン。エディタで表示中の位置(2秒前)から始まる。最初から遊ぶときは先頭にシークしてから押す
+- **Effect (scroll / jump)**: 右ボタン列の **EFFECT** (BPM の下、✦) で一覧が開く。BPM list と同じ作りで、Beat・種類 (scroll / jump)・値を入れて Add / 更新、一覧から選んで Remove。同じ拍・同じ種類は置き換え、scroll と jump は同じ拍に並べられる。Undo / Redo も効く。mc には `"effect":[{"beat":[..],"scroll":0.01},{"beat":[..],"jump":10000000}]` の形で保存される (読み込んだ mc の effect はそのまま温存する。scroll / jump 以外の形のものも、触らずに書き戻す)
+  - **エディタの画面は変わらない** (ノーツは今までどおり拍で並ぶ)。変わるのは **テストプレイの見た目だけ**。判定は時刻で決まるので、effect の影響を受けない
+  - scroll: その拍から、譜面の流れる速さが 値 倍になる (1 = 普通 / 0 = 止まる / マイナス = 逆走)。jump: その拍になった瞬間、譜面が先へ一気に飛ぶ。**値は ms で、1000 = 1 秒間に進む距離ぶん**。そのときの **scroll の値に比例**する (scroll 1 で jump 1000 → 1 秒ぶん / scroll 2 → 2 秒ぶん / scroll 0 → 飛ばない)。同じ拍に scroll と jump があるときは、scroll を先に変えてから飛ぶ
+  - **仕組み** (`EffectMap` / Effects.swift): ノーツの画面の高さは「その時刻の表示位置 P(t) − 今の表示位置 P(今)」で決まる (effect が無ければ P(t) = t で従来どおり)。scroll は P の傾き、jump は P の段差。**effect が 1 つも無い譜面は、従来のコードがそのまま動く** (見た目も速さも変わらない)
+  - **スライドの描き方** (本家の仕様をnoteの解説どおりに再現): リボンは「隣り合う点どうしを、表示位置で結んだ台形」を並べたもの。判定は時刻の位置で決まるので、見た目とずれる
+    - jump で中継点を遠くへ飛ばすと、始点から画面の外へ伸びる、ほぼ一直線のリボンになる (点滅スライド)。飛ばした点を判定が過ぎると、そこまでの台形は線の下に落ちて消える
+    - 逆走 (scroll がマイナス) では、**区間の終わりの点を判定が過ぎたら、その区間の台形は描かない**。中継点のあるスライドだけ、その点を境に途切れて見える (途切れスライド)。中継点の無いスライドは、逆走しても残る。この「消す」処理は、逆走のある譜面のリボンだけで働く
+  - 巨大な値 (jump 10000000 など) でも描画が壊れないよう、リボンの台形は描く範囲に切り詰めてから描く (`RibbonQuad.clipped`)
+  - jump の飛ぶ距離は `jump(ms) ÷ 1000 × その時の scroll` 秒ぶん (`EffectMap.make`)。mc の値のまま `MalodyChart.load` から `EffectMap.Event.jumpMs` に渡している
+  - 制限: ビットマップ方式 (台形が何百個も重なるリボン) では、逆走で台形を消す処理は働かない。effect のある譜面では、一度に描くノーツは 400 個まで
+  - 未保存の編集内容も含めて、その場で mc を組み立てて遊ぶ (ファイルへは書かない)
+  - PAUSE → 終了 でエディタへ戻る。判定/ACCは Testplayer と同じ (PC版C判定)
+- ポーズ画面の待ち時間対策: `GameAudio.halt()` がデコードスレッドの完了を待たない作りに変更 (待つのは再開時の `prepare` のみ)。ポーズ画面の上部に「pause処理 〇 ms」を診断用に表示 (不要なら PauseOverlay の Text を削除)
+
+## 編集ツール / ノーツの選択・移動 / 未選択時の操作
+- EDIT を押した直後は **どのツールも未選択**。Note / Wipe / Slide / Remove のアイコンは、選択中にもう一度タップすると未選択に戻る
+- **未選択のとき**: ノーツの配置・選択はできない。代わりにレーンを上下スライドで移動、ピンチでズームイン/アウト (再生ラインの位置を基準に拡大縮小。ズームは連続値で、−/＋ボタンは1段階ずつ)。EDIT に入っていない閲覧モードでも同じ操作ができる
+- **Note / Wipe / Slide を選択中**:
+  - 既存のノーツ(スライドはリボン・点を含む)に触れると選択され、青い成分が赤い色になる (Wipe は黄色 → 赤)。続けて別のノーツに触れると選択に追加される
+  - 選択中のノーツの当たり判定内に指を置いて上下左右にスライドすると、選択中の全ノーツがまとめて移動する (移動量は1回の操作につき Undo 1回分)
+    - 縦: 触れたノーツが 1/n 拍のグリッドに吸着する量で、全ノーツを同じだけ動かす (相対位置は保つ。0拍より前には行かない)
+    - 横: グリッド有効時は1マス単位。全体が x:0〜255 の範囲から出ないところで止まる
+  - 選択中のノーツに触れて、動かさずに離すと、そのノーツだけ選択から外れる
+  - **幅スライダー**: レーン下の幅スライダーは、**EDIT を開いている間は常に表示**される (ツール未選択 / LASSO / Remove / Time range / Slide modify のときも。LASSO などで選んだノーツの幅をその場で変えるため)。ノーツを選択している間にこれを動かすと、選択中の全ノーツの幅がスライダーの値になる (指を離すまでが Undo 1回分)。何も選択していないときは、これから置くノーツの幅を決めるだけ
+    - **位置 (x) と seg は動かさない。幅だけ**が変わる。左右の端が x:0〜255 の枠からはみ出してもよい (中心が 0〜255 の外に出ないことだけが条件で、幅を変えても中心は動かない)。グリッド有効時の幅は、新しいノーツを置くときと同じく 1マスの整数倍に丸める (`snapWidth`)。グリッド無効時は 1〜255 の整数
+    - 関連コード: `EditorState+Tools.swift` の `widthSliderBegan / widthSliderMoved / widthSliderEnded / resized`、`EditorView.swift` の `LaneWidthSlider`
+  - ノーツの当たり判定が無い所に触れると選択が全部解除される (このタッチでは配置しない。選択が無い状態で空きスペースに触れると従来どおり配置)
+  - 判定は `EditorState.hitNote` (縦±14pt / 横はノーツ幅の半分+6pt)。選択状態は `EditorState.selectedIDs` (Note.id で管理。mc には書き出さない)
+- **Slide ツールでのスライド作成 (ドラッグは使わない。タップだけ)**:
+  1. 1回目のタップ = 始点ノート (この時点では譜面に入れず、ゴーストで表示。右の Slide アイコンが「完」になる)
+  2. 2回目以降のタップ = seg。**置いた順がそのまま seg の順番**になる (時系列に並べ替えない)。最後に置いた点にはシアンの輪がつく
+  3. 「完」を押すと、その始点への seg の配置が終わる (Slide ツールのまま。次のタップが新しい始点)。seg を 1 つも置かずに「完」なら、始点は取り消される
+  - 始点より前 (マイナス方向 = beat がマイナスの seg) は、SETTING の「beatがマイナスのsegを置くのを許可する」をオンにしたときだけ置ける (初期値オフ。保存される: UserDefaults `editor.allowNegativeSeg`)。オフのときは、始点より前をタップすると「完」と同じ扱いで seg の配置を終える。Slide modify も同じ設定に従う (オフのときは、始点より前の所をタップすると「完了」と同じ扱いで Slide modify を終える。点をドラッグしても始点の位置で止まる)。保存のときは負の拍を `"beat":[-12,2,4]` (= -11.5 拍。整数部にマイナス、分子は 0 以上) の書き方にする (`Beat.json`)。
+    `[0,-2,4]` のように分子にマイナスがある譜面を読み込んだときも、保存のときに直す (本家で不具合になるため)
+  - 作成中は、どこをタップしても seg を置く (既存ノーツの選択・移動はしない)。seg 1 個の追加が Undo 1 回分。Undo で最初の seg を戻すと、始点だけの状態に戻る
+  - Slide 以外のツールに切り替えると作成中は終わる (置いた seg は残る)
+  - レーンの上下スライドは編集ツール選択中は使えないので、別の拍に seg を置くときは、レーン以外のスクロール操作 (帯・シークバー) で動かす
+  - 関連コード: `EditorState+Tools.swift` の `slideDraft*` / `appendDraftSeg` / `finishSlide`、`Renderers.swift` の `drawSlideDraft`
+- **Remove**:
+  - 選択中のノーツ (赤いノーツ) がある時に押すと、そのノーツをまとめて削除する (ツールは今のまま。削除は Undo 1回分)。More の **Time range** で範囲を選んでから Remove を押せば、範囲の一括削除になる
+  - 何も選択していない時は従来どおり Remove ツール (レーンをタップして1個ずつ消す) の ON/OFF
+  - 関連コード: `EditorState+Tools.swift` の `removeButtonTapped` / `removeSelected`
+- **LASSO** (Remove の下 / More の上のボタン。投げ縄の絵のアイコン): 指でなぞって囲んだ範囲のノーツを、まとめて選択状態にする (お絵描きソフトの投げ縄と同じ使い方)
+  - もう一度タップすると未選択に戻る (選択したノーツは残る)。切り替えたとき、使い方のトーストを1回出す (不要なら `EditorView.swift` の LASSO ボタンの `showToast` を削除)
+  - レーンを指でなぞると、白い点線 + うす白の塗りで囲む範囲を見せる。**指を離すと、終点と始点を直線で結んで閉じ**、中にあるノーツが赤い選択状態になる
+    - 線が自分と交差してもよい (始点を少し行き過ぎて閉じたときなど)。巻き数が 0 でない所を「中」とする (`EditorState.windingContains`)
+  - 「中にある」の判定: タップ / ウィップは**中心の点**。スライドは**始点か seg の点のどれか**が中に入っていれば、スライド全体を選ぶ (リボンが線をまたいでいるだけでは選ばない)
+  - **今の選択に追加**する (置き換えない)。LASSO 中はレーンを上下スライドできないので、帯・シークバーで拍を動かしながら、何回かに分けて囲める
+  - 10pt 以上動かさずに離した (タップ) とき: ノーツの上ならそのノーツの選択 ON/OFF、何も無い所なら**全部の選択を解除**
+  - 選択したあとは、そのまま Remove (まとめて削除) / More の Copy・Flip・変換、または Note / Wipe / Slide ツールに切り替えてドラッグ移動 (選択は残る)
+  - 再生中は使えない (他のツールと同じ)
+  - 関連コード: `EditorState+Tools.swift` の `lassoTouch` / `lassoTap` / `selectInLasso` / `windingContains`、`EditorState.lassoPoints` (なぞっている途中の線)、`Renderers.swift` の `drawLasso`、`EditorView.swift` の `LassoIcon` と `PanelButton` の `icon`
+- **Slide modify** (More → Slide modify): シートではなく、レーンの上に重ねる横長の細い窓 (`SlideModifyWindow`: 「Slide modify」の表示・操作のヒント・**完了**)。**背景は暗くならず**、窓の外のレーンはそのまま触れる。「完了」で Slide modify を終える (選択は残る)。数値で直す「広げた状態」は無く、編集はすべてレーン上で行う
+  - レーンのスライドをタップすると選択状態になり (赤くなる)、そのスライドの点 (seg) にシアンの輪が付く
+    - **点をドラッグ**: 選択中のスライドの点を指で動かせる (縦は 1/n 拍、横はグリッドに吸着。ドラッグ1回が Undo 1回分。元の位置に戻して離したら Undo は積まない)
+    - **点をタップ**: その点が選ばれ (白い太い輪)、**隣に赤い「削除」ボタン**が出る。押すとその seg が消える (Undo 1回分)。点が右端に近いときは左側に出る。点を動かしている間は消えている。1つしか無い seg は消せない (消すと通常のノーツになるため)
+    - **空いている所 (または選択中スライドの帯の上) をタップ**: 点を選んでいるときは、選択を外して「削除」を消すだけ (うっかり seg を足さない)。点を選んでいないときは、そのスライドの最後に seg を追加 (Slide ツールと同じく、置いた順が seg の順番。すでに点がある位置には足さない)
+    - **別のスライドをタップ**: そちらを選び直す
+  - レーンの上下スライドはツール選択中は使えないので、拍を移動するときは左の帯 (タイムライン) かシークバーを使う
+  - Slide modify に入るとき、選択がスライド1つだけなら、そのスライドがそのまま編集対象になる
+  - 関連コード: `Sheets.swift` の `SlideModifyWindow` / `EditorView.swift` の `slideModifyLayer` / `EditorState+Tools.swift` の `slideModifyTap` `addSegAt` `hitSeg` `dragSeg` `segDeleteRect` `deleteModifySeg` / `Renderers.swift` の `drawSlideModify`
+- **長押しで選択解除**: ツール未選択 (EDIT 直後 / 選択中のツールをもう一度タップして外したあと / 閲覧モード) のとき、レーンを**動かさずに押し続ける**と、選択中のノーツが全部解除される (トーストで知らせる)
+  - 秒数は SETTING の「長押しで選択解除」で **1.0〜5.0 秒** (0.1 秒刻み、初期値 2.0 秒)。値は次回起動時も保存される (UserDefaults: `editor.holdDeselectSec`)
+  - 指が 10pt を超えて動いた (= 上下スライドになった) / 指を離した / ピンチが始まったときは取り消される。選択が無いときは何もしない。押している間にツールを選んだときも解除しない
+  - 関連コード: `EditorView.swift` の `LaneView` (タッチの始まり=`holdBegan` / 動き・離す・ピンチ=`holdCancel`) と `SettingWindow.holdRow`、`EditorState+Tools.swift` の `holdBegan / holdCancel / holdFired`、`EditorState.holdDeselectSec`
+- 選択は、Back を押したときに解除される (未選択に戻しただけでは残るので、パン・ズームしてからコピーや貼り付けができる)
+
+## Adv. (Malody V の Lua プラグインを動かす)
+EDIT の右ボタン列、**LASSO の下・More の上**に **Adv.** (λ) がある。
+
+- **開き方**: Adv. を押すと、レーンの**右端を固定したまま左端が右へ動いて横に縮み**、再生ボタン (シークバー) とレーンの間にプラグインのメニュー (幅 196pt、`AdvPanel.width`) が出る。もう一度 Adv. を押す (またはメニュー右上の ✕ / Back) と閉じる
+- **プラグインは縦にスクロール**する (`ScrollView` + `LazyVStack`)。何百個並んでも使える
+- **実行**: 並んでいるプラグインを押すと、その `Run()` を実行する。実行中は別スレッドで動くので画面は固まらず、メニュー右上の**停止**で止められる (Lua のループの途中で止まる)
+- **プラグイン(lua)を読み込む**: メニューの一番下のボタンで「ファイル」アプリが開く。**.lua / .zip / 画像を、複数まとめて**選べる
+  - `.zip` (Malody V のプラグインの配り方: .lua + 画像) は、中身を `Plugins/<zip の名前>/` に展開する。`.lua` は `Plugins/<ファイル名>/` に入れ、一緒に選んだ画像もそこに入る。画像 (`PluginIcon` や `AddSprite` の画像) は、その .lua と同じフォルダから探す
+  - 読み込むときにプラグインの先頭 (`PluginName` / `PluginMode` / `PluginType` / `PluginRequire` / `PluginIcon`) を読む。構文エラーのファイルや、`Run()` も `OnActive()` も無いファイルは追加せず、理由を表示する
+  - 保存されたものは、次回起動時も並ぶ。**長押し → 削除**で消せる (内蔵は消せない)。そのフォルダに .lua が無くなったら、画像ごと消える
+  - ファイルアプリを SwiftUI の `.fileImporter` ではなく UIKit のピッカーで開くのは、外側の画面 (RootView) にも `.fileImporter` があると、内側のものが開かないことがあるため
+- **Undo**: 1回の実行 = Undo 1回分。↶ で実行前に丸ごと戻る
+- **print() の出力**はメニュー下部の「出力」欄に出る。エラーは「ファイル名:行番号: 内容」でダイアログに出る
+- **内蔵プラグイン** (`BuiltinPlugins.swift`): `quad_InOut` / `quad_OutIn` / `Join Slides (Fixed)` (添付された Malody V 用プラグイン) と、editor.html から移植した `終点と始点を繋げる` / `折り返し敷` / `枝分かれ敷` が最初から入っている (結合系は、上の Order ボタンの「順番に選択」を使う)
+
+### 操作型プラグイン (PluginType 2。例: GizaSlide)
+`Run()` を1回実行する型とは別に、**押すと「アクティブ」になり、レーンのタッチを受け取り続ける**型に対応している。Adv. メニューでは、行に **ON** と出て、アイコン (`PluginIcon`) が付く。
+
+- **使い方 (GizaSlide の例)**: スライドを1本選ぶ → Adv. で GizaSlide を押す (ON) → レーンの真ん中に**つまみ**が出る → つまみを横にドラッグすると、スライドがギザギザの形になる → もう一度押す (OFF) か、別のツール・Back でつまみが消えて終わる
+- **イベント**: アクティブの間、レーンのタッチが次のように渡る。`OnActive` (押した瞬間) / `OnDeactive` (終わるとき) / `OnClick` (動かさずに離した) / `OnDragStart` (動かし始め。位置は指を置いたところ) / `OnDragMove` (動くたび) / `OnDragEnd` (離したとき)。プラグインに無いイベントは何もしない
+- **位置**: イベントの中で `Editor:GetClickX()` (レーン上の x: 0〜255)、`GetClickBeat()` (いまの分割に合わせた拍)、`GetClickBeatFree()` (合わせない拍) が、触れている位置を返す
+- **スプライト**: `Editor:AddSprite(名前, 画像のファイル名)` で、レーンの上に画像を出す。戻り値のモジュールの `.Beat` (縦の位置の拍) / `.X` (中心の横位置。レーン幅に対する %) / `.Width` (幅。レーン幅に対する %。高さは画像の縦横比のまま) を書き換えると、すぐ画面に反映される。同じ名前で `AddSprite` をもう一度呼ぶと、新しい画像を作らずに同じモジュールを使う。`RemoveModule(名前)` で消す。`FindModule(名前)` で探せる。アクティブが終わると、残っていても消える
+- **Undo**: 1回のドラッグ (または1回のクリック) = Undo 1回分
+- **メインスレッドで動く**: 1つのイベントは短く終わるので、タッチ処理の中で、そのまま実行する (書き換えの途中が一瞬映ることがない)。1つのイベントは2秒まで (超えると止める)。そのかわり、操作型の中では `ShowMessage` は表示だけして待たず、`GetUserInput` は使えない (nil が返る)。エラーは画面の下に表示される
+- 実装: `PluginSession` (エンジンを起動・イベントを1つずつ呼ぶ) / `EditorState.pluginTouch` (タッチの振り分け) / `EditTool.plugin` / `Renderers.drawSprites` (画像の描画)
+
+### 順番に選択 (Order ボタン)
+EDIT の右ボタン列、**LASSO の下・Adv. の上**に **Order** (①②) がある。スライドを**タップした順に番号を付けて**記録するツールで、結合系プラグインがこの順番を使う (editor.html の「順番に選択」と同じ)。
+
+- **使い方**: Order を押してから、スライドをタップする。1番目は**赤**、2番目以降は**水色**で、始点に番号が出る。ほかのツールに切り替えても順番は残る (ボタンの文字が `Order 3` のように、選んだ数になる)。もう一度 Order を押すと、ツールだけ OFF (順番は残る)
+- **重なったスライド**: 順番に入れたスライドは、タップの当たり判定から外れる。同じ場所をもう一度タップすると、下に重なっているスライドが選べる
+- **リセット**: スライドの無い所をタップすると、順番を全部リセットする (ほかのツールの「何も無い所をタップで選択解除」と同じ)。結合系プラグインを実行すると、結合したあとにリセットされる
+- LASSO などの通常の選択とは**別**に記録される (併用できる)。Undo の対象ではない。消えたスライドは順番から外れ、番号が詰まる
+- `EditorState.orderIDs` (順番) / `EditorState.orderTap` (タップの処理) / `Renderers.drawOrder` (番号の表示)
+- Lua からは `Editor:GetOrderNotes()` (順番に並んだノーツ。`.Length` と 0 始まりの添字) と `Editor:ClearOrderNotes()` (リセット)。**このエディタ独自の API** なので、本物の Malody V では存在しない (プラグイン側で `Editor.GetOrderNotes ~= nil` を調べて使う)
+
+### 結合系プラグイン (editor.html から移植)
+スライドを選んでから、メニューのプラグインを押す。選ぶのは**スライドだけ** (タップ・ウィップが混ざっていても無視される)。結合したあと、本体以外のスライドは消えて、順番はリセットされる。
+
+| プラグイン | 順番に選択 **2本以上** (手動) | 順番に選択 **1本** + 選択中のスライド (自動) | 順番に選択 **なし** (選択中のスライド) |
+|---|---|---|---|
+| **終点と始点を繋げる** | 選んだスライドを、始点 beat の早い順に、前の終点 → 次の始点を一直線に繋ぐ (同じ beat は選んだ順) | (1本だけでは、2個以上選ぶよう表示) | 選択中のスライドを、始点 beat の早い順に繋ぐ |
+| **折り返し敷** | **選んだ順どおり**に、行ったり来たりしながら一筆書きで結合 (1番目が本体。順行 → 逆走 → 順行…) | 1番目が本体。選択中のほかのスライドを、始点 beat の早い順に結合 | 始点がいちばん早いスライドが本体。残りは始点 beat の早い順 |
+| **枝分かれ敷** | 選んだスライドのうち、始点がいちばん早いものが幹 (同じ beat は選んだ順の早いほう)。残りが枝 | 1番目が幹。選択中のほかのスライドが枝 (始点 beat の早い順) | 始点がいちばん早いスライドが幹 |
+
+- 各スライド内部の seg の並び (逆走・折り返し・マイナス beat) は変えない。枝分かれ敷は、枝を幹の seg の通り道の上の、その枝の終点にあたる位置から差し込む
+- **バグスライド (beat の重複) は常に許す**: このエディタは beat が重複しても描画が崩れないので、境目の自動ずらし (結合順 × 1/8477 拍) も、重複 seg の自動修復 (1/9001 拍ずつ) も行わない (editor.html の「バグスライドを許す」を常に ON にしたのと同じ)。結合のたびに beat が動かず、境目が直角のまま残る
+- 「順番に選択」が1本だけで、ほかに選んだスライドも無いとき (折り返し敷・枝分かれ敷) は、何もせず、選び方を表示する。元の editor.html にあった「1本だけでバグ修復」は、重複を常に許すようにしたので無くなった
+- ロジックは editor.html の `mergeSequentialInto` / `mergeJoinInto` / `mergeBranchesInto` と補助関数を1対1で移植したもの。元の関数を (`allowDupBeat = true` で) そのまま実行した結果と、ランダムな譜面 1800 通り (順番なし / 1本 + 装飾 / 手動の3パターン) で出力が完全に一致することを確認している (`lua-engine-src/test_html_diff.js`)
+
+### 仕組み
+Swift Playgrounds のアプリには Lua 本体 (C 言語) を組み込めないため、**Lua → JavaScript の変換器と Lua 標準ライブラリを JavaScript で書き、iOS 標準の JavaScriptCore で動かしている** (`LuaEngineSource.swift`)。
+- 対応する Lua: 5.1〜5.3 の主要な文法 (クロージャ・可変長引数・多値・メタテーブル・`goto continue` など前方への goto・`//` とビット演算)、`string` (Lua パターン・`format`)、`table`、`math`、`os`、`bit32`、`pcall` / `error` など。**非対応**: coroutine、後ろ向きの goto、`require` / `dofile`、`io` のファイル操作。文字列は UTF-16 で扱うので、日本語の `#文字列` はバイト数ではなく文字数になる
+- 数値は 5.1/5.2 と同じく倍精度のみ (`3.0` は `3` と表示される)
+- プラグインごとにグローバル環境が別なので、プラグイン同士で変数が混ざらない。`Run()` のたびに最初から読み直す
+- `LuaEngineSource.swift` は自動生成のファイル。直すときは元の JavaScript (別フォルダ `lua-engine-src/`: ソース・テスト・`build.py`) を直して、`python3 build.py ../LuaEngineSource.swift` で作り直す
+
+### Editor の API (APIリファレンス.txt との対応)
+`Editor:関数名(...)` の形で呼ぶ。ノーツは**番号** (1, 2, 3…。本物の Malody と同じく数値なので、`'m-' .. note .. 'grip'` のように文字列と連結できる)、`GetSelectNotes()` などの一覧は `.Length` と 0 始まりの添字 (`Notes[0]`)。拍は `{beat=, numor=, denom=}` の表。
+
+| 状態 | 関数 |
+|---|---|
+| **実装済み (添付プラグインで使用・動作確認済み)** | `GetSelectNotes` `GetNoteTime` `GetNoteBeat` `GetNoteX` `GetNoteWidth` `GetNoteType` `GetNoteSlideBodyCount` `GetNoteSlideBodyBeat` `GetNoteSlideBodyX` `AddNote` `DeleteNote` `SetNoteBeat` `SetNoteX` `SetNoteWidth` `AddNoteSlideBody` `SetNoteSlideBodyX` `DeleteNoteSlideBody` `BeatAdd` `BeatMinus` `StartBatch` `FinishBatch` `ShowMessage` `ShowTip` |
+| **実装済み (操作型プラグイン GizaSlide で使用・動作確認済み)** | `GetClickX` `GetClickBeat` `GetClickBeatFree` `AddSprite` `RemoveModule` `FindModule` `MakeBeat` `GetNoteBeat(note, false)` (終点) |
+| **このエディタ独自 (本物の Malody V には無い)** | `GetOrderNotes` (Order ボタンで選んだ順のスライド) `ClearOrderNotes` (その順番をリセット) `AppendNoteSlideBody` (seg を並べ替えず、足した順のまま末尾に足す。beat が行ったり来たりするバグスライド用) |
+| **実装済み (使い方は推測。実際のプラグインで確かめて調整)** | `GetCurrentTime` (ms) `GetSystemTime` `GetCurrentBeat` `GetCurrentDivide` `GetNoteCount` `GetNoteAt` `GetTimeCount` `GetTimeAt` `GetEffectCount` `GetEffectAt` `AddTime` `DeleteTime` `AddEffect` `DeleteEffect` `SelectNote` `SetGridLine` `SeekTo` `MakeBeat` `GetUserInput` |
+| **未対応 (呼ばれると、何もせず通過して、実行後にどれが呼ばれたかを表示)** | `GetNoteFlag` `GetNoteGroup` (どちらも 0 を返す) `SetNoteFlag` `SetNoteGroup` `WriteFilePlugin` `ReadFileSelect` `ReadBytesSelect` `ReadData` `WriteData` `WriteChartCustom` `CallShortcut` `GetUserSelect` `GetUserOption` `AddText` `AddSpriteUndo` `AddTextUndo` `RemoveSpriteUndo` |
+
+- `GetNoteBeat(note, true)` は始点、`GetNoteBeat(note, false)` は終点 (スライドは、始点 + 最後の seg の相対 beat)。`GetNoteTime` も同じ
+- ノーツの種類は `Tap = 1` / `Wipe = 1024` / `Slide = 2048` (`GetNoteType` の戻り値、`AddNote` の引数)。スライドは「seg を持つノーツ」なので、`AddNote(2048)` で作ったノーツは、`AddNoteSlideBody` で seg を足すまではタップとして保存される
+- `AddNoteSlideBody(note, beat)` は、seg を **beat の順になる位置に挿入**して、その位置 (0 始まり) を返す (本物の Malody と同じ。同じ beat なら、あとから足したほうが後ろ)。`SetNoteSlideBodyX` などの添字は、この並び順
+- スライドの seg の beat / x は、始点からの**相対値** (mc と同じ)。`DeleteNoteSlideBody(note)` は seg を全部消し、`DeleteNoteSlideBody(note, i)` は i 番目 (0 始まり) だけ消す
+- 拍の分母は約分して保存する。分母が 2^22 を超える拍や、極端に遠い拍は 1/1048576 拍に丸める。負の拍は 0 拍に直す
+- `SetNoteX` は 0〜255、`SetNoteWidth` は 1〜255 に収める
+- API を足す場所: ① `LuaEngineSource.swift` の元になっている JavaScript の `makeEditor` に `def('関数名', ...)` を足す → ② 譜面を触る処理が必要なら `PluginBridge.swift` の `handleMain` に `case "コマンド名"` を足す (JavaScript 側は `native('コマンド名', 引数…)` で呼ぶ) → ③ `LuaEngineSource.swift` を作り直す
+
+## More メニュー: コピー / 範囲選択 / 変換
+コピー・反転・変換はすべて「選択状態のノーツ (赤いノーツ)」が対象。
+- **Copy**: 選択中のノーツを保存する (いちばん前のノーツの拍を基準にした相対位置で持つ)。何も選択していないときはトーストで知らせる
+- **Paste**: 保存したノーツを、再生ラインの位置にいちばん前のノーツが来るように貼り付ける。貼り付けたノーツは選択状態になる
+- **Time range**: 始点の拍 → 終点の拍の順にレーンをタップすると、その間 (両端を含む。ノーツの先頭の拍で判定) のノーツが選択状態になる。3回目のタップで始点からやり直し。Time range を抜けると範囲の表示は消えるが、選択は残る (Note / Wipe / Slide を選べば、そのまま動かせる)
+- **Flip notes horizontal**: 選択中のノーツを左右反転。何も選択していないときは全ノーツ
+- **Slide to Wipe / Wipe to Slide**: 選択中のノーツだけを変換する (Wipe to Slide は選択中の Wipe が2個以上必要)。変換後のノーツは選択状態になる
+- 関連コード: タッチ処理 `EditorState+Tools.swift` の `laneTouch` / ジェスチャ `EditorView.swift` の `LaneView` / 描画色 `Renderers.swift` の `selTap*` `selWipe*` `selRibbon` `selDot`
+
+## SETTING / キー音
+- 右ボタン列の META の下の **SETTING** で、音量ウィンドウが開く(✕ か SETTING をもう一度押すと閉じる)
+  - 曲の音量 / ノーツサウンドの音量 (0〜100%、5%刻み)。値は次回起動時も保存される (UserDefaults: `editor.musicVolume` / `editor.noteVolume`)
+  - ウィンドウは背景を暗くせずタップも奪わない → 曲を再生したまま音量を調整できる
+  - ノーツサウンドのスライダーは、指を離した時に1発鳴って音量を確かめられる。0% でキー音オフ
+- キー音が鳴るタイミング
+  - エディタ再生中: ノーツ先頭が再生ライン(シアンの横棒)に触れる瞬間。同時押し(1ms以内)は1発にまとめる
+  - テストプレイ: tap / wipe / スライド始点を捌いた瞬間 (`GameCore.onHit`)
+  - 再生中のキー音は「鳴る時刻を指定して先行予約」(0.25秒先まで)。フレームレートに依存せず、曲と同じ時計から予約する (下の「再生クロック」参照)
+- キー音の音色を変えたいとき: `KeySound.makeBuffer` の `base`(高さ Hz) / `partials`(減衰の時定数) / `drive`(潰し具合) / `dur`(長さ)。現在値は base=6600 / drive=100 / dur=0.02
+
+## 再生ボタンの反応速度
+- 再生ボタンを押してから動き出すまでの余裕は `EditorState.playLead` (現在 0.05 秒)。短いほど反応が速いが、短すぎると曲の頭出しがずれる
+- 再生開始では「曲の下ごしらえ(`prepareToPlay`)→ 鳴らす時刻の予約 → 画面の時計を開始」の順にする。順序を逆にすると、下ごしらえに掛かった分だけ曲が譜面より遅れて始まる
+- 停止中、表示位置が 0.25 秒止まると `AudioController.warm` が次の再生位置を先に用意する。位置が合っていれば再生ボタンの瞬間の下ごしらえを省く
+
+## 再生/停止の遅延対策 と 曲の長さの異常 (修正メモ)
+- **停止の遅れ**: `KeySound.cancelScheduled` が、停止のたびに 8 ノード全部へ `stop()`+`play()` (計16回の同期呼び出し) をしていた。
+  今は「まだ鳴っていない予約を持つノード」だけを `stop()` し、再生状態への復帰は次に鳴らす時 (`ensureRunning`) に回す
+- **曲の停止**: `AudioController.stop` は、鳴っている最中は `pause()` (後片付けが無く速い・準備状態も保たれる)、開始予約中だけ `stop()` (確実に取り消す)
+- **再生が鳴らない**: `AVAudioPlayer.play(atTime:)` が false を返したとき (オーディオセッションが割り込みで止まっていた等) は、セッションを起こし直して1回だけやり直す
+- **ボタン**: 再生/停止ボタンは「指が触れた瞬間」に切り替わる (`PlayToggleButton`)。従来の「離した時」に戻す方法はそのファイルのコメント参照
+- **再生ボタンの形と位置**: 縦長の長方形で、高さは画面の約1/5。シークバーから右の時刻表示の上まではみ出す (レーンには掛からない)。`SeekPanel` (EditorView.swift) が、シークバー(66pt) + 時刻表示(38pt) + 再生ボタンを重ねて作る。
+  ボタンの当たり判定の外 (上側・下側) のシークバーを触ってドラッグすると曲の位置を動かせる。その間だけボタンは透明になる (`SeekView` の `seeking` → `PlayToggleButton` の `dimmed`)。
+  大きさを変えるときは `SeekPanel` の `btnH` / `btnW`、アイコンの大きさは `PlayToggleButton` の `size: 44`
+- **描画**: スライドの描画は、画面に掛かっている区間だけを描き、表示範囲に切り詰める (seg が数万個ある譜面でも再生が重くならない)
+- **tick**: 1フレームに Canvas が4つあるため、同じフレーム内の2回目以降の `tick()` は省く
+- **曲の長さが異常に長くなる**: 譜面に壊れた値 (例: `[0, 1983827953, 1]` = 約20億拍先の seg) があると、曲の長さがそれに引きずられていた
+  (03.mc は 824 拍のスライドに 4 個ある。約757万分になる)。
+  今は「曲の長さ + 60秒 (音源が無ければ3時間)」より遠い点を長さの計算から除き、読み込み時にトーストで件数を知らせる。
+  譜面データ自体は書き換えない (保存時もそのまま)
+
+## 再生クロック (曲・レーン・キー音を同じ時計で動かす)
+再生中の画面は、CADisplayLink (`EditorState.onFrame`) が1フレームに1回、「そのフレームが画面に出る時刻 `frameHost`」を取り、
+`currentSec()` はその時刻から譜面時刻を返す。レーン・縦タイムライン・シークバー・時刻表示は同じフレームなら必ず同じ値になる。
+(以前は Canvas ごとに `CACurrentMediaTime()` を読み、`AVAudioPlayer.currentTime` との差が60msを超えるたびに時計を丸ごと飛ばしていた → レーンのワープ)
+
+- **エンジン方式** (速度 1.0 / 0.25 / 0.1 で音源あり): テストプレイと同じ `GameAudio` (TestPlay.swift) を使う。
+  `lastRenderTime` から得た「実際に鳴っているサンプル位置」で毎フレーム時計を合わせ直す。出力遅延も込みで「聞こえる位置」を譜面時刻にする。
+  キー音は `GameAudio.uptime(atChartTime:)` − `outputLatency` の時刻に予約する (曲のサンプルと同じタイミングで聞こえる)
+- **従来方式** (0.75倍 / 0.5倍、またはエンジンが音源を開けなかったとき): `AVAudioPlayer` + 壁時計の推測航法。
+  `currentTime` との差は均して (`corrTarget`)、画面の時計 (`corr`) は最大10%の速度差でなめらかに寄せる。時計を飛ばすのは0.3秒を超える差のときだけ
+- 速度の切り替え・ポーズ・シークで毎回 `play()` が時計を作り直すので、ズレは蓄積しない
+- **再生ボタンの反応 (エンジン方式)**: 停止中、表示位置が0.1秒止まると `GameAudio.warm` が、次の再生位置のシーク・デコード・最初のバッファ投入を別スレッドで済ませておく。
+  再生ボタンでは `begin` が「用意済みの位置と20ms以内で合っているか」を見て、合っていれば再生の予約だけで始める (合っていなければ従来どおりその場でシーク)。
+  SETTING の下に「再生開始の下ごしらえ ○ ms (先読み済み / 先読みなし)」を出している (不要なら `SettingWindow` の `playInfo` の Text を削除)。
+  位置を動かして0.1秒以内に再生を押したときは「先読みなし」になり、少し待たされる
+- **曲の先読み展開 (再生ボタンの待ち時間対策)**: 「区間を置き終わる → 区間の始めまで戻る → すぐ再生」のように、位置を動かしてすぐ再生を押すと、`warm` の先読みが間に合わず、再生開始に「シーク + 最初の buffer 作り」(ogg の自前デコーダーでは、目標位置の手前のページ頭からデコードし直す) の分だけ待たされる。
+  そこで、エディタの `GameAudio` は曲全体を背景スレッドで先に PCM へ展開しておく (`GameAudio(url:cache: true)` → `CachedPCMSource` / PCMCache.swift)。
+  - 展開済みの区間は memcpy だけで読めるので、先読みなしで再生を押しても、シークと最初の buffer 作りがほぼ一瞬で済む。未展開の区間は従来どおり (遅いだけで動作は同じ)
+  - 背景の展開は、いま見ている位置 (次に再生する位置、`GameAudio.warm` が教える) の近くから先に進め、終わったら曲の頭まで戻って埋める。再生中は止める。優先度は低い (utility)
+  - 使うメモリは 曲の長さ × 約 21MB/分 (44.1kHz ステレオ)。上限 200MB (約 9 分) を超える分は展開しない (`CachedPCMSource.init` の `memoryLimitMB`)
+  - 展開は、曲の長さと端末の速さによって、開いてから数十秒〜数分かかる。SETTING の下の「再生開始の下ごしらえ ○ ms (先読みなし・**曲は展開済み** / 曲は未展開)」で、その位置が済んでいるか分かる。「未展開」で待たされるのは、まだ背景の展開がそこまで届いていないとき
+  - 0.75 倍などの伸ばした音 (`StretchedPCMSource`) も、元の曲を読む部分がこの展開済みの曲になるので速くなる (伸ばす計算そのものは従来どおり)
+- 譜面を触ったあとのキー音の表 (`keyTimes`) は、止まっている間の先読み (`scheduleWarm`) の中で作り直す。以前は再生開始の最初のフレームで作っていたので、ノーツが多い譜面で再生の出だしが引っ掛かっていた
+
+## 再生速度 / 分割 (右下のボタン)
+- ⏱ (再生速度): **1.0x / 0.75x / 0.5x / 0.25x / 0.1x** から選ぶ。数値入力はない (音が合うことを優先して、一覧の値だけにしている)
+- ▤ (分割): 一覧の最後にある **入力…** で 1/2〜1/1024 を入力できる ("48" でも "1/48" でも可)。mc の `test.divide` にも保存される
+  - 分割が細かいときは、レーンの横線は画面に収まる細かさまでしか描かない (吸着は入力した分割のまま)
+- 再生は全部の速度でエンジン方式 (`GameAudio`)。AVAudioPlayer (従来方式) は、エンジンを作れなかったときの予備だけ (`EditorState.usesEngine`)
+  - 1.0 倍: 曲をそのまま流す
+  - 1.0 倍未満 (0.75 / 0.5 / 0.25 / 0.1): **自前の時間伸縮** (`StretchedPCMSource` / TimeStretch.swift) で伸ばした音を流す。音程は変えない
+    - 以前の 0.5〜0.75 倍は AVAudioPlayer で鳴らしていたが、音が大きくズレたため、同じ方式にそろえた
+    - 以前は `AVAudioUnitTimePitch` を使っていたが、その内部遅延は速度によって大きく変わり、正しく補正できなかった (0.5倍未満で曲と譜面が大きくズレる原因)
+    - 今は、速度に伸ばした音そのものをデコード時に作って、ふつうの速度の PCM として player → mixer に直結で流す。
+      出力 n フレーム目 = 元の曲の (開始位置 + n × 速度) フレーム付近、と作り方で決まっているので、遅延の見積もりが要らない
+    - 時計は速度 1.0 と同じ仕組み (`refreshAnchor` が実際に鳴っているサンプル位置で毎フレーム合わせ直す。経過時間 × 速度 が曲の進み)
+    - 方式はフェーズボコーダー (窓 1024、位相ロックつき)。音の重心は曲と同じ位置に来る。ドラムなど鋭い音の立ち上がりは少しにじむ (実測: 3ms のクリックで、0.25倍は前後 約15〜20ms、0.1倍は前 約50ms・後 約70ms。いずれも「伸ばした後の時間」での幅)
+    - **音が途切れる問題 (0.5倍未満で同じところを細切れに鳴らす)** への対策: 伸ばした音は再生に間に合う速さで作り続ける必要がある。
+      以前の実装は、最適化なしのビルドだと実時間の約2倍の速さでしか作れず、少し忙しくなっただけで間に合わなくなっていた。
+      今は FFT を Float + ポインタに書き直し、左右を 1 本の複素 FFT にまとめて (FFT は 1 ホップ 2 回)、作業領域を使い回すことで、同じ音を最適化なしでも約 40 倍の速さで作れる (音は以前と同じ。対数スペクトル距離 0.01dB)。
+      あわせて、伸ばした音は先に作っておく量を 10 個 → 24 個 (約 4.5 秒ぶん) に増やした (`GameAudio.stretchedQueued`)。
+    - SETTING の下のチェックボックス (保存される。次の再生から反映):
+      - **立ち上がりをはっきりさせる**: 伸ばす窓を 1024 → 512 にする (`GameAudio.setStretchSize`)。実測でにじみがほぼ半分 (0.1倍: 前46ms・後74ms → 前26ms・後36ms、0.25倍: 前22ms・後17ms → 前9ms・後15ms)。代わりに 60Hz 付近の低音の振幅が ±14% ゆらぐ (100Hz 以上は変わらない)
+    - **再生ボタンの反応**: 停止中は、位置が止まって 0.04 秒たつと、その位置の音を先に用意する (`EditorState.scheduleWarm` → `GameAudio.warm`)。
+      用意するのは最初の数個 (`idleQueued` = 4) だけにして、再生が始まってから目標 (伸ばした音は 24 個) まで増やす。
+      以前は用意のたびに 24 個ぶんを作り続けて (最適化なしのビルドで約 1 秒)、その間 CPU を使っていた
+    - 診断: 再生を止めると、SETTING の下の表示に「先読みの残り最小 x/24」が出る。x が 0〜2 なら作成が再生に間に合っていない。10 以上なら十分余裕がある
+    - 音が合わないと感じたら: `GameAudio.begin` の `latency` (出力遅延) と、`StretchedPCMSource` の窓の大きさ (`fftSize`。小さいほど立ち上がりがはっきりするが音は粗くなる) を見る
