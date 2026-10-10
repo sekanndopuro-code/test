@@ -71,6 +71,7 @@ final class PluginBridge {
     private let lock = NSLock()
     private var logText = ""
     private var unsupportedList: [String] = []
+    private var notified = false                       // プラグイン自身が ShowMessage / ShowTip で知らせたか (終了時の「実行しました」で上書きしないため)
     private var clickXValue: Double = 127              // 操作型プラグインに渡す、いま触れているレーン上の位置
     private var clickBeatSnapped = Beat.zero
     private var clickBeatFreeValue: Double = 0
@@ -143,7 +144,18 @@ final class PluginBridge {
             let f = clickBeatFreeValue
             lock.unlock()
             return json(beatArr(Beat.nearest(f, den: 1_048_576)))
-        case "message", "input":
+        case "message":
+            // ShowMessage: OK を押させて止めると、作譜の邪魔になる。答えは要らないので、画面の下に出すだけで、すぐ続ける
+            // (長い文章は、Adv. メニューの「出力」欄にも残す)
+            let s = text(parseArgs(argsJSON), 0)
+            if s.isEmpty { return nullJSON }
+            lock.lock()
+            logText += "[メッセージ] " + s + "\n"
+            notified = true
+            lock.unlock()
+            notice(s)
+            return nullJSON
+        case "input":
             // 操作型プラグインはメインスレッドで動くので、答えを待てない: 表示だけして、すぐ続ける (入力は nil になる)
             if Thread.isMainThread { return dialogOnMain(parseArgs(argsJSON)) }
             return dialogCall(name, parseArgs(argsJSON))
@@ -151,13 +163,10 @@ final class PluginBridge {
             let a = parseArgs(argsJSON)
             let s = text(a, 0)
             if s.isEmpty { return nullJSON }
-            if Thread.isMainThread {
-                state?.showToast(s)
-            } else {
-                DispatchQueue.main.async { [weak self] in
-                    self?.state?.showToast(s)
-                }
-            }
+            lock.lock()
+            notified = true
+            lock.unlock()
+            notice(s)
             return nullJSON
         default:
             if state == nil { return nullJSON }
@@ -181,6 +190,24 @@ final class PluginBridge {
         lock.lock()
         defer { lock.unlock() }
         return unsupportedList
+    }
+
+    /// 実行中に、プラグイン自身が ShowMessage / ShowTip で知らせたか
+    func wasNotified() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return notified
+    }
+
+    /// 画面の下に、止まらない知らせを出す (どのスレッドからでも呼べる)
+    private func notice(_ s: String) {
+        if Thread.isMainThread {
+            state?.showPluginNotice(s)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.state?.showPluginNotice(s)
+            }
+        }
     }
 
     // MARK: - メインスレッドから呼ぶ

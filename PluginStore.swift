@@ -1,9 +1,12 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 // Adv. メニューに並ぶプラグインの一覧。
 //   ・内蔵プラグイン (BuiltinPlugins) は常に先頭に並ぶ
-//   ・「プラグイン(lua)を読み込む」で入れたものは、Documents/MalodySlideEditor/Plugins/ に保存される (次回起動時も自動で読み直す)
+//   ・「プラグイン(lua)を読み込む」で入れたものは、Documents/Plugins/ に保存される (次回起動時も自動で読み直す)
+//       - Info.plist に UIFileSharingEnabled / LSSupportsOpeningDocumentsInPlace を入れると、Files アプリの「このiPad内 > (アプリ名) > Plugins」に見える。
+//         Files アプリで .lua / フォルダを入れたり消したりしたら、アプリに戻ったとき・Adv. を開いたときに一覧を読み直す (reload)
 //       - .lua を選ぶ → Plugins/<ファイル名>/ に保存。一緒に選んだ画像などもそこに入る
 //       - .zip を選ぶ → 中身を Plugins/<zip の名前>/ に展開する (.lua と画像など。Malody V のプラグインの配り方)
 //       - プラグインが読む画像 (AddSprite の画像・PluginIcon) は、その .lua と同じフォルダから探す
@@ -57,14 +60,43 @@ final class PluginStore: ObservableObject {
 
     @Published private(set) var items: [PluginItem] = []
 
+    /// プラグインの置き場所。Files アプリの「(アプリ名)」の直下に「Plugins」が見えるよう、Documents の直下に置く
     static var directory: URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs.appendingPathComponent("Plugins", isDirectory: true)
+    }
+
+    /// 前の版の置き場所 (Documents/MalodySlideEditor/Plugins)
+    private static var legacyDirectory: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs
             .appendingPathComponent("MalodySlideEditor", isDirectory: true)
             .appendingPathComponent("Plugins", isDirectory: true)
     }
 
+    /// 前の版の置き場所に入れてあったプラグインを、新しい置き場所へ移す (同じ名前が新しい方にあるときは、そちらを残す)
+    private static func migrateLegacyDirectory() {
+        let fm = FileManager.default
+        let old = legacyDirectory
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: old.path, isDirectory: &isDir), isDir.boolValue else { return }
+        try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        guard let names = try? fm.contentsOfDirectory(atPath: old.path) else { return }
+        for name in names {
+            let dst = directory.appendingPathComponent(name)
+            if fm.fileExists(atPath: dst.path) { continue }
+            try? fm.moveItem(at: old.appendingPathComponent(name), to: dst)
+        }
+        if let rest = try? fm.contentsOfDirectory(atPath: old.path), rest.isEmpty {
+            try? fm.removeItem(at: old)
+        }
+    }
+
+    /// 検査中のプラグインの id (同じものを二重に検査しないため)
+    private var inspecting = Set<String>()
+
     private init() {
+        PluginStore.migrateLegacyDirectory()
         var list: [PluginItem] = []
         for e in BuiltinPlugins.all {
             list.append(PluginItem(id: "builtin/" + e.fileName, fileName: e.fileName, source: e.source,
@@ -72,6 +104,28 @@ final class PluginStore: ObservableObject {
         }
         list.append(contentsOf: PluginStore.loadUserItems())
         items = list
+        inspectPending()
+        // Files アプリで Plugins フォルダをいじって戻ってきたとき、一覧を読み直す
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.reload()
+        }
+    }
+
+    /// Plugins フォルダの中身を読み直す (Files アプリで .lua やフォルダを足した / 消したあと)。
+    /// 内蔵プラグインはそのまま。中身が変わっていないものは、検査の結果を使い回す (毎回 Lua を動かさない)
+    func reload() {
+        var old: [String: PluginItem] = [:]
+        for it in items where !it.isBuiltin { old[it.id] = it }
+        var user: [PluginItem] = []
+        for var f in PluginStore.loadUserItems() {
+            if let o = old[f.id], o.source == f.source { f.info = o.info }
+            user.append(f)
+        }
+        items = items.filter { $0.isBuiltin } + user
         inspectPending()
     }
 
@@ -139,11 +193,13 @@ final class PluginStore: ObservableObject {
     /// 検査が済んでいないプラグインの PluginName などを読む (別スレッド)
     private func inspectPending() {
         let todo = items
-            .filter { $0.info == nil }
+            .filter { $0.info == nil && !inspecting.contains($0.id) }
             .map { LuaEngine.InspectInput(id: $0.id, name: $0.fileName, source: $0.source) }
         if todo.isEmpty { return }
+        for t in todo { inspecting.insert(t.id) }
         LuaEngine.inspect(todo) { [weak self] result in
             guard let self = self else { return }
+            for t in todo { self.inspecting.remove(t.id) }
             for (id, info) in result {
                 if let i = self.items.firstIndex(where: { $0.id == id }) {
                     self.items[i].info = info

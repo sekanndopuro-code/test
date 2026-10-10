@@ -277,30 +277,23 @@ enum LaneRenderer {
         c.stroke(p, with: .color(Color.laneCyan), lineWidth: 2.5)
     }
 
-    /// Slide modify で編集中のスライド: 動かせる点 (seg) にシアンの輪を付ける。
-    /// 選んでいる点は白い太い輪にして、その隣に「削除」ボタンを出す (当たり判定は EditorState.segDeleteRect)
+    /// Slide modify で選択中のスライド: 動かせる点 (seg) にシアンの輪を付ける (drawSegRings が false なら付けない)。
+    /// 掴んでいる点 (ドラッグ中) は白い太い輪にする
     static func drawSlideModify(_ c: inout GraphicsContext, _ g: LaneGeo, _ state: EditorState) {
         guard state.tool == .slideModify, let id = state.modifySlideID,
               let n = state.chart.notes.first(where: { $0.id == id }) else { return }
         for j in n.segs.indices {
+            let grabbed = (j == state.modifySegIndex)
+            if !grabbed && !drawSegRings { continue }
             let s = n.segs[j]
             let pt = CGPoint(x: g.px(Double(n.x + s.x)), y: g.py(n.beat.value + s.beat.value))
             if pt.y < -20 || pt.y > g.H + 20 { continue }
             let ring = Path(ellipseIn: CGRect(x: pt.x - 15, y: pt.y - 15, width: 30, height: 30))
-            if j == state.modifySegIndex {
+            if grabbed {
                 c.stroke(ring, with: .color(Color.white), lineWidth: 3)
             } else {
                 c.stroke(ring, with: .color(Color.laneCyan), lineWidth: 2)
             }
-        }
-        if let r = state.segDeleteRect(g: g) {
-            let pill = Path(roundedRect: r, cornerRadius: 8)
-            c.fill(pill, with: .color(Color(red: 0.80, green: 0.18, blue: 0.18)))
-            c.stroke(pill, with: .color(Color.white.opacity(0.85)), lineWidth: 1.5)
-            let t = Text("削除")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundColor(.white)
-            c.draw(t, at: CGPoint(x: r.midX, y: r.midY), anchor: .center)
         }
     }
 
@@ -334,6 +327,8 @@ enum LaneRenderer {
     static let barLift: CGFloat = 8
     /// スライドの始点にも棒を描くか。本家はリボンと点だけで、棒は描かない
     static let drawSlideHeadBar = false
+    /// Slide modify で選択中のスライドの seg に、動かせる目印のシアンの輪を付けるか。本家には無いので、false にすると輪は出ない (掴んでいる点の白い輪だけ残る)
+    static let drawSegRings = true
 
     static func drawNotes(_ c: inout GraphicsContext, _ g: LaneGeo, _ notes: [Note], selected: Set<UUID> = []) {
         let lo = g.beatOf(g.H) - 0.05
@@ -384,7 +379,7 @@ enum LaneRenderer {
                 let cy = g.py(curB)
                 if cy > -24 && cy < g.H + 24 {
                     let pt = CGPoint(x: g.px(curX), y: cy)
-                    if isSel { selDots.append(pt) } else { dots.append(pt) }
+                    dots.append(pt)                         // seg の点は、選択中でも通常の色のまま (本家は、赤くなるのは始点とリボンだけ)
                 }
                 prevB = curB
                 prevX = curX
@@ -405,7 +400,7 @@ enum LaneRenderer {
                 drawTap(&c, rect: rect, selected: isSel)
             }
         }
-        // 3) スライドの点 (白 → 水色の輪 → 白)。選択中は赤い輪
+        // 3) スライドの点 (白 → 水色の輪 → 白)。選択中のスライドで赤くなるのは、始点の点だけ (seg の点は通常の色)
         for pt in dots { drawDot(&c, pt, selected: false) }
         for pt in selDots { drawDot(&c, pt, selected: true) }
     }
@@ -528,8 +523,9 @@ enum StripRenderer {
     static let faceW: CGFloat = 143.5
     static let faceTop: CGFloat = 2
     static let faceBottomInset: CGFloat = 2.5
-    /// 帯の地の色 (本家の実測: ほぼ単色の暗い灰色)
-    static let faceColor = Color(red: 46.0 / 255.0, green: 44.0 / 255.0, blue: 41.0 / 255.0)
+    /// 帯・シークバーの地。本家は半透明の暗い色で、背景画像と、レーンからはみ出したノーツが透けて見える
+    /// (本家のスクリーンショットの実測: 背景を 約 58% 暗くした色)。不透明にしたいときは opacity を 1 に近づける
+    static let faceColor = Color.black.opacity(0.58)
 
     static func draw(ctx: GraphicsContext, size: CGSize, state: EditorState) {
         var c = ctx
@@ -613,13 +609,34 @@ enum StripRenderer {
 // MARK: - 曲全体シークバー
 
 enum SeekRenderer {
+    // MARK: 本家の実測値 (iPad Air 4 横画面 1180×820pt。2360×1640px のスクリーンショットから)
+
+    /// 本家のシークバーは、画面の高さより 約0.16% 長い (821.3pt / 820pt)。曲の頭は画面の下端より 1.3pt 外にある。
+    /// 再生位置の線も、ヒストグラムの 120 本も、この高さに対して並ぶ (SeekView のタッチも同じ高さで割る)
+    static let regionScale: CGFloat = 821.3 / 820.0
+    /// 現在表示しているレーンの範囲 (白っぽい帯)。本家には無いので初期値は false (true にすると、これまでどおり出る)
+    static let showViewWindow = false
+
+    /// ヒストグラムの棒 (密度の計算は SeekDensity.swift)
+    static let barColor = Color(red: 238.0 / 255.0, green: 102.0 / 255.0, blue: 100.0 / 255.0)
+    static let barMaxW: CGFloat = 67.4        // 最大の長さ。右端 (W - 0.5) から、左の帯の側面の左端まで届く。1 段 (1/20) = 3.37pt
+    static let barHeightRatio: CGFloat = 0.789      // 棒の太さ = 1 本のピッチ (6.84pt) の 0.789 倍 = 5.4pt
+    static let barTopRatio: CGFloat = 0.02          // 棒の上端は、その区間の上端から ピッチの 0.02 倍 (0.14pt) 下
+
+    /// 再生位置: 白い線 (太さ 2.3pt) の両端に、橙色の短い縦棒 (6 × 12.3pt)
+    static let playLineH: CGFloat = 2.3
+    static let capW: CGFloat = 6             // 左の縦棒の幅 (右は 5.2pt。右端の枠線に少し重なるため)
+    static let capRightW: CGFloat = 5.2
+    static let capH: CGFloat = 12.3
+    static let capColor = Color(red: 251.0 / 255.0, green: 176.0 / 255.0, blue: 57.0 / 255.0)
+
     static func draw(ctx: GraphicsContext, size: CGSize, state: EditorState) {
         var c = ctx
         let H = size.height
         let W = size.width
         let top = StripRenderer.faceTop
         let bottom = H - StripRenderer.faceBottomInset
-        // 地は本家と同じ単色 (背景画像は透かさない)
+        // 地は本家と同じ半透明の暗い色 (背景画像とはみ出したノーツが透ける)
         c.fill(Path(CGRect(x: 0, y: top, width: W, height: max(1, bottom - top))), with: .color(StripRenderer.faceColor))
         // 左の帯の側面 (暗い平行四辺形)。帯の右端 (負の座標) から 約10.5pt 右まで、上下は斜めに削れる
         let ox = StripRenderer.faceW - StripView.width
@@ -631,6 +648,67 @@ enum SeekRenderer {
         side.addLine(to: CGPoint(x: ox, y: bottom))
         side.closeSubpath()
         c.fill(side, with: .color(Color(red: 23.0 / 255.0, green: 22.0 / 255.0, blue: 20.0 / 255.0)))
+
+        let total = max(1.0, state.totalSec)
+        let regionH = H * regionScale
+        func y(_ sec: Double) -> CGFloat { regionH - CGFloat(sec / total) * regionH }
+        let x0 = ox + sideW        // 側面の右 (これより右が、シークバー本体)
+        let right = W - 0.5        // 棒・再生位置の線の右端 (右の枠線の位置)
+
+        // 側面に重なる部分を暗くするための矩形を、描きながら集める。
+        // 本家は、側面が「黒 50%」の透明な面で、棒・再生位置の線は その下を通るので、側面の中だけ半分の明るさに見える
+        var underSide: [CGRect] = []
+
+        // 表示ウィンドウ (本家には無い。showViewWindow = true のときだけ)
+        if showViewWindow {
+            let lane = state.geo(CGSize(width: 100, height: H))
+            let yTop = y(state.timeMap.sec(atBeat: max(0, lane.beatOf(0))))
+            let yBot = y(state.timeMap.sec(atBeat: max(0, lane.beatOf(H))))
+            c.fill(Path(CGRect(x: x0, y: yTop, width: W - x0, height: max(2, yBot - yTop))), with: .color(Color.white.opacity(0.12)))
+        }
+
+        // ノーツ密度のヒストグラム: 曲全体を 120 等分した 1 本 1 本。長さ = (その区間のノーツ数 ÷ 最大の区間) × barMaxW
+        let ratios = state.seekDensityRatios()
+        let n = ratios.count
+        if n > 0 {
+            let pitch = regionH / CGFloat(n)
+            for j in 0..<n {                                  // j = 0 が曲の頭 (画面の下)
+                let r = CGFloat(ratios[j])
+                if r <= 0 { continue }
+                let len = barMaxW * r
+                let yy = CGFloat(n - 1 - j) * pitch + pitch * barTopRatio
+                let rect = CGRect(x: right - len, y: yy, width: len, height: pitch * barHeightRatio)
+                c.fill(Path(rect), with: .color(barColor))
+                if rect.minX < x0 { underSide.append(rect) }
+            }
+        }
+
+        // 再生位置 (本家は 白い線 + 両端の橙色の縦棒。ヒストグラムの手前)
+        let yp = y(state.currentSec())
+        let lineRect = CGRect(x: ox, y: yp - playLineH / 2, width: right - ox, height: playLineH)
+        c.fill(Path(lineRect), with: .color(Color.white))
+        underSide.append(lineRect)
+        let leftCap = CGRect(x: ox - 0.2, y: yp - capH / 2, width: capW, height: capH)
+        let rightCap = CGRect(x: right - capRightW, y: yp - capH / 2, width: capRightW, height: capH)
+        c.fill(Path(roundedRect: leftCap, cornerRadius: 2.5), with: .color(capColor))
+        c.fill(Path(roundedRect: rightCap, cornerRadius: 2.5), with: .color(capColor))
+        underSide.append(leftCap)
+
+        // 側面の黒 50% (側面の形に切り抜いて、側面に掛かる部分だけ)
+        // 棒・線・縦棒は互いに重なるので、1 つの Path にまとめて 1 回で塗る (別々に塗ると、重なった所が二重に暗くなって、
+        // 縦棒の真ん中に暗い横線が出たり、縦棒の下の棒が透けて見えたりする)
+        var dimPath = Path()
+        for r in underSide {
+            let w = min(r.maxX, x0) - r.minX
+            if w > 0 {
+                dimPath.addRect(CGRect(x: r.minX, y: r.minY, width: w, height: r.height))
+            }
+        }
+        var dim = c
+        dim.clip(to: side)
+        dim.fill(dimPath, with: .color(Color.black.opacity(0.5)))
+
+        // 側面の縁 (棒の手前に出る明るい細い線)
         var sideEdge = Path()
         sideEdge.move(to: CGPoint(x: ox, y: top))
         sideEdge.addLine(to: CGPoint(x: ox + sideW, y: top + sideW))
@@ -638,28 +716,6 @@ enum SeekRenderer {
         sideEdge.addLine(to: CGPoint(x: ox, y: bottom))
         c.stroke(sideEdge, with: .color(Color.white.opacity(0.45)), lineWidth: 0.9)
 
-        let total = max(1.0, state.totalSec)
-        func y(_ sec: Double) -> CGFloat { H - CGFloat(sec / total) * H }
-        let x0 = ox + sideW        // 側面の右 (これより右が、シークバー本体)
-
-        // ノーツ密度 (本家のヒストグラムと同じ位置: 右端から 47pt の幅)
-        let barW: CGFloat = 47
-        for n in state.chart.notes {
-            let yy = y(state.timeMap.sec(atBeat: n.beat.value))
-            let col: Color = n.isWipe ? .wipeFill : (n.isSlide ? Color(red: 0.55, green: 0.8, blue: 0.9) : Color.white.opacity(0.7))
-            c.fill(Path(CGRect(x: W - 1 - barW, y: yy, width: barW, height: 1.2)), with: .color(col.opacity(0.7)))
-        }
-        // 表示ウィンドウ
-        let lane = state.geo(CGSize(width: 100, height: H))
-        let yTop = y(state.timeMap.sec(atBeat: max(0, lane.beatOf(0))))
-        let yBot = y(state.timeMap.sec(atBeat: max(0, lane.beatOf(H))))
-        c.fill(Path(CGRect(x: x0, y: yTop, width: W - x0, height: max(2, yBot - yTop))), with: .color(Color.white.opacity(0.12)))
-        // 再生位置
-        let yp = y(state.currentSec())
-        var p = Path()
-        p.move(to: CGPoint(x: x0, y: yp))
-        p.addLine(to: CGPoint(x: W, y: yp))
-        c.stroke(p, with: .color(Color.red.opacity(0.9)), lineWidth: 2)
         // 右の枠線 (本家の実測: 明るい細い線。時刻表示のパネルとの境目)
         var l = Path()
         l.move(to: CGPoint(x: W - 0.5, y: 0))

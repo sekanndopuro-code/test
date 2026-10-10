@@ -1,0 +1,73 @@
+import SwiftUI
+import UIKit
+
+// MARK: - META (Back / Information / More / Quit)
+//
+// 本家は、META を押すとアイコンが 5〜6 個 (Back / Information / Delete all / Upload / More / Quit) 出て、
+// More の先にもう一段メニューがある。ここでは使う 3 つだけにして、階層は作らない:
+//   ・Information … 右ウィンドウ (BPM list / Effect list と同じ滑って入る窓) で曲名・作者・オフセットなどを編集
+//   ・More (•••)  … 押した瞬間に mcz を作って、共有シートを出す (「譜面をパッケージ化してエクスポート」)
+//   ・Quit        … 押した瞬間に保存して、エディタを閉じてファイル選択へ戻る
+// 右ボタン列の入れ替わり・名前 (Back / Information / ...) の出方は EDIT と同じ (EditorView.swift の RightPanel)。
+
+extension EditorState {
+    /// META を押す。右ボタン列が META 用の 4 つ (Back / Information / More / Quit) に入れ替わる
+    func openMetaMenu() {
+        popup = .none
+        metaOpen = true
+    }
+
+    /// META の列から、いつもの列に戻る
+    func closeMetaMenu() {
+        metaOpen = false
+    }
+
+    /// More (•••): mcz を作って、すぐ共有シート (保存 / AirDrop / ファイルなど) を出す
+    func shareMCZNow() {
+        do {
+            let url = try exportPackage()
+            MCZSharer.present(url: url)
+        } catch {
+            showToast("エクスポートに失敗しました: \(error.localizedDescription)")
+        }
+    }
+
+    /// Quit: 再生を止めて、保存して、エディタを閉じる (確認ダイアログなし)
+    func quitEditor() {
+        if isPlaying { pause() }
+        saveNow()
+        onClose?()
+    }
+}
+
+// MARK: - 共有シートを、いちばん手前の画面から直接出す
+
+/// mcz の共有シート。SwiftUI の ShareLink は「もう 1 回タップ」が要るので、UIKit の UIActivityViewController を直接出す。
+/// iPad ではポップオーバーの基準 (sourceView) が無いとクラッシュするので、右ボタン列の More のあたりを基準にしている
+enum MCZSharer {
+    static func present(url: URL) {
+        guard let top = topViewController() else { return }
+        let vc = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        if let pop = vc.popoverPresentationController {
+            let b = top.view.bounds
+            pop.sourceView = top.view
+            // META の列の 3 番目 (More) の中心
+            pop.sourceRect = CGRect(x: b.maxX - RightPanel.width / 2,
+                                    y: RightPanel.edgeInset + RightPanel.slotPitch * 2.5,
+                                    width: 1, height: 1)
+            pop.permittedArrowDirections = [.right]
+        }
+        top.present(vc, animated: true)
+    }
+
+    private static func topViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let windows = scenes.flatMap { $0.windows }
+        let window = windows.first(where: { $0.isKeyWindow }) ?? windows.first
+        var top = window?.rootViewController
+        while let presented = top?.presentedViewController {
+            top = presented
+        }
+        return top
+    }
+}

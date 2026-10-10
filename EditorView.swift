@@ -68,27 +68,46 @@ struct LaneView: View {
     @State private var panBlocked = false            // ピンチ中・直後は、指が1本残ってもスクロールしない
     @GestureState private var pinchActive = false    // ピンチ中だけ true (途中で取り消されても自動で false に戻る)
 
+    /// レーンの右隣のボタン列の幅 (ノーツがレーンの右端からはみ出したとき、この下まで描く)
+    private static var spillRight: CGFloat { RightPanel.width }
+
     var body: some View {
         GeometryReader { proxy in
-            ZStack(alignment: .bottom) {
-                FrameCanvas(state: state) { ctx, size in
-                    LaneRenderer.draw(ctx: ctx, size: size, state: state)
-                }
+            let size = proxy.size
+            // レーンの左端が、エディタ全体の左端からどれだけ右にあるか (左の帯・シークバー・Adv. メニューの幅。Adv. の開閉アニメーションにも追従する)
+            let spillL = max(0, proxy.frame(in: .named(EditorView.rootSpace)).minX)
+            let spillR = Self.spillRight
+
+            // タッチを受けるのは、これまでどおりレーンの枠の中だけ。描画は下の overlay が、枠の外まで広げて行う。
+            Color.clear
                 .contentShape(Rectangle())
-                .gesture(laneGesture(size: proxy.size))
+                .gesture(laneGesture(size: size))
                 .simultaneousGesture(pinchGesture)
                 .onChange(of: pinchActive) { active in
                     if !active { pinchStart = nil }    // ピンチの onEnded が届かなかった場合の保険
                 }
-
+                .overlay(alignment: .topLeading) {
+                    // 枠をはみ出したノーツ (リボン・点・棒) も、本家と同じく左の帯・シークバー・右のボタン列の下まで描く。
+                    // 描画の座標は、いつものレーンの座標のまま (左へ spillL だけ平行移動して描くので、はみ出しは負の x になる)。
+                    // 当たり判定は、レーンの枠の中のまま変わらない (上の gesture はレーンの大きさの Color.clear にだけ付いている)。
+                    FrameCanvas(state: state) { ctx, _ in
+                        var c = ctx
+                        c.translateBy(x: spillL, y: 0)
+                        LaneRenderer.draw(ctx: c, size: size, state: state)
+                    }
+                    .frame(width: size.width + spillL + spillR, height: size.height)
+                    .offset(x: -spillL)
+                    .allowsHitTesting(false)
+                }
                 // EDIT を開いている間は、どのツール (未選択 / LASSO / Remove なども) でも常に出す。
                 // LASSO などで選んだノーツの幅を、その場で変えられるようにするため
-                if state.editing {
-                    widthBar
+                .overlay(alignment: .bottom) {
+                    if state.editing {
+                        widthBar
+                    }
                 }
-            }
         }
-        .clipped()
+        // ここで .clipped() はしない (枠の外まで描くため)。左の帯・シークバーより下の層に置くのは EditorView 側の zIndex
     }
 
     private func laneGesture(size: CGSize) -> some Gesture {
@@ -169,7 +188,7 @@ struct LaneView: View {
             let g = LaneGeo(W: proxy.size.width, H: proxy.size.height, viewBeat: 0, ppb: 1)
             LaneWidthSlider(
                 value: Binding(
-                    get: { state.widthUnits },
+                    get: { state.snapWidth(state.widthUnits) },      // グリッド有効時は、ノーツに入る幅 (1マスの整数倍) をそのまま見せる
                     set: { state.widthSliderMoved($0) }      // 選択中のノーツがあれば、その幅も変わる
                 ),
                 trackL: g.trackL,
@@ -191,6 +210,7 @@ struct LaneWidthSlider: View {
     var onBegan: () -> Void = {}                 // 指を置いた瞬間 / 離した瞬間
     var onEnded: () -> Void = {}
     @State private var grab: CGFloat? = nil      // 帯の右端を掴んだときの、指と右端のずれ
+    @GestureState private var touching = false   // 指が触れている間だけ true (取り消されても自動で false に戻る)
 
     static let touchHeight: CGFloat = 52         // 指で触れる範囲の高さ (画面の下端から)
     static let barHeight: CGFloat = 18           // 帯の高さ (本家の実測 約 18pt)
@@ -221,6 +241,7 @@ struct LaneWidthSlider: View {
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 0)
+                .updating($touching) { _, active, _ in active = true }
                 .onChanged { v in
                     if grab == nil {
                         // 帯の右端の近くを掴んだら、ずれを保ったまま動かす。それ以外はタッチした位置へ移る
@@ -238,6 +259,14 @@ struct LaneWidthSlider: View {
                     onEnded()
                 }
         )
+        .onChange(of: touching) { active in
+            // システムジェスチャーや2本目の指でタッチが取り消されると、onEnded は届かない。
+            // そのまま grab が残ると、次のタッチで onBegan が呼ばれず、選択中のノーツの幅が変わらなくなる (onEnded は何度呼んでも安全)
+            if !active {
+                grab = nil
+                onEnded()
+            }
+        }
     }
 }
 
@@ -251,6 +280,7 @@ struct StripView: View {
 
     @ObservedObject var state: EditorState
     @State private var origin: Double? = nil
+    @GestureState private var touching = false      // 指が触れている間だけ true (取り消されても自動で false に戻る)
 
     var body: some View {
         GeometryReader { proxy in
@@ -261,6 +291,7 @@ struct StripView: View {
                 .contentShape(Rectangle())
                 .gesture(
                     DragGesture(minimumDistance: 0)
+                        .updating($touching) { _, active, _ in active = true }
                         .onChanged { v in
                             if origin == nil {
                                 if state.isPlaying { state.pause() }
@@ -273,6 +304,9 @@ struct StripView: View {
                         }
                         .onEnded { _ in origin = nil }
                 )
+                .onChange(of: touching) { active in
+                    if !active { origin = nil }     // 取り消されて onEnded が届かなくても、次のドラッグが古い位置から始まらないように
+                }
 
                 // 本家の実測: − の上端は画面の上から 10.75pt、＋はその 57.25pt 下 (ボタンの高さ 45pt + すき間 12.25pt)
                 VStack(alignment: .leading, spacing: 0) {
@@ -330,19 +364,33 @@ struct SeekPanel: View {
     static let seekWidth: CGFloat = 66
     static let labelWidth: CGFloat = 38
     static var totalWidth: CGFloat { seekWidth + labelWidth }
+    /// 六角形の中心の x (このビューの左端から)。本家は、画面の左端から 205pt (左の帯 145pt + 60pt)
+    static let hexCenterX: CGFloat = 60
 
     var body: some View {
         GeometryReader { proxy in
             let H = proxy.size.height
+            // 押せる範囲は、従来どおりの縦長の長方形 (本家の六角形だと小さくて、シークバーを誤って触ってしまうため)。
             // 高さは全体の 1/5。ただし、上下の時刻表示 (縦書き) に掛からない範囲に収める (小さい画面用)
             let btnH = min(H / 5, max(60, H - 340))
             let btnW = Self.totalWidth - 2          // レーンとの間に 2pt 空ける
+            // 現在位置の白い線は左の帯の端 (145pt) で終わるので、六角形の左の頂点まで少し伸ばす (本家は線が頂点に届く)
+            let stubW = Self.hexCenterX - PlayToggleButton.hexWidth / 2 + 1
             ZStack(alignment: .topLeading) {
                 HStack(spacing: 0) {
                     SeekView(state: state, seeking: $seeking).frame(width: Self.seekWidth)
                     TimeLabelView(state: state).frame(width: Self.labelWidth)
                 }
-                PlayToggleButton(state: state, dimmed: seeking)
+                Rectangle()
+                    .fill(Color.white)
+                    .frame(width: stubW, height: 3)
+                    .position(x: stubW / 2, y: H / 2)
+                    .opacity(seeking ? 0 : 1)
+                    .allowsHitTesting(false)
+                // 見た目は六角形 (中心は hexCenterX)、押せる範囲は btnW × btnH の長方形 (左端から)
+                PlayToggleButton(state: state, dimmed: seeking,
+                                 hitSize: CGSize(width: btnW, height: btnH),
+                                 hexOffsetX: Self.hexCenterX - btnW / 2)
                     .frame(width: btnW, height: btnH)
                     .position(x: btnW / 2, y: H / 2)
             }
@@ -370,7 +418,7 @@ struct SeekView: View {
                             dragging = true
                             state.seekBegin()
                         }
-                        let f = 1.0 - Double(v.location.y / max(1, proxy.size.height))
+                        let f = 1.0 - Double(v.location.y / max(1, proxy.size.height * SeekRenderer.regionScale))      // 描画と同じ高さで割る (本家のシークバーは画面より 0.16% 長い)
                         state.seek(fraction: f)
                     }
                     .onEnded { _ in
@@ -380,13 +428,18 @@ struct SeekView: View {
             )
             .onChange(of: touching) { active in
                 seeking = active
+                if !active && dragging {        // 取り消されて onEnded が届かなかったとき (seekEnd は何度呼んでも安全)
+                    dragging = false
+                    state.seekEnd()
+                }
             }
         }
         .clipped()
     }
 }
 
-/// 再生/停止ボタン (縦長の長方形)。
+/// 再生/停止ボタン。見た目は本家と同じ六角形 (外形 100 × 86.6pt、白い縁 2.8pt、中は不透明なグレー) だが、
+/// 押せる範囲は hitSize の縦長の長方形 (六角形より大きい。六角形は押せる範囲の飾りで、タッチは受けない)。
 /// 通常の Button は「指を離した時」に反応するため、タップの長さぶん(60〜120ms)が必ず遅れる。
 /// ここでは指が触れた瞬間に切り替える (停止の体感遅延を減らすため)。
 /// 離した時に切り替える従来の動きに戻したい場合は、下の gesture を Button { state.togglePlay() } に置き換える。
@@ -394,32 +447,57 @@ struct SeekView: View {
 struct PlayToggleButton: View {
     @ObservedObject var state: EditorState
     var dimmed: Bool = false
+    /// 押せる範囲の大きさ (従来の縦長の長方形)
+    var hitSize: CGSize
+    /// 六角形の中心の、押せる範囲の中心からのずれ (右が正)
+    var hexOffsetX: CGFloat = 0
     @State private var pressed = false
+    @GestureState private var touching = false      // 指が触れている間だけ true (取り消されても自動で false に戻る)
+
+    /// 六角形の外形 (正六角形: 頂点から頂点まで 100pt、高さ 100 × √3 / 2 = 86.6pt)。本家の動画から実測
+    static let hexWidth: CGFloat = 100
+    static let hexHeight: CGFloat = 86.6
+    /// 白い縁の太さ
+    private static let border: CGFloat = 2.8
 
     var body: some View {
+        // 縁の内側の六角形 (辺からの距離を border だけ縮める。頂点から頂点までは 2 / √3 倍ぶん縮む)
+        let innerW = Self.hexWidth - Self.border * 2 * 1.1547
+        let innerH = Self.hexHeight - Self.border * 2
+        let fillColor = pressed ? Color(red: 0.60, green: 0.62, blue: 0.67) : Color(red: 128.0 / 255.0, green: 131.0 / 255.0, blue: 141.0 / 255.0)
         ZStack {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(white: pressed ? 0.60 : 0.45).opacity(0.92))
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.8), lineWidth: 1.5)
-            Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
-                .font(.system(size: 44, weight: .bold))
-                .foregroundColor(.white)
+            // 見た目の六角形。タッチは受けない (押せる範囲は、下の透明な長方形が決める)
+            ZStack {
+                HexagonShape().fill(Color.white)
+                HexagonShape().fill(fillColor).frame(width: innerW, height: innerH)
+                PlayGlyph(isPlaying: state.isPlaying)
+            }
+            .frame(width: Self.hexWidth, height: Self.hexHeight)
+            .offset(x: hexOffsetX)
+            .allowsHitTesting(false)
+            // 押せる範囲 (透明)
+            Rectangle()
+                .fill(Color.clear)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .updating($touching) { _, active, _ in active = true }
+                        .onChanged { _ in
+                            if !pressed {
+                                pressed = true
+                                state.togglePlay()
+                            }
+                        }
+                        .onEnded { _ in pressed = false }
+                )
         }
-        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .frame(width: hitSize.width, height: hitSize.height)
         .opacity(dimmed ? 0 : 1)
         .animation(.easeOut(duration: 0.12), value: dimmed)
         .allowsHitTesting(!dimmed)
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    if !pressed {
-                        pressed = true
-                        state.togglePlay()
-                    }
-                }
-                .onEnded { _ in pressed = false }
-        )
+        .onChange(of: touching) { active in
+            if !active { pressed = false }      // 取り消されても、次のタップが無視されないように
+        }
     }
 }
 
@@ -435,114 +513,247 @@ struct TimeLabelView: View {
 
 // MARK: - 右端のボタン列
 
+/// 右ボタン列の1つぶん。本家と同じく、枠も文字 (キャプション) も無く、アイコンだけを置く。
+/// 押せる範囲は、ボタン列の幅 × 1つぶんの高さ (RightPanel が決める) いっぱいまで広げてある。
+/// 選択中はアイコンがシアンになる。badge は、アイコンの右上に重ねる小さな数字 (Order で選んだ数など)
 struct PanelButton: View {
     let glyph: String
-    let caption: String
     var active: Bool = false
     var dimmed: Bool = false
+    var badge: String? = nil
     /// 文字 (glyph) の代わりに出すアイコン。引数は今のボタンの文字色 (選択中はシアン)
     var icon: ((Color) -> AnyView)? = nil
     let action: () -> Void
 
     var body: some View {
-        let fg = active ? Color.laneCyan : (dimmed ? Color.white.opacity(0.35) : Color.white)
+        let fg = active ? Color.panelBlue : (dimmed ? Color.white.opacity(0.35) : Color.white)
         Button(action: action) {
-            VStack(spacing: 1) {
+            ZStack {
                 if let icon = icon {
-                    icon(fg).frame(height: 25)
+                    icon(fg)
                 } else {
-                    Text(glyph).font(.system(size: 21, weight: .semibold))
+                    // 本家のアイコン (高さ 約36pt) と同じくらいの存在感になるよう、文字を大きく
+                    Text(glyph)
+                        .font(.system(size: 30, weight: .semibold))
+                        .foregroundColor(fg)
                 }
-                Text(caption).font(.system(size: 9, design: .monospaced))
+                if let badge = badge {
+                    Text(badge)
+                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color.laneCyan)
+                        .offset(x: 18, y: -17)
+                }
             }
-            .foregroundColor(fg)
-            .frame(width: 58, height: 50)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(active ? 0.22 : 0.07)))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(active ? Color.laneCyan : Color.white.opacity(0.25), lineWidth: 1))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-}
-
-/// LASSO ボタンの絵。点線の輪と、そこから垂れる縄 (SF Symbols に頼らず、パスで描いている)
-struct LassoIcon: View {
-    let color: Color
-
-    var body: some View {
-        Canvas { ctx, size in
-            let w = size.width, h = size.height
-            let loop = Path(ellipseIn: CGRect(x: w * 0.06, y: h * 0.04, width: w * 0.88, height: h * 0.56))
-            ctx.stroke(loop, with: .color(color),
-                       style: StrokeStyle(lineWidth: 2.2, lineCap: .round, dash: [3.4, 2.6]))
-            var rope = Path()
-            rope.move(to: CGPoint(x: w * 0.30, y: h * 0.56))
-            rope.addQuadCurve(to: CGPoint(x: w * 0.46, y: h * 0.95),
-                              control: CGPoint(x: w * 0.12, y: h * 0.80))
-            ctx.stroke(rope, with: .color(color), style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
-        }
-        .frame(width: 30, height: 25)
     }
 }
 
 struct RightPanel: View {
     @ObservedObject var state: EditorState
 
-    var body: some View {
-        VStack(spacing: 6) {
-            if state.editing {
-                editButtons
-            } else {
-                mainButtons
-            }
-            Spacer(minLength: 0)
-            Text(state.saveStatus)
-                .font(.system(size: 9))
-                .foregroundColor(Color.white.opacity(0.55))
-                .multilineTextAlignment(.center)
-                .frame(width: 58)
-            PanelButton(glyph: "⏱", caption: String(format: "%gx", state.playSpeed),
-                        active: state.popup == .speed) {
-                state.popup = state.popup == .speed ? .none : .speed
-            }
-            PanelButton(glyph: "▤", caption: "1/\(state.snapDen)", active: state.popup == .divide) {
-                state.popup = state.popup == .divide ? .none : .divide
-            }
-        }
-        .padding(.top, 8)
-        .padding(.bottom, 24)                            // 画面の下端まで届くようにしたので、ホームインジケータの所を空ける
-        .frame(maxHeight: .infinity)
-        .background(Color.black.opacity(0.35))           // 背景画像が透けて見える
-        .overlay(Rectangle().fill(Color.white.opacity(0.3)).frame(width: 1), alignment: .leading)
+    // ── 本家 (iPad Air 4 / 横画面 1180 × 820pt) のスクリーンショットから実測した値 ──
+    /// ボタン列の幅 (左の細い白線から画面の右端まで。アイコンの中心はその真ん中)
+    static let width: CGFloat = 58
+    /// アイコンの中心どうしの間隔 (本家: 68.45〜68.6pt)。アイコン自体は高さ 36pt なので、上下に 約32pt の余白が入る
+    static let slotPitch: CGFloat = 68.5
+    /// 最初のアイコンの中心は画面の上端から 45pt、最後のアイコンの中心は下端から 45pt (= 1つぶんの枠の上下に 10.75pt)
+    static let edgeInset: CGFloat = 10.75
+    /// 下に固定する 2つ (再生速度 / 分割)
+    private static let bottomCount = 2
+    /// ポップアップ (再生速度 / 分割のメニュー) の右端が、ボタン列の左端から空ける間隔 (本家: 約 10.8pt)
+    static let sideGap: CGFloat = 10.8
+    /// EDIT 中の名前 (Back / Note ...) の箱の右端が、ボタン列の左端から空ける間隔 (本家: 約 12.4pt)
+    static let labelGap: CGFloat = 12.4
+    /// ポップアップの下端が、画面の下端から浮く高さ (本家: 約 2.5pt)
+    static let popupBottomInset: CGFloat = 2.5
+
+    /// EDIT 中のアイコンの左に出る名前の濃さ。EDIT に入って 2.6 秒たつと、0.7 秒かけて消える (本家と同じ)
+    @State private var labelAlpha: Double = 1
+    @State private var labelFade: DispatchWorkItem? = nil
+
+    /// アイコンの中心どうしの間隔。本家の間隔を基本にして、入りきらないとき (EDIT 中のボタンが多いとき・小さい画面) だけ詰める。
+    /// 上の並びのボタン数は、EDIT 中は 9 (アイコンが増える。LASSO は More メニューの中)、通常は 6
+    static func pitch(forHeight height: CGFloat, editing: Bool) -> CGFloat {
+        let topCount = editing ? 9 : 6
+        return min(slotPitch, (height - edgeInset * 2) / CGFloat(topCount + bottomCount))
     }
 
-    private var mainButtons: some View {
-        VStack(spacing: 6) {
-            PanelButton(glyph: "✎", caption: "EDIT", icon: { AnyView(PanelIconView(kind: .edit, color: $0)) }) {
+    /// EDIT 中の More ボタン (上から 8 番目) の中心の高さ。More メニューは、これを基準に置く
+    static func moreCenterY(forHeight height: CGFloat) -> CGFloat {
+        edgeInset + pitch(forHeight: height, editing: true) * 7.5
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let pitch = Self.pitch(forHeight: proxy.size.height, editing: state.editing)
+            VStack(spacing: 0) {
+                // EDIT / Back で、アイコン列が右へ滑って入れ替わる (入れ替わり中は 2つが重なるので ZStack に入れる)
+                ZStack(alignment: .top) {
+                    if state.editing {
+                        editButtons(pitch: pitch)
+                            .transition(.panelSwap)
+                    } else if state.metaOpen {
+                        metaButtons(pitch: pitch)
+                            .transition(.panelSwap)
+                    } else {
+                        mainButtons(pitch: pitch)
+                            .transition(.panelSwap)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: state.editing)
+                .animation(.easeInOut(duration: 0.2), value: state.metaOpen)
+                Spacer(minLength: 0)
+                // 下の2つは本家と同じ絵 (上: 再生速度のメーター / 下: 分割 LFB の定規)。メニューが開いても色は変えない (本家も白のまま)
+                PanelButton(glyph: "⏱", icon: { AnyView(PanelIconView(kind: .speed, color: $0)) }) {
+                    state.popup = state.popup == .speed ? .none : .speed
+                }
+                .frame(height: pitch)
+                PanelButton(glyph: "▤", icon: { AnyView(PanelIconView(kind: .divide, color: $0)) }) {
+                    state.popup = state.popup == .divide ? .none : .divide
+                }
+                .frame(height: pitch)
+            }
+            .padding(.vertical, Self.edgeInset)
+            .overlay(alignment: .topLeading) {
+                labelColumn(pitch: pitch)
+                    .animation(.easeInOut(duration: 0.2), value: state.editing)
+                    .animation(.easeInOut(duration: 0.2), value: state.metaOpen)
+            }
+            .overlay(alignment: .bottom) {
+                // 保存の状態 (オートセーブ)。下の2つのアイコンの上の余白に、小さく出す (レイアウトには影響しない)
+                Text(state.saveStatus)
+                    .font(.system(size: 9))
+                    .foregroundColor(Color.white.opacity(0.55))
+                    .multilineTextAlignment(.center)
+                    .frame(width: Self.width - 4)
+                    .padding(.bottom, Self.edgeInset + pitch * CGFloat(Self.bottomCount) + 1)
+                    .allowsHitTesting(false)
+            }
+        }
+        // BPM / Effect の右ウィンドウが開いているあいだは、本家と同じくアイコンが見えなくなる (ウィンドウが列の上まで覆う)
+        .opacity(state.sidePanel == nil ? 1 : 0)
+        .frame(width: Self.width)
+        .frame(maxHeight: .infinity)
+        .background(Color.black.opacity(0.35))           // 背景画像とはみ出したノーツが透けて見える
+        .overlay(Rectangle().fill(Color.white.opacity(0.6)).frame(width: 1), alignment: .leading)   // 本家は左端に細い白線
+        .onChange(of: state.editing) { editing in
+            restartLabelTimer(editing)
+        }
+        .onChange(of: state.metaOpen) { open in
+            restartLabelTimer(open)
+        }
+    }
+
+    /// EDIT 中のアイコンの左に出る名前 (上から、editButtons の並びと同じ順)
+    private var editLabels: [String] {
+        ["Back", "Note", "Wipe", state.slideDraft != nil ? "Done" : "Slide", "Remove",
+         "Order", "Adv.", "More", "Undo / Redo"]
+    }
+
+    /// META 中のアイコンの左に出る名前 (上から、metaButtons の並びと同じ順)
+    private var metaLabels: [String] { ["Back", "Information", "More", "Quit"] }
+
+    /// 名前の列。ボタン列の左端のすぐ左 (レーンの上) に、右そろえで並ぶ。タッチは下のレーンへ通す
+    @ViewBuilder
+    private func labelColumn(pitch: CGFloat) -> some View {
+        if state.editing || state.metaOpen {
+            VStack(alignment: .trailing, spacing: 0) {
+                ForEach(Array((state.editing ? editLabels : metaLabels).enumerated()), id: \.offset) { entry in
+                    PanelEditLabel(text: entry.element)
+                        .frame(height: pitch)
+                }
+            }
+            .padding(.top, Self.edgeInset)
+            .fixedSize()
+            .frame(width: 0, alignment: .trailing)      // 幅 0 の枠の右端にそろえる = 列は、枠の左側へ伸びる
+            .offset(x: -Self.labelGap)
+            .opacity(labelAlpha)
+            .allowsHitTesting(false)
+            .transition(.panelSwap)
+        }
+    }
+
+    /// 名前を出して、しばらくしたら消す
+    private func restartLabelTimer(_ editing: Bool) {
+        labelFade?.cancel()
+        labelFade = nil
+        guard editing else { return }
+        labelAlpha = 1
+        let work = DispatchWorkItem {
+            withAnimation(.easeOut(duration: 0.7)) { labelAlpha = 0 }
+        }
+        labelFade = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.6, execute: work)
+    }
+
+    private func mainButtons(pitch: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            PanelButton(glyph: "✎", icon: { AnyView(PanelIconView(kind: .edit, color: $0)) }) {
                 state.popup = .none
                 state.editing = true
             }
-            PanelButton(glyph: "♩", caption: "BPM", icon: { AnyView(PanelIconView(kind: .bpm, color: $0)) }) {
-                state.sheet = .bpm
+            .frame(height: pitch)
+            PanelButton(glyph: "♩", icon: { AnyView(PanelIconView(kind: .bpm, color: $0)) }) {
+                state.openSidePanel(.bpm)
             }
-            PanelButton(glyph: "✦", caption: "EFFECT") { state.sheet = .effect }     // scroll / jump (BPM の下)。アイコンは未作成で文字のまま
+            .frame(height: pitch)
+            // scroll / jump (BPM の下)。アイコンは未作成で文字のまま
+            PanelButton(glyph: "✦") { state.openSidePanel(.effect) }
+                .frame(height: pitch)
             // TEST のアイコンは、本家の 3番目 (カチンコ)
-            PanelButton(glyph: "▶︎|", caption: "TEST", icon: { AnyView(PanelIconView(kind: .test, color: $0)) }) {
+            PanelButton(glyph: "▶︎|", icon: { AnyView(PanelIconView(kind: .test, color: $0)) }) {
                 state.startTestPlay()
             }
-            PanelButton(glyph: "≡", caption: "META", icon: { AnyView(PanelIconView(kind: .meta, color: $0)) }) {
-                state.sheet = .meta
+            .frame(height: pitch)
+            // META: 押すと右ボタン列が Back / Information / More / Quit に入れ替わる (EditorState+Meta.swift)
+            PanelButton(glyph: "≡", icon: { AnyView(PanelIconView(kind: .meta, color: $0)) }) {
+                state.openMetaMenu()
             }
-            PanelButton(glyph: "⚙︎", caption: "SETTING", active: state.showSetting,
+            .frame(height: pitch)
+            // SETTING: BPM / Effect と同じ、右から滑って入るウィンドウ (SideWindow.swift)
+            PanelButton(glyph: "⚙︎",
                         icon: { AnyView(PanelIconView(kind: .setting, color: $0)) }) {
-                state.popup = .none
-                state.showSetting.toggle()
+                state.openSidePanel(.setting)
             }
+            .frame(height: pitch)
         }
     }
 
-    private var editButtons: some View {
-        VStack(spacing: 6) {
-            PanelButton(glyph: "←", caption: "Back") {
+    /// META を押した後の列。本家の 6 つのうち、使う Information / More / Quit だけ (階層なし)
+    private func metaButtons(pitch: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            PanelButton(glyph: "←", icon: { AnyView(PanelIconView(kind: .back, color: $0)) }) {      // Back
+                state.closeMetaMenu()
+            }
+            .frame(height: pitch)
+            PanelButton(glyph: "i", icon: { AnyView(InfoIcon(color: $0)) }) {      // Information (右ウィンドウ)
+                state.openSidePanel(.information)
+            }
+            .frame(height: pitch)
+            PanelButton(glyph: "•••", icon: { AnyView(PanelIconView(kind: .more, color: $0)) }) {      // More: すぐ mcz を共有
+                state.shareMCZNow()
+            }
+            .frame(height: pitch)
+            PanelButton(glyph: "⏻", icon: { AnyView(PowerIcon(color: $0)) }) {      // Quit: すぐ保存して閉じる
+                state.quitEditor()
+            }
+            .frame(height: pitch)
+        }
+    }
+
+    /// Slide のアイコン。スライド作成中 (始点を置いたあと) は「完」の文字になるので、アイコンは出さない
+    private func slideIconBuilder() -> ((Color) -> AnyView)? {
+        if state.slideDraft != nil { return nil }
+        return { AnyView(PanelIconView(kind: .slide, color: $0)) }
+    }
+
+    private func editButtons(pitch: CGFloat) -> some View {
+        let slideIcon = slideIconBuilder()
+        return VStack(spacing: 0) {
+            PanelButton(glyph: "←", icon: { AnyView(PanelIconView(kind: .back, color: $0)) }) {      // Back
                 state.advOpen = false
                 state.stopInteractivePlugin()
                 if state.tool == .plugin { state.tool = .unselected }
@@ -552,59 +763,53 @@ struct RightPanel: View {
                 state.ghost = nil
                 state.popup = .none
             }
+            .frame(height: pitch)
             // 選択中のアイコンをもう一度タップすると、未選択に戻る (未選択 = レーンの上下スライド / ピンチだけ)
-            PanelButton(glyph: "▬", caption: "Note", active: state.tool == .note) { state.toggleTool(.note) }
-            PanelButton(glyph: "◆", caption: "Wipe", active: state.tool == .wipe) { state.toggleTool(.wipe) }
+            PanelButton(glyph: "▬", active: state.tool == .note,
+                        icon: { AnyView(PanelIconView(kind: .note, color: $0)) }) { state.toggleTool(.note) }      // Note
+                .frame(height: pitch)
+            PanelButton(glyph: "◆", active: state.tool == .wipe,
+                        icon: { AnyView(PanelIconView(kind: .wipe, color: $0)) }) { state.toggleTool(.wipe) }      // Wipe
+                .frame(height: pitch)
             // スライド作成中 (始点を置いたあと) は「完」になり、押すとその始点の seg 配置を終える
-            PanelButton(glyph: state.slideDraft != nil ? "完" : "⌇", caption: "Slide", active: state.tool == .slide) {
+            PanelButton(glyph: state.slideDraft != nil ? "完" : "⌇", active: state.tool == .slide, icon: slideIcon) {      // Slide
                 if state.slideDraft != nil { state.finishSlide() } else { state.toggleTool(.slide) }
             }
+            .frame(height: pitch)
             // 選択中のノーツがあれば、それを削除する。何も選択していなければ Remove ツールの ON/OFF (タップで1個ずつ消す)
-            PanelButton(glyph: "✕", caption: "Remove", active: state.tool == .remove) { state.removeButtonTapped() }
-            // 指でなぞって囲んだ範囲のノーツを、まとめて選択に追加する (お絵描きソフトの投げ縄)。もう一度タップで未選択に戻る
-            PanelButton(glyph: "◌", caption: "LASSO", active: state.tool == .lasso,
-                        icon: { AnyView(LassoIcon(color: $0)) }) {
-                state.toggleTool(.lasso)
-                if state.tool == .lasso {
-                    state.showToast("指でなぞって囲んだノーツを選択に追加します (タップで解除)")
-                }
-            }
+            PanelButton(glyph: "✕", active: state.tool == .remove,
+                        icon: { AnyView(PanelIconView(kind: .remove, color: $0)) }) { state.removeButtonTapped() }      // Remove
+                .frame(height: pitch)
             // 「順番に選択」: スライドをタップした順に番号を付ける。結合系プラグイン (折り返し敷など) が、この順番で結合する。
-            // ツールを離れても順番は残る (caption の数字が、選んだ数)。空きをタップするとリセット
-            PanelButton(glyph: "①②", caption: state.orderIDs.isEmpty ? "Order" : "Order \(state.orderIDs.count)",
-                        active: state.tool == .order) {
+            // ツールを離れても順番は残る (右上の数字が、選んだ数)。空きをタップするとリセット
+            PanelButton(glyph: "①②", active: state.tool == .order,      // Order
+                        badge: state.orderIDs.isEmpty ? nil : "\(state.orderIDs.count)") {
                 state.toggleTool(.order)
                 if state.tool == .order {
                     state.showToast("スライドをタップした順に番号を付けます (空きをタップでリセット)")
                 }
             }
+            .frame(height: pitch)
             // Lua プラグインのメニュー。開くとレーンが細くなり、再生ボタンとレーンの間にプラグインの一覧が出る
-            PanelButton(glyph: "λ", caption: "Adv.", active: state.advOpen) {
+            PanelButton(glyph: "λ", active: state.advOpen) {      // Adv.
                 state.popup = .none
                 withAnimation(.easeInOut(duration: 0.22)) { state.advOpen.toggle() }
             }
-            PanelButton(glyph: "•••", caption: "More",
-                        active: state.popup == .more || state.tool == .selectRange || state.tool == .slideModify) {
+            .frame(height: pitch)
+            PanelButton(glyph: "•••",      // More
+                        active: state.popup == .more || state.tool == .selectRange || state.tool == .lasso || state.tool == .slideModify,
+                        icon: { AnyView(PanelIconView(kind: .more, color: $0)) }) {
                 state.popup = state.popup == .more ? .none : .more
             }
-            HStack(spacing: 4) {
-                smallButton("↶", enabled: state.undoCount > 0) { state.undo() }
-                smallButton("↷", enabled: state.redoCount > 0) { state.redo() }
+            .frame(height: pitch)
+            HStack(spacing: 0) {
+                PanelButton(glyph: "↶", dimmed: state.undoCount == 0) { state.undo() }      // Undo
+                    .disabled(state.undoCount == 0)
+                PanelButton(glyph: "↷", dimmed: state.redoCount == 0) { state.redo() }      // Redo
+                    .disabled(state.redoCount == 0)
             }
+            .frame(height: pitch)
         }
-    }
-
-    private func smallButton(_ t: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(t)
-                .font(.system(size: 20, weight: .bold))
-                .foregroundColor(enabled ? Color.white : Color.white.opacity(0.25))
-                .frame(width: 27, height: 36)
-                .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.07)))
-                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.25), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
     }
 }
 
@@ -612,6 +817,9 @@ struct RightPanel: View {
 
 struct EditorView: View {
     @ObservedObject var state: EditorState
+
+    /// 画面全体の座標系の名前。LaneView が「自分の左端が画面の左端からどれだけ右か」を知るために使う
+    static let rootSpace = "editorRoot"
 
     /// 右下の分割の「入力…」で開く数値入力
     @State private var showInput = false
@@ -626,15 +834,19 @@ struct EditorView: View {
                 .frame(width: advWidth, alignment: .leading)
                 .clipped()
                 .allowsHitTesting(advWidth > 0)
+            // レーンは、左の帯・シークバー・Adv. メニュー・右のボタン列より下の層 (zIndex -1) に置く。
+            // 枠 (レーンの幅) からはみ出したノーツが、それらの下に透けて見えるようにするため (描画は LaneView 側で枠の外まで広げている)
             LaneView(state: state)
-            RightPanel(state: state).frame(width: 66)
+                .zIndex(-1)
+            RightPanel(state: state)
         }
+        .coordinateSpace(name: Self.rootSpace)
         .background(EditorBackground(state: state))      // 背景画像 (無いときは黒)。ノーツ・レーン・帯は透明に描いて、これを透かす
         .ignoresSafeArea(.keyboard, edges: .bottom)      // 数値入力のキーボードで、エディタ全体が縮まないように
-        .overlay(slideModifyLayer, alignment: .top)
         .overlay(popupLayer)
-        .overlay(settingLayer)
         .overlay(PluginDialogLayer(state: state))
+        .overlay(gridDialogLayer)
+        .overlay(SidePanelLayer(state: state))           // BPM list / Effect list / Information / SETTING: 右からスライドして出る (トーストより下の層)
         .overlay(toastLayer, alignment: .bottom)
         .alert("分割 (1/n)", isPresented: $showInput) {
             TextField("2〜1024", text: $inputText)
@@ -647,18 +859,6 @@ struct EditorView: View {
         .fullScreenCover(item: $state.testLaunch) { launch in
             TestPlayScreen(launch: launch) { state.testLaunch = nil }
         }
-        .sheet(item: $state.sheet) { s in
-            switch s {
-            case .bpm:
-                BPMListSheet(state: state)
-            case .effect:
-                EffectListSheet(state: state)
-            case .grid:
-                GridSettingsSheet(state: state)
-            case .meta:
-                MetaSheet(state: state)
-            }
-        }
     }
 
     /// Adv. メニューの今の幅 (EDIT 中に開いているときだけ。閉じているときは 0)
@@ -666,39 +866,32 @@ struct EditorView: View {
         (state.editing && state.advOpen) ? AdvPanel.width : 0
     }
 
-    /// Slide modify の窓。レーンの上に重ねるだけで、背景は暗くせず、窓の外のタップも奪わない。
-    /// (「コンパクト」にすると上の細い横長だけになり、レーンのスライドを直接タップ・ドラッグして編集できる)
+    /// Grid settings のダイアログ。シートと違って、下からせり上がる動きがなく、押した瞬間に出る
     @ViewBuilder
-    private var slideModifyLayer: some View {
-        if state.editing && state.tool == .slideModify {
-            SlideModifyWindow(state: state)
-                .frame(maxWidth: 460)
-                .padding(.leading, StripView.width + SeekPanel.totalWidth + advWidth + 8)     // 左の帯・シークバー・Adv. メニューを避けて、レーンの上に置く
-                .padding(.trailing, 66 + 8)                           // 右のボタン列を避ける
-                .padding(.top, 8)
-        }
-    }
-
-    /// SETTING ウィンドウ。背景は暗くせず、タップも奪わない
-    /// (曲を再生したまま音量を調整して、聞き比べられるように)
-    @ViewBuilder
-    private var settingLayer: some View {
-        if state.showSetting {
-            SettingWindow(state: state)
-                .padding(.trailing, 66)      // 右のボタン列を避けて、レーン側の中央に置く
+    private var gridDialogLayer: some View {
+        if state.showGridDialog {
+            GridSettingsDialog(state: state)
+                .transition(.identity)
         }
     }
 
     @ViewBuilder
     private var popupLayer: some View {
         if state.popup != .none {
-            ZStack(alignment: .bottomTrailing) {
-                Color.black.opacity(0.001)
-                    .contentShape(Rectangle())
-                    .onTapGesture { state.popup = .none }
-                popupBody
-                    .padding(.trailing, 72)
-                    .padding(.bottom, state.popup == .speed ? 66 : 8)
+            GeometryReader { proxy in
+                let isMore = state.popup == .more
+                ZStack(alignment: isMore ? .topTrailing : .bottomTrailing) {
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .onTapGesture { state.popup = .none }
+                    popupBody
+                        .padding(.trailing, RightPanel.width + RightPanel.sideGap)
+                        // 本家は、再生速度も分割も、メニューの下端が画面の下端のすぐ上にそろう。
+                        // More だけは上から: 上端が、More ボタンの中心より 263pt 上 (自作は More ボタンが本家より下なので、その分メニューも下がる)
+                        .padding(isMore ? Edge.Set.top : Edge.Set.bottom,
+                                 isMore ? moreMenuTop(height: proxy.size.height) : RightPanel.popupBottomInset)
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height)
             }
         }
     }
@@ -751,53 +944,99 @@ struct EditorView: View {
         state.applyDivideInput(inputText)
     }
 
+    /// 再生速度 / 分割のメニュー。大きさ・濃さは本家の動画から実測:
+    /// 幅 57.8pt、1行 51.6pt、上下の余白 10.4pt、黒の 50% (下の譜面が透ける)、白い細い縁 (白 70%)
+    private static let popupWidth: CGFloat = 57.8
+    private static let popupRowHeight: CGFloat = 51.6
+    private static let popupPad: CGFloat = 10.4
+
     private func popupList(_ items: [PopupItem]) -> some View {
         VStack(spacing: 0) {
             ForEach(Array(items.enumerated()), id: \.offset) { entry in
                 Button(action: entry.element.action) {
                     Text(entry.element.title)
-                        .font(.system(size: 22, weight: .semibold, design: .monospaced))
-                        .foregroundColor(entry.element.selected ? Color.laneCyan : Color.white)
-                        .frame(width: 86, height: 44)
+                        .font(PanelFont.menu(29))
+                        .foregroundColor(entry.element.selected ? Color.panelBlue : Color.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                        .padding(.horizontal, 3)
+                        .frame(width: Self.popupWidth, height: Self.popupRowHeight)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
-        .background(Color.black.opacity(0.94))
-        .overlay(Rectangle().stroke(Color.white.opacity(0.35), lineWidth: 1))
+        .padding(.vertical, Self.popupPad)
+        .background(Color.black.opacity(0.5))
+        .overlay(Rectangle().stroke(Color.white.opacity(0.7), lineWidth: 1.2))
+    }
+
+    // ── More メニュー (本家の画面収録から実測) ──
+    // 幅 275pt、1行 45.6pt、上下の余白 2pt。黒 50% の半透明 (下の譜面・背景が透ける) + 白の細い縁。
+    // アイコンの原点はメニューの左端から 21.5pt、文字の左端は 54.5pt。文字の大きさは、本家の「S」の高さ (15.5pt) に合わせている。
+    private static let moreWidth: CGFloat = 275
+    private static let moreRowHeight: CGFloat = 45.6
+    private static let morePad: CGFloat = 2
+    private static let moreTextX: CGFloat = 54.5
+    /// 本家は、メニューの上端が More ボタンの中心より 263pt 上にある
+    private static let moreTopAboveButton: CGFloat = 263
+    private static let moreRowCount = 9
+
+    /// More メニューの上端の高さ (画面の上端から)。画面の下にはみ出すときだけ、はみ出さない位置まで上げる
+    private func moreMenuTop(height: CGFloat) -> CGFloat {
+        let top = RightPanel.moreCenterY(forHeight: height) - Self.moreTopAboveButton
+        let menuHeight = Self.moreRowHeight * CGFloat(Self.moreRowCount) + Self.morePad * 2
+        return max(4, min(top, height - menuHeight - 4))
     }
 
     private var moreList: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            moreItem("Copy", dim: state.selectedIDs.isEmpty) { state.popup = .none; state.copySelection() }
-            moreItem("Paste", dim: state.clip.isEmpty) { state.popup = .none; state.paste() }
-            moreItem("Time range", active: state.tool == .selectRange) {
+        VStack(spacing: 0) {
+            moreItem("Copy", icon: .copy, dim: state.selectedIDs.isEmpty) { state.popup = .none; state.copySelection() }
+            moreItem("Paste", icon: .paste, dim: state.clip.isEmpty) { state.popup = .none; state.paste() }
+            moreItem("Time range", icon: .timeRange, active: state.tool == .selectRange) {
                 state.popup = .none
                 state.beginSelectRange()
             }
-            moreItem("Flip notes horizontal") { state.popup = .none; state.flipHorizontal() }
-            moreItem("Grid settings") { state.popup = .none; state.sheet = .grid }
-            moreItem("Slide modify", active: state.tool == .slideModify) {
+            // 指でなぞって囲んだ範囲のノーツを、まとめて選択に追加する (お絵描きソフトの投げ縄)。Time range と同じ「選択の道具」。
+            // もう一度選ぶと未選択に戻る (選択したノーツは残る)
+            moreItem("Lasso", icon: .lasso, active: state.tool == .lasso) {
+                state.popup = .none
+                state.toggleTool(.lasso)
+                if state.tool == .lasso {
+                    state.showToast("指でなぞって囲んだノーツを選択に追加します (タップで解除)")
+                }
+            }
+            moreItem("Flip notes horizontal", icon: .flip) { state.popup = .none; state.flipHorizontal() }
+            moreItem("Grid settings", icon: .grid) { state.popup = .none; state.showGridDialog = true }
+            moreItem("Slide modify", icon: .slideModify, active: state.tool == .slideModify) {
                 state.popup = .none
                 state.tool = .slideModify
             }
-            moreItem("Slide to Wipe") { state.popup = .none; state.slideToWipe() }
-            moreItem("Wipe to Slide") { state.popup = .none; state.wipeToSlide() }
+            moreItem("Slide to Wipe", icon: .slideToWipe) { state.popup = .none; state.slideToWipe() }
+            moreItem("Wipe to Slide", icon: .wipeToSlide) { state.popup = .none; state.wipeToSlide() }
         }
-        .frame(width: 230)
-        .background(Color.black.opacity(0.94))
-        .overlay(Rectangle().stroke(Color.white.opacity(0.35), lineWidth: 1))
-        .frame(maxHeight: .infinity, alignment: .top)
-        .padding(.top, 8)
+        .padding(.vertical, Self.morePad)
+        .frame(width: Self.moreWidth, alignment: .leading)
+        .background(Color.black.opacity(0.5))
+        .overlay(Rectangle().strokeBorder(Color.white.opacity(0.75), lineWidth: 0.7))
     }
 
-    private func moreItem(_ t: String, active: Bool = false, dim: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(t)
-                .font(.system(size: 17))
-                .foregroundColor(active ? Color.laneCyan : (dim ? Color.white.opacity(0.4) : Color.white))
-                .padding(.horizontal, 14)
-                .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+    /// 選択中のツール (Time range / Lasso / Slide modify) は、右ボタン列と同じ青。使えない項目 (選択なし / クリップなし) は薄く
+    private func moreItem(_ t: String, icon: MoreMenuIconKind, active: Bool = false, dim: Bool = false,
+                          action: @escaping () -> Void) -> some View {
+        let fg = active ? Color.panelBlue : (dim ? Color.white.opacity(0.4) : Color.white)
+        return Button(action: action) {
+            ZStack(alignment: .leading) {
+                MoreMenuIcon(kind: icon, color: fg)
+                    .frame(width: 64, height: Self.moreRowHeight)
+                Text(t)
+                    .font(PanelFont.label(22))
+                    .foregroundColor(fg)
+                    .lineLimit(1)
+                    .padding(.leading, Self.moreTextX)
+            }
+            .frame(width: Self.moreWidth, height: Self.moreRowHeight, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -808,162 +1047,16 @@ struct EditorView: View {
             Text(t)
                 .font(.system(size: 14))
                 .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .lineLimit(5)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(Capsule().fill(Color(white: 0.15).opacity(0.95)))
-                .overlay(Capsule().stroke(Color.white.opacity(0.3), lineWidth: 1))
+                .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color(white: 0.15).opacity(0.95)))
+                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Color.white.opacity(0.3), lineWidth: 1))
+                .padding(.horizontal, 24)
                 .padding(.bottom, 60)
                 .allowsHitTesting(false)
-        }
-    }
-}
-
-// MARK: - SETTING ウィンドウ (曲の音量 / ノーツサウンドの音量)
-
-struct SettingWindow: View {
-    @ObservedObject var state: EditorState
-
-    var body: some View {
-        VStack(spacing: 18) {
-            HStack {
-                Text("SETTING")
-                    .font(.system(size: 16, weight: .bold, design: .monospaced))
-                Spacer()
-                Button {
-                    state.showSetting = false
-                } label: {
-                    Text("✕")
-                        .font(.system(size: 18, weight: .bold))
-                        .frame(width: 36, height: 36)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-
-            volumeRow(title: "曲の音量", value: $state.musicVolume, onEditingChanged: nil)
-
-            volumeRow(title: "ノーツサウンドの音量", value: $state.noteVolume) { editing in
-                // 指を離した時に1回鳴らして、音量を確かめられるようにする
-                if !editing { KeySound.shared.playNow() }
-            }
-
-            Text("ノーツサウンドは、再生中にノーツが再生ラインに触れる瞬間と、テストプレイで叩いた瞬間に鳴ります。0% で消せます。")
-                .font(.system(size: 11))
-                .foregroundColor(Color.white.opacity(0.55))
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            Divider().background(Color.white.opacity(0.3))
-
-            if state.bgImage != nil {
-                bgRow
-
-                Divider().background(Color.white.opacity(0.3))
-            }
-
-            checkRow(title: "立ち上がりをはっきりさせる (伸ばす窓を小さく)",
-                     note: "伸ばした音の、ドラムなどの出だしのにじみが約半分になります (0.1倍で前46ms・後74ms → 前26ms・後36ms)。そのかわり 60Hz付近の低音が少しゆらぎます。次の再生から変わります。",
-                     isOn: $state.sharpStretch)
-
-            Divider().background(Color.white.opacity(0.3))
-
-            checkRow(title: "beatがマイナスのsegを置くのを許可する",
-                     note: "オフのとき: Slide ツールで始点より前をタップすると、「完」を押さなくても seg の配置を終えられます。Slide modify では始点より前に置けず、ドラッグしても始点の位置で止まります。オンにすると、始点より前 (beat がマイナス) にも seg を置けます。",
-                     isOn: $state.allowNegativeSeg)
-
-            Divider().background(Color.white.opacity(0.3))
-
-            holdRow
-
-            if !state.playInfo.isEmpty {
-                Text(state.playInfo)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(Color.laneCyan.opacity(0.8))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .foregroundColor(.white)
-        .padding(16)
-        .frame(width: 340)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.94)))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.35), lineWidth: 1))
-    }
-
-    /// 背景画像の暗さ (0〜95%、5% 刻み。保存される。背景画像を読み込んでいるときだけ出る)
-    private var bgRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("背景画像の暗さ")
-                    .font(.system(size: 15))
-                Spacer()
-                Text("\(Int((state.bgDim * 100).rounded()))%")
-                    .font(.system(size: 15, weight: .semibold, design: .monospaced))
-                    .foregroundColor(Color.laneCyan)
-            }
-            Slider(value: $state.bgDim, in: 0...0.95, step: 0.05)
-                .tint(Color.laneCyan)
-        }
-    }
-
-    /// 長押しで選択解除までの秒数 (1.0〜5.0 秒、0.1 秒刻み。保存される)
-    private var holdRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("長押しで選択解除")
-                    .font(.system(size: 15))
-                Spacer()
-                Text(String(format: "%.1f 秒", state.holdDeselectSec))
-                    .font(.system(size: 15, weight: .semibold, design: .monospaced))
-                    .foregroundColor(Color.laneCyan)
-            }
-            Slider(value: $state.holdDeselectSec, in: EditorState.holdRange, step: 0.1)
-                .tint(Color.laneCyan)
-            Text("編集ツールを選んでいないとき、レーンを動かさずに押し続けると、選択中のノーツが全部解除されます。")
-                .font(.system(size: 11))
-                .foregroundColor(Color.white.opacity(0.55))
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func checkRow(title: String, note: String, isOn: Binding<Bool>) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Button {
-                isOn.wrappedValue.toggle()
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: isOn.wrappedValue ? "checkmark.square.fill" : "square")
-                        .font(.system(size: 22))
-                        .foregroundColor(isOn.wrappedValue ? Color.laneCyan : Color.white.opacity(0.7))
-                    Text(title)
-                        .font(.system(size: 14))
-                        .multilineTextAlignment(.leading)
-                    Spacer(minLength: 0)
-                }
-                .frame(minHeight: 36)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            Text(note)
-                .font(.system(size: 11))
-                .foregroundColor(Color.white.opacity(0.55))
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func volumeRow(title: String, value: Binding<Double>,
-                           onEditingChanged: ((Bool) -> Void)?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(title)
-                    .font(.system(size: 15))
-                Spacer()
-                Text("\(Int((value.wrappedValue * 100).rounded()))%")
-                    .font(.system(size: 15, weight: .semibold, design: .monospaced))
-                    .foregroundColor(Color.laneCyan)
-            }
-            Slider(value: value, in: 0...1, step: 0.05, onEditingChanged: { editing in
-                onEditingChanged?(editing)
-            })
-            .tint(Color.laneCyan)
         }
     }
 }

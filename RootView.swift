@@ -28,6 +28,11 @@ struct RootView: View {
                 EditorView(state: st)
                     // 本家と同じく、画面の下端 (ホームインジケータの下) までUIを続ける
                     .ignoresSafeArea(.container, edges: [.top, .leading, .trailing, .bottom])
+                    // ホームバー (画面下の白い横棒) を隠し、下端からの1回目の上スワイプではホームに戻らないようにする。
+                    // (下端を触る操作 — ノーツ幅スライダーやレーン下側のドラッグ — で、うっかりホーム画面へ戻るのを防ぐ。
+                    //  ホームへ戻るときは、下端から2回スワイプする)
+                    .persistentSystemOverlays(.hidden)
+                    .defersSystemGestures(on: .bottom)
             } else {
                 importView
             }
@@ -124,7 +129,12 @@ struct RootView: View {
     }
 
     private func openEditor() {
-        guard let data = mcData, let url = mcURL else { return }
+        guard let url = mcURL else { return }
+        // 最初に選んだ時点の mcData は、編集前の古い内容。Quit で戻ってきたあとにそれで開き直すと、
+        // 編集した内容が消えるうえ、オートセーブ (アプリを離れたときの保存も) で、保存済みのファイルが古い内容で上書きされてしまう。
+        // → 開くたびに、ファイルから読み直す (読めなかったときだけ、選んだときの内容を使う)
+        guard let data = (try? Data(contentsOf: url)) ?? mcData else { return }
+        mcData = data
         busy = true
         message = ""
         Task { @MainActor in

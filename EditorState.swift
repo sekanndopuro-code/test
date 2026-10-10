@@ -33,20 +33,12 @@ enum EditPopup: Equatable {
     case none, speed, divide, more
 }
 
-enum ActiveSheet: Identifiable {
+/// 右側からスライドして出るウィンドウ (BPM list / Effect list / Information / SETTING)。シートではなく EditorView に重ねる (SideWindow.swift)
+enum SidePanel {
     case bpm
     case effect
-    case grid
-    case meta
-
-    var id: String {
-        switch self {
-        case .bpm: return "bpm"
-        case .effect: return "effect"
-        case .grid: return "grid"
-        case .meta: return "meta"
-        }
-    }
+    case information      // META → Information (曲名・作者・オフセットなど)
+    case setting          // SETTING (音量・各種チェックボックス)
 }
 
 /// 作成中のスライド (Slide ツール)。1回目のタップ = 始点、2回目以降のタップ = seg。
@@ -75,9 +67,10 @@ struct LaneGeo {
     var viewBeat: Double      // 再生ライン(シアンの横棒)の位置の拍
     var ppb: Double           // 1拍あたりのピクセル
 
-    // 本家 (iPad Air 4) の縦線を実測した値: レーンの左端 = ビューの左端 + 25.2pt、幅 = ビューの幅 - 27.4pt (837.6pt)
+    // 本家 (iPad Air 4) の縦線を実測した値: レーンの左端 = ビューの左端 + 25.2pt、右端 = ビューの右端 - 10.2pt (幅 837.6pt)。
+    // (ビューの幅 873pt = 画面 1180 - 左の帯 145 - シークバーと時刻 104 - 右のボタン列 58)
     var trackL: CGFloat { 25.2 }
-    var trackW: CGFloat { max(10, W - 27.4) }
+    var trackW: CGFloat { max(10, W - 35.4) }
     var playY: CGFloat { H * 0.9134 }     // 再生ライン (シアンの横棒)。本家は画面の高さの 91.3% (iPad Air 4 で 749 / 820pt)
 
     func px(_ x: Double) -> CGFloat { trackL + CGFloat(x / 255.0) * trackW }
@@ -135,7 +128,7 @@ final class EditorState: ObservableObject {
     @Published var selectedIDs: Set<UUID> = []       // 選択中のノーツ (赤く表示)
     @Published var orderIDs: [UUID] = []             // 「順番に選択」(Order) で選んだスライド。タップした順。結合系プラグインがこの順番を使う
     @Published var modifySlideID: UUID? = nil        // Slide modify で編集中のスライド (選ぶと selectedIDs もそのスライドだけになる)
-    @Published var modifySegIndex: Int? = nil        // Slide modify で選んでいる点 (seg)。選ぶと隣に「削除」が出る
+    @Published var modifySegIndex: Int? = nil        // Slide modify で掴んでいる点 (seg)。ドラッグ中だけ入る (白い輪で目印を出す)
     @Published var popup: EditPopup = .none
     @Published var gridLines = 16
     @Published var gridAlign = true
@@ -159,14 +152,15 @@ final class EditorState: ObservableObject {
     @Published var ghost: Ghost? = nil
     @Published var toast: String? = nil
     @Published var saveStatus = "保存済み"
-    @Published var sheet: ActiveSheet? = nil
+    @Published var metaOpen = false           // META を押した後の右ボタン列 (Back / Information / More / Quit)。EDIT と同じく、アイコン列が入れ替わる
+    @Published var sidePanel: SidePanel? = nil    // BPM / Effect / Information / SETTING の右ウィンドウ。出し入れは openSidePanel / closeSidePanel (横から滑って一瞬で出入りする)
+    @Published var showGridDialog = false     // Grid settings のダイアログ (シートではなく EditorView の上に重ねる。アニメーションなしで一瞬で出る)
     @Published var testLaunch: TestPlayLaunch? = nil
     @Published var playInfo = ""          // 直近の再生開始に掛かった時間 (SETTING に表示する診断用)
     @Published var undoCount = 0
     @Published var redoCount = 0
 
-    // MARK: SETTING (音量。次回起動時も保存される)
-    @Published var showSetting = false
+    // MARK: SETTING (音量。次回起動時も保存される。ウィンドウは sidePanel = .setting)
     @Published var musicVolume: Double = 1.0 {          // 曲の音量 0...1
         didSet {
             UserDefaults.standard.set(musicVolume, forKey: "editor.musicVolume")
@@ -194,11 +188,21 @@ final class EditorState: ObservableObject {
         }
     }
 
-    // スライドの seg を、始点より前 (beat がマイナス) に置くのを許可するか。次回起動時も保存される。初期値はオフ
-    //   オフ: Slide ツールで始点より前をタップすると、「完」と同じく seg の配置を終える。Slide modify では始点より前に置けない
-    //   オン: 始点より前 (beat がマイナス) にも seg を置ける
-    @Published var allowNegativeSeg = false {
-        didSet { UserDefaults.standard.set(allowNegativeSeg, forKey: "editor.allowNegativeSeg") }
+    // スライドの seg を、時系列順でない位置に置くのを許可するか。次回起動時も保存される。初期値はオフ (本家と同じ)
+    //   「時系列順でない」= 直前に置いた seg (終点の seg) より前の時間。始点より前 (beat がマイナス) もこれに含まれる
+    //   オフ: Slide ツールで終点の seg より前の時間をタップすると、「完」と同じく seg の配置を終える。
+    //         Slide modify で終点の seg より前の時間をタップすると、seg は足さずに選択を外す。
+    //         seg を縦にドラッグしても、前後の seg の時間を越えない
+    //   オン: 時間を行ったり来たりする seg (beat がマイナスも) を置ける
+    @Published var allowUnorderedSeg = false {
+        didSet { UserDefaults.standard.set(allowUnorderedSeg, forKey: "editor.allowUnorderedSeg") }
+    }
+
+    // Slide modify で seg を動かすとき、縦 (時間) 方向にも動かせるようにするか。次回起動時も保存される。初期値はオフ (本家と同じ)
+    //   オフ: seg は横 (x) にだけ動く。拍 (時間) は掴んだ時のまま
+    //   オン: 縦にも動く (1/n 拍に吸着)
+    @Published var allowSegVerticalMove = false {
+        didSet { UserDefaults.standard.set(allowSegVerticalMove, forKey: "editor.allowSegVerticalMove") }
     }
 
     // MARK: ファイル
@@ -320,7 +324,12 @@ final class EditorState: ObservableObject {
         if let v = ud.object(forKey: "editor.noteVolume") as? Double { self.noteVolume = min(max(v, 0), 1) }
         if let v = ud.object(forKey: "editor.bgDim") as? Double { self.bgDim = min(max(v, 0), 0.95) }
         if let v = ud.object(forKey: "editor.sharpStretch") as? Bool { self.sharpStretch = v }
-        if let v = ud.object(forKey: "editor.allowNegativeSeg") as? Bool { self.allowNegativeSeg = v }
+        if let v = ud.object(forKey: "editor.allowUnorderedSeg") as? Bool {
+            self.allowUnorderedSeg = v
+        } else if let v = ud.object(forKey: "editor.allowNegativeSeg") as? Bool {
+            self.allowUnorderedSeg = v          // 前の版の設定「beatがマイナスのsegを置くのを許可する」の値を引き継ぐ
+        }
+        if let v = ud.object(forKey: "editor.allowSegVerticalMove") as? Bool { self.allowSegVerticalMove = v }
         if let v = ud.object(forKey: "editor.holdDeselectSec") as? Double {
             self.holdDeselectSec = min(max(v, Self.holdRange.lowerBound), Self.holdRange.upperBound)
         }
@@ -421,6 +430,25 @@ final class EditorState: ObservableObject {
         ignoredBeatCount = ignored
         let noteSec = timeMap.sec(atBeat: last) + 2.0
         totalSec = max(audioSec, noteSec, 1.0)
+        densityDirty = true          // シークバーのノーツ密度は、次に描くときに作り直す
+    }
+
+    // MARK: シークバーのノーツ密度 (本家と同じ 120 本のヒストグラム。計算は SeekDensity.swift)
+
+    private var densityRatios: [Double] = []
+    private var densityDirty = true
+    private var densityTotal = -1.0
+
+    /// 120 本それぞれの棒の長さの割合 (0...1)。[0] = 曲の頭 (画面では下)。
+    /// 譜面・BPM・曲の長さを触ったとき (recomputeTotal) だけ作り直す。毎フレーム呼んでも、中身は使い回すだけ
+    func seekDensityRatios() -> [Double] {
+        if densityDirty || densityTotal != totalSec || densityRatios.isEmpty {
+            let counts = SeekDensity.counts(notes: chart.notes, timeMap: timeMap, totalSec: totalSec)
+            densityRatios = SeekDensity.ratios(counts)
+            densityTotal = totalSec
+            densityDirty = false
+        }
+        return densityRatios
     }
 
     /// 画面に出す譜面時刻。再生中は「今フレームが画面に出る時刻」で決まるので、
@@ -527,7 +555,7 @@ final class EditorState: ObservableObject {
             a.setStretchSize(sharpStretch ? 512 : 1024)
             a.setRate(rate)                                   // 1.0 未満のときは、その速度に伸ばした音を流す (1.0 は従来と同じ)
             a.begin(chartTime: sec, offsetTotal: offSec)      // 以降の時計は、鳴っているサンプル位置から作られる
-            let stretchTag = rate < 1.0 ? "・伸ばした音(窓\(a.stretchSize))" : ""
+            let stretchTag = rate < 1.0 ? "・伸ばした音(\(a.stretchEngine))" : ""
             let cacheTag = a.hasCache ? (a.lastBeginCached ? "・曲は展開済み" : "・曲は未展開") : ""
             playInfo = String(format: "再生開始の下ごしらえ %.0f ms (%@%@%@)", a.lastBeginMs, a.lastBeginWarm ? "先読み済み" : "先読みなし", cacheTag, stretchTag)
         } else {
@@ -805,12 +833,17 @@ final class EditorState: ObservableObject {
 
     // MARK: - 小物
 
-    func showToast(_ s: String) {
+    func showToast(_ s: String, seconds: Double = 2.2) {
         toast = s
         toastWork?.cancel()
         let w = DispatchWorkItem { [weak self] in self?.toast = nil }
         toastWork = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: w)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: w)
+    }
+
+    /// プラグインからの知らせ用。画面を止めずに出す (文字が長いほど、少し長く出る)
+    func showPluginNotice(_ s: String) {
+        showToast(s, seconds: min(6.0, 2.2 + Double(s.count) * 0.05))
     }
 
     func setOffset(_ ms: Int) {

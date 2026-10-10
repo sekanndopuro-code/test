@@ -35,6 +35,9 @@ struct AdvPanel: View {
         .frame(maxHeight: .infinity)
         .background(Color(white: 0.06))
         .overlay(Rectangle().fill(Color.white.opacity(0.3)).frame(width: 1), alignment: .trailing)
+        .onChange(of: state.advOpen) { open in
+            if open { store.reload() }      // Files アプリで Plugins フォルダをいじったあと、開いたときに読み直す
+        }
     }
 
     // MARK: - 部品

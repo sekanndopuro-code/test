@@ -1519,7 +1519,8 @@ final class GameAudio: @unchecked Sendable {
     // 再生速度 (エディタの 0.5倍未満の再生用)。遅いときは、伸ばした音を自前で作って (StretchedPCMSource) 流す。
     // 流れる音は常に「ふつうの速度の PCM」なので、player → mixer の直結のまま。速度 1.0 と同じ時計・同じ補正の仕組みで動く。
     // (以前の AVAudioUnitTimePitch は、内部の遅延を正しく知る方法がなく、0.5倍未満で曲と譜面が大きくズレた)
-    private var stretched: StretchedPCMSource?      // rate < 1.0 のときだけ持つ。decodeQueue 上でだけ触る (差し替えも decodeQueue.sync の中)
+    private var stretched: PCMSource?                   // rate < 1.0 のときだけ持つ。decodeQueue 上でだけ触る (差し替えも decodeQueue.sync の中)
+    private(set) var stretchEngine = ""                 // 今使っている時間伸縮の名前 (診断表示用。「Rubber Band R3」/「自前(窓1024)」)
     private(set) var stretchSize = 1024                 // 時間伸縮の窓の大きさ。1024 = 標準 / 512 = 立ち上がりがはっきり (低い音は少しぼやける)
     private(set) var rate = 1.0              // 再生速度 (0.1...1.0)
     private var activeSource: PCMSource { stretched ?? source }   // 今のデコード元 (decodeQueue 上でだけ使う)
@@ -1647,6 +1648,21 @@ final class GameAudio: @unchecked Sendable {
         return s.outputLatency + s.ioBufferDuration
     }
     
+    /// 伸ばした音のソースを作る (decodeQueue 上、または decodeQueue.sync の中で呼ぶ)。
+    /// Rubber Band を組み込んだビルド (GitHub Actions。RubberBand導入手順.md) では Rubber Band を使う。
+    /// 組み込んでいないビルド (Swift Playgrounds) では、自前のフェーズボコーダー (TimeStretch.swift) を使う。
+    /// size は SETTING の「立ち上がりをはっきりさせる」 (512 = オン)。Rubber Band のときは、オン = Faster (R2・短い窓)、オフ = Finer (R3)
+    private func makeStretcher(rate: Double, size: Int) -> PCMSource {
+        #if canImport(CRubberBand)
+        if let s = RubberBandPCMSource(base: source, rate: rate, sharp: size == 512) {
+            stretchEngine = s.engineLabel
+            return s
+        }
+        #endif
+        stretchEngine = "自前(窓\(size))"
+        return StretchedPCMSource(base: source, rate: rate, fftSize: size)
+    }
+    
     /// 再生速度 (0.1...1.0。音程は変えない)。停止中に呼ぶ (再生中は何もしない)。
     /// 1.0 のときは曲をそのまま流す。1.0 未満のときは、その速度に伸ばした音を自前で作って流す (TimeStretch.swift)。
     /// 速度が変わると、先に積んだ音 (先読み) は使えないので捨てる
@@ -1660,7 +1676,7 @@ final class GameAudio: @unchecked Sendable {
             player.stop()
             queued = 0
             eof = false
-            stretched = nr < 1.0 ? StretchedPCMSource(base: source, rate: nr, fftSize: sz) : nil
+            stretched = nr < 1.0 ? makeStretcher(rate: nr, size: sz) : nil
             runQueued = nr < 1.0 ? stretchedQueued : normalQueued
             targetQueued = min(idleQueued, runQueued)
         }
@@ -1684,7 +1700,7 @@ final class GameAudio: @unchecked Sendable {
             player.stop()
             queued = 0
             eof = false
-            stretched = StretchedPCMSource(base: source, rate: r, fftSize: sz)
+            stretched = makeStretcher(rate: r, size: sz)
             runQueued = stretchedQueued
             targetQueued = min(idleQueued, runQueued)
         }
@@ -3136,6 +3152,8 @@ struct TestPlayScreen: View {
             }
         }
         .statusBarHidden(true)      // fullScreenCover は別の画面扱いなので、ここにも付ける
+        .persistentSystemOverlays(.hidden)      // ホームバーも同じ (EditorView と同じ設定。RootView を参照)
+        .defersSystemGestures(on: .bottom)
         .onAppear {
             session.paused = false
             session.quit = onClose

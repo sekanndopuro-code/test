@@ -17,14 +17,21 @@
 | EditorState.swift | 状態・再生クロック・Undo・オートセーブ・エクスポート |
 | EditorState+Tools.swift | ノーツ配置/削除/範囲コピー/反転/Slide<->Wipe/BPM/effect/seg編集 |
 | Renderers.swift | レーン・縦タイムライン・シークバーの描画 (Canvas) |
+| SeekDensity.swift | シークバー (再生ボタンの下) のノーツ密度ヒストグラムの計算 (120 区間 / 20 段階)。描画は `Renderers.swift` の `SeekRenderer` |
 | EditorView.swift | 画面レイアウト・右ボタン列・ポップアップ |
-| Sheets.swift | BPM list / Effect list / Grid settings / Slide modify (レーンに重ねる横長の窓) / メタデータ (META: Back / Information / mcz エクスポート / エディタを閉じる) |
+| Sheets.swift | `Beat.parse` (拍の入力) だけ。META のシートはやめて、右ボタン列 + 右ウィンドウになった (下の「META / SETTING」) |
+| EditorState+Meta.swift | **META の動き**: 列を開く / 閉じる (`openMetaMenu` / `closeMetaMenu`)、More の mcz 共有 (`shareMCZNow` + 共有シート `MCZSharer`)、Quit (`quitEditor`) |
+| MetaMenuIcons.swift | META の列のアイコン (Information = `InfoIcon` / Quit = `PowerIcon`)。Back と More は EDIT 中と同じ |
+| SideWindow.swift | **BPM list / Effect list / Information / SETTING** の右ウィンドウ。シートではなく EditorView に重ね、右の端から約 0.16 秒で滑って入る (`SidePanelLayer` / `SideWindow`)。ウィンドウより左を触ると、すぐ閉じる。出し入れは `EditorState.openSidePanel(_:)` / `closeSidePanel()` |
+| GridSettingsDialog.swift | **Grid settings** (More メニューから)。シートではなく、EditorView に重ねる本家風の中央ダイアログ (`GridSettingsDialog`)。背景のぼかし `BackdropBlur` もここ |
+| MoreMenuIcons.swift | More メニューのアイコン (`MoreMenuIcon`)。本家の画面収録から起こした輪郭 (`MoreMenuIconData`) と、自作の Time range (正方形 + 上矢印) |
 | RootView.swift | 起動時のファイル選択 |
 | TestPlay.swift | テストプレイ。MalodySlideTestplayer の判定・音声・描画をそのまま組み込み (Note→PlayNote に改名) |
 | PCMCache.swift | 曲全体を背景スレッドで先に PCM へ展開しておく `CachedPCMSource` (再生ボタンの待ち時間を縮める。エディタの再生だけで使う) |
+| RubberBandPCMSource.swift | **Rubber Band 版の時間伸縮** (0.75 / 0.5 / 0.25 / 0.1 倍の音)。`CRubberBand` (C++) があるビルド = GitHub Actions のときだけ有効。Swift Playgrounds では中身が空になり、`TimeStretch.swift` の自前版で動く。組み込み方は `RubberBand導入手順.md` |
 | Effects.swift | effect (scroll / jump) から「表示位置 P(t)」を決める `EffectMap` (テストプレイの見た目だけが変わる。判定は変わらない) |
 | PluginPanel.swift | **Adv. メニュー** (`AdvPanel`: プラグイン一覧・読み込みボタン・出力欄) と、プラグインが出すダイアログ (`PluginDialogLayer`) |
-| PluginStore.swift | プラグイン一覧 (`PluginStore.shared`)。内蔵 + 読み込んだもの (`Documents/MalodySlideEditor/Plugins/` にフォルダごと保存・次回起動時に自動で再読み込み)。.lua / .zip / 画像の取り込みもここ |
+| PluginStore.swift | プラグイン一覧 (`PluginStore.shared`)。内蔵 + 読み込んだもの (`Documents/Plugins/` にフォルダごと保存・次回起動時に自動で再読み込み。Files アプリから足した / 消したものは、アプリに戻ったときと Adv. を開いたときに `reload()` で読み直す。前の版の `Documents/MalodySlideEditor/Plugins/` にあったものは、起動時に移す)。.lua / .zip / 画像の取り込みもここ |
 | PluginFilePicker.swift | 「ファイル」アプリを開くピッカー (UIKit の `UIDocumentPickerViewController` を、いちばん手前の画面から直接出す) |
 | PluginSession.swift | **操作型プラグイン (PluginType 2)** の実行 (`PluginSession`)、レーンの上に出す画像 (`PluginSprite`)、画像の読み込み (`PluginImageCache`) |
 | PluginBridge.swift | Lua → エディタの橋渡し。`Editor:〇〇()` の中身 (ノーツ・BPM・effect・スプライト・クリック位置) はここ |
@@ -34,14 +41,19 @@
 | EditorState+Plugins.swift | プラグインの実行 (`runPlugin`) / 停止 (`stopPlugin`) と、Order ボタン (「順番に選択」) のタップ処理 (`orderTap`) |
 
 ## 画面の比率 / 背景画像 (iPad Air 4 の横画面 1180×820pt を基準に、本家の画面を測って合わせている)
-- 左から: **左の帯 145pt** (`StripView.width`。拍の番号と目盛り) → シークバー 66pt → 時刻表示 38pt → レーン (右の余白を含めて 約 865pt。譜面の左端 `LaneGeo.trackL` = 25.2pt、幅 `trackW` = ビューの幅 − 27.4pt (約 837.6pt)。どちらも本家の縦線 (32分割) を実測した値) → 右ボタン列 66pt。再生ボタンは縦長の長方形のまま (`SeekPanel`)
-- **背景画像**: 起動画面で選んだ背景画像を、`EditorBackground` (EditorView.swift) が画面全体 (ホームインジケータの下まで) に敷き、黒を重ねて暗くする。レーン・右ボタン列は背景を塗らず (右ボタン列は半透明の黒)、画像が透けて見える。左の帯とシークバーは、本家と同じ単色の暗い灰色 (`StripRenderer.faceColor`) で塗り、時刻表示の欄からレーンの番号欄までは明るい半透明のパネル (`Color.timePanel`) を敷く。画像が無いときは、これまでどおり黒
+- 左から: **左の帯 145pt** (`StripView.width`。拍の番号と目盛り) → シークバー 66pt → 時刻表示 38pt → レーン (右の余白を含めて 約 873pt。譜面の左端 `LaneGeo.trackL` = 25.2pt、幅 `trackW` = ビューの幅 − 35.4pt (約 837.6pt。左の余白 25.2 + 右の余白 10.2)。どちらも本家の縦線 (32分割) を実測した値) → 右ボタン列 58pt (`RightPanel.width`。本家は左端に細い白線があり、アイコンの中心は列の真ん中)。再生ボタンは本家と同じ六角形 (`SeekPanel` / `PlayToggleButton`)
+- **背景画像**: 起動画面で選んだ背景画像を、`EditorBackground` (EditorView.swift) が画面全体 (ホームインジケータの下まで) に敷き、黒を重ねて暗くする。レーン・右ボタン列は背景を塗らず (右ボタン列は半透明の黒)、画像が透けて見える。左の帯とシークバーは、本家と同じ半透明の暗い色 (`StripRenderer.faceColor` = 黒の約58%。背景画像と、レーンからはみ出したノーツが透ける) で塗り、時刻表示の欄からレーンの番号欄までは明るい半透明のパネル (`Color.timePanel`) を敷く。画像が無いときは、これまでどおり黒
   - 暗さは SETTING の **背景画像の暗さ** (0〜95%、初期値 70%。背景画像があるときだけ表示。保存される: UserDefaults `editor.bgDim`。本家の画面を測ると、背景は このエディタの 60% 設定より約 0.72 倍暗い → 70% が近い)。`EditorState.bgDim`
   - 画像は長辺 2048px 以内に縮めて読み込む (`EditorState.makeBackground`)。mcz 書き出しには、元の画像をそのまま入れる (従来どおり)
 - 拍の番号は、本家と同じく **N 拍目と N+1 拍目の線の真ん中**に置く (左の帯も、レーンも、標準の書体を横に 0.77〜0.78 倍に潰した細長い数字。帯は数字の高さ 約24.5pt、レーンは 約14.5pt。`drawNumber`)。左の帯の細かい目盛りは、左から 約 27pt の長さ
 - **左の帯の倍率は固定**: 本家はレーンのズームに連動せず、1拍 = 約 178pt (高さ 820pt で 約 4.6拍。`EditorState.stripBeats`)。帯の右には暗い側面 (斜めの面取り、約10.5pt) が続く。側面は帯の枠の外なので `SeekRenderer` が描く
 - **拡大/縮小ボタン**: 左端が画面の外で切れた五角形 (`ZoomButtonShape`、幅 39 × 高さ 45pt、先端は x=37.7)。塗りは不透明な (127, 131, 138)、縁は白 1.5pt、記号は 25 × 3.3pt の白い棒。上端は − が 10.75pt、＋が 68pt (`ZoomButton` / EditorView.swift)
-- **右ボタン列のアイコン** (`PanelIcons.swift`): 本家は高さ約 36pt の太い白線 (線の太さ 約 4pt、角は丸い)。EDIT=えんぴつ / BPM=メトロノーム / TEST=カチンコ / META=一覧 は、本家のスクリーンショットから輪郭を起こした (`PanelIconData`)。本家に無い SETTING (歯車) は同じ太さで描いた。EFFECT は文字の「✦」のまま (アイコン未作成)。アイコンは `PanelButton` の `icon:` に `PanelIconView(kind:color:)` を渡す。本家のフロッピー (保存) は、自作では保存が文字表示なので、まだ使っていない
+- **右ボタン列のアイコン** (`PanelIcons.swift`): 本家は高さ約 36pt の太い白線 (線の太さ 約 4pt、角は丸い)。EDIT=えんぴつ / BPM=メトロノーム / TEST=カチンコ / META=一覧 は、本家のスクリーンショットから輪郭を起こした (`PanelIconData`)。本家に無い SETTING (歯車) は同じ太さで描いた。EFFECT は文字の「✦」のまま (アイコン未作成)。アイコンは `PanelButton` の `icon:` に `PanelIconView(kind:color:)` を渡す。ボタンに枠と文字 (キャプション) は無く、アイコンだけ。選択中はシアンになる。配置は本家の実測どおり、アイコンの中心どうしが 68.5pt おき (`RightPanel.slotPitch`)、最初のアイコンの中心は画面の上端から 45pt、下の2つ (再生速度 / 分割) は下端から 45pt。EDIT 中はボタンが増えて収まらないので、そのときだけ間隔を詰める。現在の再生速度・分割は、それぞれのポップアップの中で青 (`Color.panelBlue` = 本家の動画から実測した R0 G206 B255) になっている項目で分かる (選択中のアイコンも同じ青)。
+  - **右下の2つのアイコン**: 上=再生速度は本家の「メーター」、下=分割 (LFB) は本家の「定規」。どちらも本家の動画から輪郭を起こした (`PanelIconData.speed` / `.divide`)。メニューが開いている間も、アイコンの色は白のまま (本家と同じ)
+  - **再生速度 / 分割のメニュー** (`EditorView.popupList`): 本家の動画から実測した値で、幅 57.8pt・1行 51.6pt・上下の余白 10.4pt、背景は黒の 50% (下の譜面が透ける)、縁は白 70% の細い線。画面の下端から 2.5pt 上に下端をそろえて出し (再生速度も分割も同じ)、ボタン列の左端から 10.8pt 空ける。項目は本家より多いまま (再生速度は 0.25x / 0.1x、分割は 1/48 などと「入力…」)。文字は `PanelFont.menu` (本家の字体は iPad に無いので、幅と高さの比が近い DIN Condensed で代用。字体を変えるときはここだけ)
+  - **EDIT を押したときの動き** (`AnyTransition.panelSwap`): 古いアイコン列が右へ滑りながら消え (0.08 秒)、そのあと新しい列が右から滑り込む (0.12 秒)。Back のときも同じ。下の2つのアイコンは動かない
+  - **EDIT 中の名前** (`PanelEditLabel`): 本家は、各アイコンの左に黒 80% の箱 (高さ 43pt) の上に白い字で Back / Note / Wipe / Slide / Remove / More が出て、EDIT に入って 2.6 秒たつと 0.7 秒かけて消える。同じ動きにしてある (本家に無いボタンは Lasso / Order / Adv. / Undo / Redo)。文字は `PanelFont.label` (Avenir Next Condensed)
+  - **EDIT 中のアイコン**: Back (←) / Note (角丸の細長い輪) / Wipe (線とひし形) / Slide (ギザギザの輪) / Remove (ゴミ箱) / More (点3つ) は、本家の動画から輪郭を起こしたもの。Order / Adv. / Undo / Redo は本家に無いので、これまでの絵のままOrder で選んだ数だけは、アイコンの右上に小さな数字で出る本家のフロッピー (保存) は、自作では保存が文字表示なので、まだ使っていない
 - **時刻表示**: 細い字 (25.5pt) を 1文字 20.25pt の送りで並べ、白くやわらかく光らせる (`TimeLabelRenderer`)。「:」「.」は 3pt の四角で、1文字ぶんの枠を取る。上の時刻 (総時間) は画面の上端から、下の時刻 (現在時刻) は下端から、どちらも 113.5pt が中心。書体は標準の書体なので、本家の字形とは少し違う
 - ステータスバー: `MalodySlideEditorApp.swift` の `.statusBarHidden(true)` で隠す指定になっている。Swift Playgrounds の実行中は、Playgrounds 側が出すため消えないことがある
 
@@ -50,23 +62,52 @@
 - **タップ**: 高さ 約 12pt。外側の明るい水色の縁 (1.5pt) → 濃い青緑の帯 (1.5pt) → 白に近い水色の芯 (5pt)。角は丸く、外側にごく弱い水色のにじみ (`drawTap`)
 - **ウィップ**: 左右の端がとがった六角形の棒 (黄色の縁 2pt → オリーブ色の帯 1.5pt → 淡い黄色の芯)。さらに外側に「<」「>」の矢印がつく。ノーツの端 = 矢印の先 (`drawWipe`)
 - **スライドの点**: 外側の白い輪 (半径 11.4pt、透明度 α=0.86) → 水色の輪 (〜7.8pt、α=0.60) → 中心の白 (〜4.5pt、α=0.94) (`drawDot`)。本家は輪ごとに透け具合が違うので (23個の点を背景との回帰で実測)、重ねずに輪の形で塗り分けている。リボンは 白に近い水色 を 約 40% の濃さで重ねる (`Color.ribbonFill`。本家の単スライドを実測した値。以前の 55% はスライドが二重に重なった所を測っていた)。点は、リボンを全部描いたあとで重ねるので、いつもリボンの手前に見える
-- **選択中**: 水色の部分が赤になる (`selTapOuter` など。形・明るさは通常と同じ)
+- **選択中**: 水色の部分が赤になる (`selTapOuter` など。形・明るさは通常と同じ)。ただしスライドは、**赤くなるのは始点の点とリボンだけ**で、seg の点は通常の色のまま (本家と同じ)
 - `LaneRenderer.barLift` (初期値 8pt): 本家は、タップ / ウィップの棒の下端が拍の線のすぐ上に乗る (棒の真ん中が線に重ならない)。0 にすると、これまでどおり棒の真ん中が線に重なる。当たり判定 (`noteHit`) と LASSO の判定も、この分だけ棒に合わせて動く
 - `LaneRenderer.drawSlideHeadBar` (初期値 false): 本家はスライドの始点に棒を描かない (リボンと点だけ)。true にすると、これまでどおり始点にも棒を描く
 - 縦の拍の線は、本家に合わせて白く濃くした (背景に対して約 60%)。横の線 (1/2 = シアン / 1/4 = マゼンタ) も濃くした (`lineStyle`)
 
+## シークバーのノーツ密度 (本家のヒストグラム。2360×1640px のスクリーンショットを 1 ピクセルずつ測って合わせている)
+再生ボタンの下のシークバーには、曲全体を縦に **120 等分** した 1 本 1 本の赤い棒 (`SeekRenderer` / `SeekDensity`)。
+- **本数**: 120 本 (112 ではない)。1 本のピッチ 6.84pt (13.69px)、棒の太さ 5.4pt、棒の上端は区間の上端から 0.14pt 下。曲の頭が下、末が上。曲の頭から数えて何本目かは `SeekDensity.counts` の添字 (0 が頭)
+- **高さの基準**: 本家のシークバーは画面より 約0.16% 長い (821.3pt。`SeekRenderer.regionScale`)。再生位置の線も 120 本もこの高さに対して並べ、シークバーのタッチ (`SeekView`) も同じ高さで割る。実測では、再生位置の線の中心が本家の 1378.4px、計算が 1378.7px
+- **長さ**: 右端 (幅 − 0.5pt) から左へ、最大 67.4pt (`barMaxW`)。最大の棒は、左の帯の側面 (暗い斜めの面) の左端まで届く。長さは 20 段階 (1 段 = 3.37pt = 6.74px) にそろっている
+  - 側面の下に入った部分は、側面が「黒 50% の透明な面」なので、半分の明るさ (棒 (238,102,100) → (119,51,50)) になる。再生位置の線も同じ。側面の縁の細い白線は、棒の手前に出る
+- **何を数えるか**: 区間ごとの「ノーツの数」。タップ / ウィップ / スライドの始点 だけ (スライドの seg = 中継点は数えない)。曲の外 (マイナスの時刻 / 曲より後ろ) のノーツは数えない
+- **長さの決め方**: 区間の数を **20 で頭打ち** (`SeekDensity.levelCap`) にしてから、いちばん大きい区間を 1.0 (= 最大の長さ) にした割合。本家の画面では、長さが 20 段階の整数倍にそろっていて、しかも最大の棒が 120 本中 19 本もあった (= 上限で頭打ち)。そのため「純粋な最大 = 1.0」ではなく、この形にしてある。純粋に「最大の区間 = 1.0」だけにしたいときは `levelCap` を `Int.max` にする
+- **再生位置**: 白い線 (太さ 2.3pt) の両端に、橙色の縦棒 (6 × 12.3pt)。以前の赤い線から変更。ヒストグラムの手前に描く。側面に掛かる部分を暗くする処理は、棒・線・縦棒を 1 つの Path にまとめて 1 回で塗る (別々に塗ると、重なった所が二重に暗くなる)
+- 以前あった「いま見えているレーンの範囲」の白い帯は、本家に無いので消した (`SeekRenderer.showViewWindow = true` で戻せる)
+- 計算結果は `EditorState.seekDensityRatios()` に置いてあり、譜面・BPM・曲の長さを触ったとき (`recomputeTotal`) だけ作り直す。再生中の毎フレームは、使い回すだけ
+
+## 枠 (レーンの幅) からはみ出したノーツの描画 / ホームバー
+- ノーツ (リボン・点・棒) は、レーンの幅の外 (左の帯・シークバー・右のボタン列の下) まで描く。本家と同じ見え方。`LaneView` (EditorView.swift) が、描画用の Canvas だけを左右に広げ (左は画面の左端まで、右はボタン列の幅 `RightPanel.width` ぶん)、座標はこれまでのレーンのまま左へ平行移動して描く。レーンの層は `EditorView` で `zIndex(-1)` にして、左の帯・シークバー・Adv. メニュー・右ボタン列より下に置いている。**当たり判定は変わらない**: タッチを受けるのはレーンの幅と同じ大きさの透明な層だけで、描画の Canvas は `allowsHitTesting(false)`
+- テストプレイ画面 (`TestPlay.swift`) のはみ出しは、まだ手を付けていない
+- ホームバー (画面下の白い横棒): `RootView` で `persistentSystemOverlays(.hidden)` (バーを隠す) と `defersSystemGestures(on: .bottom)` (下端からの1回目の上スワイプではホームへ戻らず、2回目で戻る) を付けている。`TestPlayScreen` にも同じ設定。iPadOS の「ゲームモード」(Info.plist の `GCSupportsGameMode` / `LSSupportsGameMode`) とは別の機能で、ホームバーには関係しない
+
 ## 画面の下端 / 幅スライダー
-- `RootView` で、下の安全領域 (ホームインジケータの所) も無視して、UI を画面の下端まで続けている。本家は帯・シークバー・レーン・右ボタン列がすべて下端まで途切れない。再生ライン (シアンの横棒) は画面の高さの 91.3% (`LaneGeo.playY`。本家の実測)。右ボタン列だけは、ホームインジケータに重ならないよう下を 24pt 空けている
+- `RootView` で、下の安全領域 (ホームインジケータの所) も無視して、UI を画面の下端まで続けている。本家は帯・シークバー・レーン・右ボタン列がすべて下端まで途切れない。再生ライン (シアンの横棒) は画面の高さの 91.3% (`LaneGeo.playY`。本家の実測)。右ボタン列の下の2つのアイコンも、本家と同じ位置 (中心が下端から 45pt) に置く
 - **幅スライダー** (`LaneWidthSlider`): 本家と同じ、透明な白 (約 50%) の単色の帯だけ。レーンの左端 (x=0) から、置かれるノーツの幅の位置までを塗る。つまみ・暗い土台・文字は無い。帯は画面の下端から 約 19pt 上、高さ 18pt。指で触れる範囲は、その周りの下端までの 52pt
+
+## Rubber Band による時間伸縮 (うなり・揺らぎ対策)
+- 遅い再生 (0.75 / 0.5 / 0.25 / 0.1 倍) の音は、`GameAudio.makeStretcher` (TestPlay.swift) が作る。**Rubber Band を組み込んだビルド (GitHub Actions)** では `RubberBandPCMSource`、**組み込んでいないビルド (Swift Playgrounds)** では自前のフェーズボコーダー (`StretchedPCMSource` / TimeStretch.swift) を使う。`#if canImport(CRubberBand)` で切り替わるので、Playgrounds で開く運用はそのまま変えなくてよい
+- どちらで動いているかは、再生したあとの SETTING の下の診断表示「伸ばした音(Rubber Band R3)」/「伸ばした音(自前(窓1024))」で分かる
+- SETTING の「立ち上がりをはっきりさせる」: Rubber Band のときは **オン = Faster (R2・短い窓。立ち上がりがはっきり)、オフ = Finer (R3。うなりが少ない高品質)**。自前のときは今までどおり窓 512 / 1024
+- 調整できる値 (`RubberBandPCMSource.swift` の先頭)
+  - `trimFrames`: 音の位置の微調整 (出力側のフレーム数。正 = 音が早くなる、負 = 遅くなる)。0.25 倍でクリックがノーツとズレて聞こえるときだけ触る
+  - `finerMinRate`: この速度より遅いときは Finer をやめて Faster にする (初期値 0 = 常に Finer)。0.1 倍で音が途切れるときは 0.2 などにする
+- Rubber Band 本体のソースは **リポジトリに置かず、ビルドのたびに公式から取ってくる** (RubberBand導入手順.md)。ライセンスは GPL v2 以上 (自分用 / ソース公開の範囲ならそのままでよい。ソースを公開せずに ipa を配るなら商用ライセンスが必要)
 
 ## 仕様メモ
 - 拍表示は mc と同じ 0 始まり。x は中心座標(0〜255)、w は幅
 - 音源の同期: 音源位置 = 譜面時間 − offset(ms)  (editor.html と同じ)
 - オートセーブ: 編集の1.2秒後に元の .mc へ上書き + アプリ内 Documents/MalodySlideEditor/ にバックアップ
+- **Files アプリからプラグインを管理する**: Info.plist に `UIFileSharingEnabled` = YES と `LSSupportsOpeningDocumentsInPlace` = YES を入れて作った ipa なら、Files アプリの「このiPad内 > (アプリ名)」に Documents が見える。
+  その中の `Plugins/` に .lua (サブフォルダに入れた .lua と画像もよい) を入れると使え、消すと一覧から消える。.zip は自動では展開されないので、アプリの「プラグイン(lua)を読み込む」から入れる。`MalodySlideEditor/` には譜面のバックアップが入る
 - mcz は `<mc名>/` フォルダ内に mc・音源・背景を無圧縮zipで格納
 - 再生中の描画: レーン等の Canvas は `FrameCanvas`(EditorView.swift) 経由で毎フレーム描き直す
 - テストプレイ: 右の TEST ボタン。エディタで表示中の位置(2秒前)から始まる。最初から遊ぶときは先頭にシークしてから押す
-- **Effect (scroll / jump)**: 右ボタン列の **EFFECT** (BPM の下、✦) で一覧が開く。BPM list と同じ作りで、Beat・種類 (scroll / jump)・値を入れて Add / 更新、一覧から選んで Remove。同じ拍・同じ種類は置き換え、scroll と jump は同じ拍に並べられる。Undo / Redo も効く。mc には `"effect":[{"beat":[..],"scroll":0.01},{"beat":[..],"jump":10000000}]` の形で保存される (読み込んだ mc の effect はそのまま温存する。scroll / jump 以外の形のものも、触らずに書き戻す)
+- **BPM list / Effect list の開き方**: 下から上がるシートではなく、本家と同じく画面の右の端から横に滑って入る右ウィンドウ (幅 445.5pt、高さは画面の上下 23pt を残していっぱい、黒 72% の半透明。右ボタン列の上まで覆い、列のアイコンは開いている間だけ見えなくなる)。本家の「値を入れて Add すると勝手に閉じる」は再現していない。閉じるのは、ウィンドウより左 (範囲外) を触ったとき。キーボードが出ると、ウィンドウの下端がキーボードの上へ上がる
+- **Effect (scroll / jump)**: 右ボタン列の **EFFECT** (BPM の下、✦) で右ウィンドウが開く。BPM list と同じ作りで、Beat・種類 (scroll / jump)・値を入れて Add / 更新、一覧から選んで Remove。同じ拍・同じ種類は置き換え、scroll と jump は同じ拍に並べられる。Undo / Redo も効く。mc には `"effect":[{"beat":[..],"scroll":0.01},{"beat":[..],"jump":10000000}]` の形で保存される (読み込んだ mc の effect はそのまま温存する。scroll / jump 以外の形のものも、触らずに書き戻す)
   - **エディタの画面は変わらない** (ノーツは今までどおり拍で並ぶ)。変わるのは **テストプレイの見た目だけ**。判定は時刻で決まるので、effect の影響を受けない
   - scroll: その拍から、譜面の流れる速さが 値 倍になる (1 = 普通 / 0 = 止まる / マイナス = 逆走)。jump: その拍になった瞬間、譜面が先へ一気に飛ぶ。**値は ms で、1000 = 1 秒間に進む距離ぶん**。そのときの **scroll の値に比例**する (scroll 1 で jump 1000 → 1 秒ぶん / scroll 2 → 2 秒ぶん / scroll 0 → 飛ばない)。同じ拍に scroll と jump があるときは、scroll を先に変えてから飛ぶ
   - **仕組み** (`EffectMap` / Effects.swift): ノーツの画面の高さは「その時刻の表示位置 P(t) − 今の表示位置 P(今)」で決まる (effect が無ければ P(t) = t で従来どおり)。scroll は P の傾き、jump は P の段差。**effect が 1 つも無い譜面は、従来のコードがそのまま動く** (見た目も速さも変わらない)
@@ -98,18 +139,19 @@
   1. 1回目のタップ = 始点ノート (この時点では譜面に入れず、ゴーストで表示。右の Slide アイコンが「完」になる)
   2. 2回目以降のタップ = seg。**置いた順がそのまま seg の順番**になる (時系列に並べ替えない)。最後に置いた点にはシアンの輪がつく
   3. 「完」を押すと、その始点への seg の配置が終わる (Slide ツールのまま。次のタップが新しい始点)。seg を 1 つも置かずに「完」なら、始点は取り消される
-  - 始点より前 (マイナス方向 = beat がマイナスの seg) は、SETTING の「beatがマイナスのsegを置くのを許可する」をオンにしたときだけ置ける (初期値オフ。保存される: UserDefaults `editor.allowNegativeSeg`)。オフのときは、始点より前をタップすると「完」と同じ扱いで seg の配置を終える。Slide modify も同じ設定に従う (オフのときは、始点より前の所をタップすると「完了」と同じ扱いで Slide modify を終える。点をドラッグしても始点の位置で止まる)。保存のときは負の拍を `"beat":[-12,2,4]` (= -11.5 拍。整数部にマイナス、分子は 0 以上) の書き方にする (`Beat.json`)。
+  - **時系列順でない seg** (直前に置いた seg = 終点より前の時間。始点より前 = beat がマイナスも含む) は、SETTING の「beatが時系列順でないsegを置くのを許可する」をオンにしたときだけ置ける (初期値オフ = 本家と同じ。保存される: UserDefaults `editor.allowUnorderedSeg`。前の版の `editor.allowNegativeSeg` の値は、新しい設定が未保存のときだけ引き継ぐ)。オフのときは、**終点の seg より前の時間**をタップすると、Slide ツールでは「完」と同じ扱いで seg の配置を終える。Slide modify では seg は足さずに選択を外す。Slide modify で seg を縦にドラッグ (縦移動を許可しているとき) しても、前後の seg の時間を越えない (もともと順番が崩れている側は縛らない)。保存のときは負の拍を `"beat":[-12,2,4]` (= -11.5 拍。整数部にマイナス、分子は 0 以上) の書き方にする (`Beat.json`)。
     `[0,-2,4]` のように分子にマイナスがある譜面を読み込んだときも、保存のときに直す (本家で不具合になるため)
   - 作成中は、どこをタップしても seg を置く (既存ノーツの選択・移動はしない)。seg 1 個の追加が Undo 1 回分。Undo で最初の seg を戻すと、始点だけの状態に戻る
   - Slide 以外のツールに切り替えると作成中は終わる (置いた seg は残る)
   - レーンの上下スライドは編集ツール選択中は使えないので、別の拍に seg を置くときは、レーン以外のスクロール操作 (帯・シークバー) で動かす
   - 関連コード: `EditorState+Tools.swift` の `slideDraft*` / `appendDraftSeg` / `finishSlide`、`Renderers.swift` の `drawSlideDraft`
 - **Remove**:
-  - 選択中のノーツ (赤いノーツ) がある時に押すと、そのノーツをまとめて削除する (ツールは今のまま。削除は Undo 1回分)。More の **Time range** で範囲を選んでから Remove を押せば、範囲の一括削除になる
-  - 何も選択していない時は従来どおり Remove ツール (レーンをタップして1個ずつ消す) の ON/OFF
+  - 選択中のノーツ (赤いノーツ) がある時に押すと、そのノーツをまとめて削除して、ツールも Remove に切り替わる (削除は Undo 1回分。再生中は削除を断るので、ツールも選択も今のまま)。More の **Time range** で範囲を選んでから Remove を押せば、範囲の一括削除になる
+  - 何も選択していない時は従来どおり Remove ツール (レーンをタップして1個ずつ消す) の ON/OFF。**Slide modify 中は、選択があっても Remove ツールに切り替わる** (掴んだスライドが選択状態になるので、そのまま削除するとスライドごと消えてしまうため。切り替わると選択は外れる)
+  - **Remove ツールでスライドをタップ**: タップした位置にいちばん近い点 (始点 / seg) を探す。始点か **1 番目の seg** がいちばん近ければスライド全体を削除。2 番目以降の seg がいちばん近ければ、**その seg とそれ以降の seg** を削除する (「それ以降」は時間の順ではなく、譜面に記録されている seg の並び = 置いた順。削除は Undo 1回分)。近さは、点の高さはそのまま、横はスライドの幅の中なら 0 として測る (`EditorState.removeTapped`)
   - 関連コード: `EditorState+Tools.swift` の `removeButtonTapped` / `removeSelected`
-- **LASSO** (Remove の下 / More の上のボタン。投げ縄の絵のアイコン): 指でなぞって囲んだ範囲のノーツを、まとめて選択状態にする (お絵描きソフトの投げ縄と同じ使い方)
-  - もう一度タップすると未選択に戻る (選択したノーツは残る)。切り替えたとき、使い方のトーストを1回出す (不要なら `EditorView.swift` の LASSO ボタンの `showToast` を削除)
+- **LASSO** (**More メニューの Time range の下**。以前は EDIT の右ボタン列にあったが、Time range と同じ「選択の道具」なので More の中に移した。投げ縄の絵のアイコンは `MoreMenuIcons.swift` の `drawLasso`): 指でなぞって囲んだ範囲のノーツを、まとめて選択状態にする (お絵描きソフトの投げ縄と同じ使い方)
+  - More メニューの Lasso をもう一度選ぶと未選択に戻る (選択したノーツは残る)。使っている間は、More ボタンが青くなり、メニューの Lasso も青くなる。切り替えたとき、使い方のトーストを1回出す (不要なら `EditorView.swift` の `moreList` の Lasso の `showToast` を削除)
   - レーンを指でなぞると、白い点線 + うす白の塗りで囲む範囲を見せる。**指を離すと、終点と始点を直線で結んで閉じ**、中にあるノーツが赤い選択状態になる
     - 線が自分と交差してもよい (始点を少し行き過ぎて閉じたときなど)。巻き数が 0 でない所を「中」とする (`EditorState.windingContains`)
   - 「中にある」の判定: タップ / ウィップは**中心の点**。スライドは**始点か seg の点のどれか**が中に入っていれば、スライド全体を選ぶ (リボンが線をまたいでいるだけでは選ばない)
@@ -117,24 +159,26 @@
   - 10pt 以上動かさずに離した (タップ) とき: ノーツの上ならそのノーツの選択 ON/OFF、何も無い所なら**全部の選択を解除**
   - 選択したあとは、そのまま Remove (まとめて削除) / More の Copy・Flip・変換、または Note / Wipe / Slide ツールに切り替えてドラッグ移動 (選択は残る)
   - 再生中は使えない (他のツールと同じ)
-  - 関連コード: `EditorState+Tools.swift` の `lassoTouch` / `lassoTap` / `selectInLasso` / `windingContains`、`EditorState.lassoPoints` (なぞっている途中の線)、`Renderers.swift` の `drawLasso`、`EditorView.swift` の `LassoIcon` と `PanelButton` の `icon`
-- **Slide modify** (More → Slide modify): シートではなく、レーンの上に重ねる横長の細い窓 (`SlideModifyWindow`: 「Slide modify」の表示・操作のヒント・**完了**)。**背景は暗くならず**、窓の外のレーンはそのまま触れる。「完了」で Slide modify を終える (選択は残る)。数値で直す「広げた状態」は無く、編集はすべてレーン上で行う
-  - レーンのスライドをタップすると選択状態になり (赤くなる)、そのスライドの点 (seg) にシアンの輪が付く
-    - **点をドラッグ**: 選択中のスライドの点を指で動かせる (縦は 1/n 拍、横はグリッドに吸着。ドラッグ1回が Undo 1回分。元の位置に戻して離したら Undo は積まない)
-    - **点をタップ**: その点が選ばれ (白い太い輪)、**隣に赤い「削除」ボタン**が出る。押すとその seg が消える (Undo 1回分)。点が右端に近いときは左側に出る。点を動かしている間は消えている。1つしか無い seg は消せない (消すと通常のノーツになるため)
-    - **空いている所 (または選択中スライドの帯の上) をタップ**: 点を選んでいるときは、選択を外して「削除」を消すだけ (うっかり seg を足さない)。点を選んでいないときは、そのスライドの最後に seg を追加 (Slide ツールと同じく、置いた順が seg の順番。すでに点がある位置には足さない)
-    - **別のスライドをタップ**: そちらを選び直す
+  - 関連コード: `EditorState+Tools.swift` の `lassoTouch` / `lassoTap` / `selectInLasso` / `windingContains`、`EditorState.lassoPoints` (なぞっている途中の線)、`Renderers.swift` の `drawLasso`、`EditorView.swift` の `moreList` (Lasso の項目)
+- **Slide modify** (More → Slide modify): 本家と同じく、上の窓は無い。**スライドを先に選ぶ操作も要らず**、レーンで直接 seg を編集する。ほかのツールに切り替える (Note / Wipe / Slide などのアイコン、Back) と終わる
+  - **点 (seg) をドラッグ**: 掴んだ瞬間に、その点があるスライドが選択状態になり (始点とリボンだけが赤くなる。**seg の点は通常の色のまま**)、そのまま動かせる。重なっているときは、いちばん近い点 (ほぼ同じなら選択中のスライド) を掴む。ドラッグ1回が Undo 1回分 (元の位置に戻して離したら Undo は積まない)。掴んでいる間は、その点に白い太い輪が付く
+    - 動くのは **横 (x) だけ** (グリッドに吸着)。縦 (時間) にも動かすには、SETTING の「slide modifyでのsegの移動で縦方向の移動を許可する」をオンにする (初期値オフ。保存される: UserDefaults `editor.allowSegVerticalMove`。オンのときは 1/n 拍に吸着)
+  - **選択中のスライドの上をタップ** (始点・リボン・点のどこでも): 選択が外れる (「完了」ボタンの代わり)。点を掴んだ場合はドラッグになるので、選択は外れない
+  - **別のスライドをタップ**: そちらを選び直す
+  - **空いている所をタップ**: 選択中のスライドがあれば、その最後に seg を追加 (Slide ツールと同じく、置いた順が seg の順番。すでに点がある位置には足さない)。ただし終点の seg より前の時間は、上の設定がオフなら追加せず選択を外す。選択中のスライドが無ければ何もしない
+  - seg の**削除は Remove ツール** (上の「Remove ツールでスライドをタップ」)。Slide modify には「削除」ボタンも上の窓も無い
+  - 選択中のスライドの seg には、動かせる目印のシアンの輪が付く。本家には無いので、消したいときは `LaneRenderer.drawSegRings = false`
   - レーンの上下スライドはツール選択中は使えないので、拍を移動するときは左の帯 (タイムライン) かシークバーを使う
   - Slide modify に入るとき、選択がスライド1つだけなら、そのスライドがそのまま編集対象になる
-  - 関連コード: `Sheets.swift` の `SlideModifyWindow` / `EditorView.swift` の `slideModifyLayer` / `EditorState+Tools.swift` の `slideModifyTap` `addSegAt` `hitSeg` `dragSeg` `segDeleteRect` `deleteModifySeg` / `Renderers.swift` の `drawSlideModify`
+  - 関連コード: `EditorState+Tools.swift` の `slideModifyTap` `addSegAt` `hitSegAny` `dragSeg` `removeTapped` / `Renderers.swift` の `drawSlideModify` `drawNotes` (選択中の色)
 - **長押しで選択解除**: ツール未選択 (EDIT 直後 / 選択中のツールをもう一度タップして外したあと / 閲覧モード) のとき、レーンを**動かさずに押し続ける**と、選択中のノーツが全部解除される (トーストで知らせる)
   - 秒数は SETTING の「長押しで選択解除」で **1.0〜5.0 秒** (0.1 秒刻み、初期値 2.0 秒)。値は次回起動時も保存される (UserDefaults: `editor.holdDeselectSec`)
   - 指が 10pt を超えて動いた (= 上下スライドになった) / 指を離した / ピンチが始まったときは取り消される。選択が無いときは何もしない。押している間にツールを選んだときも解除しない
-  - 関連コード: `EditorView.swift` の `LaneView` (タッチの始まり=`holdBegan` / 動き・離す・ピンチ=`holdCancel`) と `SettingWindow.holdRow`、`EditorState+Tools.swift` の `holdBegan / holdCancel / holdFired`、`EditorState.holdDeselectSec`
+  - 関連コード: `EditorView.swift` の `LaneView` (タッチの始まり=`holdBegan` / 動き・離す・ピンチ=`holdCancel`) と `SideWindow.swift` の `SettingWindowContent.holdRow`、`EditorState+Tools.swift` の `holdBegan / holdCancel / holdFired`、`EditorState.holdDeselectSec`
 - 選択は、Back を押したときに解除される (未選択に戻しただけでは残るので、パン・ズームしてからコピーや貼り付けができる)
 
 ## Adv. (Malody V の Lua プラグインを動かす)
-EDIT の右ボタン列、**LASSO の下・More の上**に **Adv.** (λ) がある。
+EDIT の右ボタン列、**Order の下・More の上**に **Adv.** (λ) がある。
 
 - **開き方**: Adv. を押すと、レーンの**右端を固定したまま左端が右へ動いて横に縮み**、再生ボタン (シークバー) とレーンの間にプラグインのメニュー (幅 196pt、`AdvPanel.width`) が出る。もう一度 Adv. を押す (またはメニュー右上の ✕ / Back) と閉じる
 - **プラグインは縦にスクロール**する (`ScrollView` + `LazyVStack`)。何百個並んでも使える
@@ -160,7 +204,7 @@ EDIT の右ボタン列、**LASSO の下・More の上**に **Adv.** (λ) があ
 - 実装: `PluginSession` (エンジンを起動・イベントを1つずつ呼ぶ) / `EditorState.pluginTouch` (タッチの振り分け) / `EditTool.plugin` / `Renderers.drawSprites` (画像の描画)
 
 ### 順番に選択 (Order ボタン)
-EDIT の右ボタン列、**LASSO の下・Adv. の上**に **Order** (①②) がある。スライドを**タップした順に番号を付けて**記録するツールで、結合系プラグインがこの順番を使う (editor.html の「順番に選択」と同じ)。
+EDIT の右ボタン列、**Remove の下・Adv. の上**に **Order** (①②) がある。スライドを**タップした順に番号を付けて**記録するツールで、結合系プラグインがこの順番を使う (editor.html の「順番に選択」と同じ)。
 
 - **使い方**: Order を押してから、スライドをタップする。1番目は**赤**、2番目以降は**水色**で、始点に番号が出る。ほかのツールに切り替えても順番は残る (ボタンの文字が `Order 3` のように、選んだ数になる)。もう一度 Order を押すと、ツールだけ OFF (順番は残る)
 - **重なったスライド**: 順番に入れたスライドは、タップの当たり判定から外れる。同じ場所をもう一度タップすると、下に重なっているスライドが選べる
@@ -211,17 +255,32 @@ Swift Playgrounds のアプリには Lua 本体 (C 言語) を組み込めない
 
 ## More メニュー: コピー / 範囲選択 / 変換
 コピー・反転・変換はすべて「選択状態のノーツ (赤いノーツ)」が対象。
+- **見た目 (本家の画面収録から実測)**: 幅 275pt・1行 45.6pt。黒 50% の半透明 + 白の細い縁で、下の譜面や背景が透けて見える。各項目は「アイコン + 文字」(本家と同じ機能の項目は本家のアイコン。Time range だけ、正方形の中に上矢印の自作アイコン)。選択中のツール (Time range / Slide modify) は青 (`Color.panelBlue`)
+- **位置**: 本家は、メニューの上端が More ボタンの中心の 263pt 上。自作は More ボタンが本家より下にある (EDIT のボタンが多い) ので、メニューもその分下に出る (`EditorView.moreMenuTop` / `RightPanel.moreCenterY`)。画面の下にはみ出すときだけ上へ寄せる
+- 本家の「Cut」は未実装なので、その行は無い (本家の下側にある、項目の無い空白も省いてある)。アイコンの輪郭を直したいときは `MoreMenuIcons.swift` の `MoreMenuIconData`
 - **Copy**: 選択中のノーツを保存する (いちばん前のノーツの拍を基準にした相対位置で持つ)。何も選択していないときはトーストで知らせる
 - **Paste**: 保存したノーツを、再生ラインの位置にいちばん前のノーツが来るように貼り付ける。貼り付けたノーツは選択状態になる
 - **Time range**: 始点の拍 → 終点の拍の順にレーンをタップすると、その間 (両端を含む。ノーツの先頭の拍で判定) のノーツが選択状態になる。3回目のタップで始点からやり直し。Time range を抜けると範囲の表示は消えるが、選択は残る (Note / Wipe / Slide を選べば、そのまま動かせる)
 - **Flip notes horizontal**: 選択中のノーツを左右反転。何も選択していないときは全ノーツ
+- **Grid settings**: 押した瞬間に、画面の真ん中に本家風のダイアログが出る (下から上がるシートの待ち時間なし)。背景は `UIVisualEffectView` で強くぼかし、枠は黒 50% の半透明。Grid lines はバーを触る / なぞって 1〜64 を決める。Grid align はチェックボックス。「完了」で反映、「戻る」で破棄。表示の切り替えは `EditorState.showGridDialog`
+- **Grid align ON のときのノーツ位置 (本家と同じ)**: 幅は 1マスの整数倍。**ノーツの中心** が、いちばん近いグリッド線に合う (`EditorState.snapNote`)。幅が偶数マスなら両端もグリッド線の上、奇数マス (例: 32 Grid で 7マス) は両端がマスの半分ずれる。ノーツがレーン (0〜255) の外にはみ出さない範囲で線を選ぶので、奇数マスのノーツは左右の壁から半マス以上内側になる。スライドの seg を置く / 動かすときも同じ規則 (seg の x は中心)。ノーツを移動するときは、中心をマスの整数倍だけ動かす (`snapDeltaX`)
 - **Slide to Wipe / Wipe to Slide**: 選択中のノーツだけを変換する (Wipe to Slide は選択中の Wipe が2個以上必要)。変換後のノーツは選択状態になる
 - 関連コード: タッチ処理 `EditorState+Tools.swift` の `laneTouch` / ジェスチャ `EditorView.swift` の `LaneView` / 描画色 `Renderers.swift` の `selTap*` `selWipe*` `selRibbon` `selDot`
 
+## META / SETTING (右ボタン列 + 右ウィンドウ。シートはやめた)
+BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.information` / `.setting` を足して、`SidePanelLayer` / `SideWindow` がそのまま出し入れする (右の端から滑って入る・ウィンドウより左を触ると閉じる・右ボタン列は開いている間だけ見えなくなる)。
+
+- **META** (`EditorState.metaOpen`): 押すと、右ボタン列が EDIT と同じ動き (`panelSwap`) で **Back / Information / More / Quit** に入れ替わる。アイコンの左の名前 (Back / Information / More / Quit) も EDIT と同じく、2.6 秒たつと消える。本家の Delete all / Upload は使わない。階層は無い
+  - **Information**: 右ウィンドウ (`InformationWindowContent`)。曲名 / Original Title / アーティスト / Original Artist / Version / Creator (入力欄。打つたびに譜面へ反映してオートセーブ)、曲のファイル / 背景ファイル (見るだけ)、オフセット (ms。入力欄 + −10 / +10 ボタン。マイナスも打てる)。縦にスクロールでき、入力欄以外を触るとキーボードが下がる
+  - **More (•••)**: 押した瞬間に mcz を作って、共有シート (保存 / AirDrop / ファイルなど) を出す。もう 1 回タップする必要は無い (`EditorState.shareMCZNow` → `MCZSharer`)。失敗したときはトーストで知らせる
+  - **Quit**: 押した瞬間に、再生を止めて・保存して・エディタを閉じてファイル選択へ戻る (`EditorState.quitEditor`)。確認ダイアログは出さない (保存してから閉じるので、編集は失われない)
+  - **Back**: いつもの列 (EDIT / BPM / EFFECT / TEST / META / SETTING) に戻る
+- **SETTING**: 右ウィンドウ (`SettingWindowContent`)。項目は、これまでの SETTING と同じ (曲の音量 / ノーツサウンドの音量 / 背景画像の暗さ / 立ち上がりをはっきりさせる / beatが時系列順でないsegを置くのを許可する / slide modifyでのsegの移動で縦方向の移動を許可する / 長押しで選択解除)。文字・縁取り・選んでいる色 (`Color.panelBlue`) を他の右ウィンドウにそろえ、縦にスクロールできる。チェックボックスは白い縁取りの四角
+
 ## SETTING / キー音
-- 右ボタン列の META の下の **SETTING** で、音量ウィンドウが開く(✕ か SETTING をもう一度押すと閉じる)
+- 右ボタン列の META の下の **SETTING** で、BPM list / Effect list と同じ右ウィンドウが開く (閉じるのは、ウィンドウより左を触ったとき。中身は「META / SETTING」を参照)
   - 曲の音量 / ノーツサウンドの音量 (0〜100%、5%刻み)。値は次回起動時も保存される (UserDefaults: `editor.musicVolume` / `editor.noteVolume`)
-  - ウィンドウは背景を暗くせずタップも奪わない → 曲を再生したまま音量を調整できる
+  - 曲を再生したまま開いて、音量を調整できる (開いても再生は止まらない。ウィンドウより左を触ると閉じる)
   - ノーツサウンドのスライダーは、指を離した時に1発鳴って音量を確かめられる。0% でキー音オフ
 - キー音が鳴るタイミング
   - エディタ再生中: ノーツ先頭が再生ライン(シアンの横棒)に触れる瞬間。同時押し(1ms以内)は1発にまとめる
@@ -240,7 +299,7 @@ Swift Playgrounds のアプリには Lua 本体 (C 言語) を組み込めない
 - **曲の停止**: `AudioController.stop` は、鳴っている最中は `pause()` (後片付けが無く速い・準備状態も保たれる)、開始予約中だけ `stop()` (確実に取り消す)
 - **再生が鳴らない**: `AVAudioPlayer.play(atTime:)` が false を返したとき (オーディオセッションが割り込みで止まっていた等) は、セッションを起こし直して1回だけやり直す
 - **ボタン**: 再生/停止ボタンは「指が触れた瞬間」に切り替わる (`PlayToggleButton`)。従来の「離した時」に戻す方法はそのファイルのコメント参照
-- **再生ボタンの形と位置**: 縦長の長方形で、高さは画面の約1/5。シークバーから右の時刻表示の上まではみ出す (レーンには掛からない)。`SeekPanel` (EditorView.swift) が、シークバー(66pt) + 時刻表示(38pt) + 再生ボタンを重ねて作る。
+- **再生ボタンの形と位置**: 本家と同じ正六角形 (左右が尖る。頂点から頂点まで 100pt、高さ 86.6pt、白い縁 2.8pt、中は不透明なグレー)。中心は画面の左端から 205pt (`SeekPanel.hexCenterX` = 60pt)、縦は画面の真ん中。左の頂点が現在位置の白い線にとどくよう、線を 11pt だけ伸ばしている。**押せる範囲は従来どおりの縦長の長方形** (幅 102pt = `SeekPanel.totalWidth` − 2、高さ = 画面の約1/5。本家の六角形だと小さくて、シークバーを誤って触って現在位置がずれるため、わざと大きくしてある)。六角形の絵はタッチを受けず、透明な長方形が受ける。`SeekPanel` (EditorView.swift) が、シークバー(66pt) + 時刻表示(38pt) + 再生ボタンを重ねて作る。
   ボタンの当たり判定の外 (上側・下側) のシークバーを触ってドラッグすると曲の位置を動かせる。その間だけボタンは透明になる (`SeekView` の `seeking` → `PlayToggleButton` の `dimmed`)。
   大きさを変えるときは `SeekPanel` の `btnH` / `btnW`、アイコンの大きさは `PlayToggleButton` の `size: 44`
 - **描画**: スライドの描画は、画面に掛かっている区間だけを描き、表示範囲に切り詰める (seg が数万個ある譜面でも再生が重くならない)
@@ -263,7 +322,7 @@ Swift Playgrounds のアプリには Lua 本体 (C 言語) を組み込めない
 - 速度の切り替え・ポーズ・シークで毎回 `play()` が時計を作り直すので、ズレは蓄積しない
 - **再生ボタンの反応 (エンジン方式)**: 停止中、表示位置が0.1秒止まると `GameAudio.warm` が、次の再生位置のシーク・デコード・最初のバッファ投入を別スレッドで済ませておく。
   再生ボタンでは `begin` が「用意済みの位置と20ms以内で合っているか」を見て、合っていれば再生の予約だけで始める (合っていなければ従来どおりその場でシーク)。
-  SETTING の下に「再生開始の下ごしらえ ○ ms (先読み済み / 先読みなし)」を出している (不要なら `SettingWindow` の `playInfo` の Text を削除)。
+  SETTING の下に「再生開始の下ごしらえ ○ ms (先読み済み / 先読みなし)」を出している (不要なら `SideWindow.swift` の `SettingWindowContent.playInfoText` を削除)。
   位置を動かして0.1秒以内に再生を押したときは「先読みなし」になり、少し待たされる
 - **曲の先読み展開 (再生ボタンの待ち時間対策)**: 「区間を置き終わる → 区間の始めまで戻る → すぐ再生」のように、位置を動かしてすぐ再生を押すと、`warm` の先読みが間に合わず、再生開始に「シーク + 最初の buffer 作り」(ogg の自前デコーダーでは、目標位置の手前のページ頭からデコードし直す) の分だけ待たされる。
   そこで、エディタの `GameAudio` は曲全体を背景スレッドで先に PCM へ展開しておく (`GameAudio(url:cache: true)` → `CachedPCMSource` / PCMCache.swift)。

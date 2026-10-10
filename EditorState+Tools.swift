@@ -11,18 +11,24 @@ extension EditorState {
     }
 
     /// 中心x(0...255)と幅から、保存用の (x, w) を決める。
-    /// グリッド有効時は「左端・右端」をグリッド線に合わせ、255 が割り切れない分は四捨五入で隙間/重なりを最小化する
+    /// グリッド有効時 (本家と同じ): 幅は 1マスの整数倍 (255 が割り切れない分は四捨五入)。
+    /// **ノーツの中心** を、いちばん近いグリッド線に合わせる。幅が偶数マスなら両端もグリッド線の上に来るが、
+    /// 奇数マス (例: 32 Grid で 7マス) のときは、両端がマスの半分ずれる (中心がグリッド線の上、が本家の動き)。
+    /// ノーツがレーン (0...255) の外にはみ出さない範囲で、いちばん近いグリッド線を選ぶ
     func snapNote(centerX: Double, widthUnits wu: Int) -> (x: Int, w: Int) {
         if gridAlign && gridLines >= 1 {
-            let n = Double(gridLines)
-            let cell = 255.0 / n
-            let cells = min(gridLines, max(1, Int((Double(wu) / cell).rounded())))
-            let exactW = cell * Double(cells)
-            var k = Int(((centerX - exactW / 2.0) / cell).rounded())
-            k = max(0, min(gridLines - cells, k))
-            let eL = 255.0 * Double(k) / n
-            let eR = 255.0 * Double(k + cells) / n
-            return (Int(((eL + eR) / 2.0).rounded()), Int((eR - eL).rounded()))
+            let n = gridLines
+            let cell = 255.0 / Double(n)
+            let cells = min(n, max(1, Int((Double(wu) / cell).rounded())))
+            let w = max(1, Int((cell * Double(cells)).rounded()))
+            // 中心にできるグリッド線は j = lo ... hi (番号は左端の線が 0)。奇数マスなら、端の線から半マス内側までしか寄れない
+            let lo = Int(ceil(Double(cells) / 2.0))
+            let hi = n - lo
+            if lo > hi {
+                return (Int((255.0 / 2.0).rounded()), w)      // レーンいっぱいの幅で、中心を線に置けないとき (線の本数が奇数) はレーンの真ん中
+            }
+            let j = max(lo, min(hi, Int((centerX / cell).rounded())))
+            return (Int((cell * Double(j)).rounded()), w)
         } else {
             let w = max(1, min(255, wu))
             var cx = Int(centerX.rounded())
@@ -68,12 +74,12 @@ extension EditorState {
             // ドラッグは使わない。1点ずつ、指を離した位置に置く (指を置いている間は、置く位置をゴーストで見せる)
             //   作成中でないとき: 1回目のタップ = 始点
             //   作成中のとき    : タップするたびに seg を足す (時系列の順でなくてよい)。
-            //                     始点より前 (beat がマイナス) は、SETTING の「beatがマイナスのsegを置くのを許可する」がオンのときだけ置ける。
-            //                     オフのときは、始点より前をタップすると「完」と同じ (seg の配置を終える)
+            //                     直前に置いた点 (終点) より前の時間 (始点より前 = beat がマイナスも) は、SETTING の「beatが時系列順でないsegを置くのを許可する」がオンのときだけ置ける。
+            //                     オフのときは、終点より前の時間をタップすると「完」と同じ (seg の配置を終える)
             let b = snapBeat(g.beatOf(current.y))
             if let base = slideDraftBase(), let from = slideDraftLastPoint() {
                 let p = snapNote(centerX: g.xOf(current.x), widthUnits: base.w)
-                if !allowNegativeSeg && b < base.beat {
+                if !allowUnorderedSeg && b < from.beat {
                     ghost = nil
                     if ended { finishSlide() }
                 } else if ended {
@@ -96,9 +102,7 @@ extension EditorState {
         case .remove:
             if ended && !moved {
                 if let i = hitNote(at: current, g: g) {
-                    pushUndo()
-                    chart.notes.remove(at: i)
-                    chartChanged()
+                    removeTapped(note: i, at: current, g: g)
                 }
             }
 
@@ -210,16 +214,14 @@ extension EditorState {
                 dragMode = .place
             }
         case .slideModify:
-            // 編集中のスライドの点 (seg) に触れたら、その点を動かす。それ以外はタップ (別のスライドを選ぶ / seg を追加)
-            if let r = segDeleteRect(g: g), r.contains(p) {
-                dragMode = .legacy                  // 「削除」ボタン (離したときに slideModifyTap が消す)
-            } else if let id = modifySlideID,
-               let i = chart.notes.firstIndex(where: { $0.id == id }),
-               let j = hitSeg(note: i, at: p, g: g) {
+            // seg (点) に触れたら、そのスライドが選択状態になり、そのまま点を動かせる (本家と同じ。先にスライドを選ぶ操作は要らない)。
+            // 点はどのスライドのものでもよい。点以外はタップ (始点で選択解除 / 別のスライドを選ぶ / seg を追加)
+            if let (i, j) = hitSegAny(at: p, g: g) {
                 let n = chart.notes[i]
                 let s = n.segs[j]
-                modifySegIndex = j                  // 触れた点を選ぶ (動かさず離せば、隣に「削除」が出たまま)
-                segDragNoteID = id
+                if modifySlideID != n.id { selectModifySlide(n.id) }
+                modifySegIndex = j                  // 掴んでいる点 (離すまで白い輪で目印)
+                segDragNoteID = n.id
                 segDragIndex = j
                 segDragOrig = s
                 // 点の中心と指のずれを保つ (点が指の下に隠れても、触った瞬間に飛ばないように)
@@ -345,7 +347,11 @@ extension EditorState {
     /// 幅スライダーに指を置いた瞬間。選択中のノーツがあれば、その幅を変える準備をする
     func widthSliderBegan() {
         widthSliderEnded()                  // 前回が取り消されて終わっていなければ、ここで締める
-        if isPlaying || selectedIDs.isEmpty { return }
+        if selectedIDs.isEmpty { return }
+        if isPlaying {
+            showToast("再生中は選択中のノーツの幅を変えられません。停止してから操作してください")
+            return
+        }
         for i in chart.notes.indices where selectedIDs.contains(chart.notes[i].id) {
             widthTargets.append((index: i, orig: chart.notes[i]))
         }
@@ -415,26 +421,31 @@ extension EditorState {
     }
 
     /// EDIT の Remove ボタン。
-    /// 選択中のノーツ (赤いノーツ) があれば、それをまとめて削除する (ツールは今のまま。Time range で範囲を選んでから消せる)。
-    /// 何も選択していなければ、従来どおり Remove ツール (タップで1個ずつ消す) の ON/OFF
+    /// 選択中のノーツ (赤いノーツ) があれば、それをまとめて削除して、そのまま Remove ツール (タップで1個ずつ消す) に切り替える
+    /// (Time range / LASSO などで範囲を選んで消したあと、続けて細かい消しゴム作業に移れる)。
+    /// 何も選択していなければ、従来どおり Remove ツールの ON/OFF。
+    /// Slide modify 中は、スライドを掴むと選択状態になるので、選択があっても Remove ツールに切り替えるだけにする
+    /// (そのまま選択を削除すると、seg を消したいのにスライドごと消えてしまうため。切り替えると選択は外れる)
     func removeButtonTapped() {
-        if selectedIDs.isEmpty {
+        if selectedIDs.isEmpty || tool == .slideModify {
             toggleTool(.remove)
-        } else {
-            removeSelected()
+        } else if removeSelected() {
+            tool = .remove          // 削除したあとは、ツールも Remove に (選択は removeSelected で空になっている)
         }
     }
 
-    func removeSelected() {
+    /// 選択中のノーツをまとめて削除する。削除の処理を終えたら true (再生中で断ったときは false。選択は残す)
+    @discardableResult
+    func removeSelected() -> Bool {
         if isPlaying {
             showToast("再生中は編集できません。停止してから操作してください")
-            return
+            return false
         }
         let ids = selectedIDs
         let before = chart.notes.count
         if !chart.notes.contains(where: { ids.contains($0.id) }) {
             selectedIDs = []
-            return
+            return true
         }
         pushUndo()                                      // 1回の削除が Undo 1回分
         chart.notes.removeAll(where: { ids.contains($0.id) })
@@ -442,6 +453,7 @@ extension EditorState {
         selectedIDs = []
         chartChanged()
         showToast("ノーツを \(removed) 個削除しました")
+        return true
     }
 
     // MARK: - LASSO (なぞって囲んだ範囲のノーツを選択)
@@ -843,12 +855,16 @@ extension EditorState {
     }
 
     // MARK: - Slide modify (レーン上の操作)
-    // 窓 (SlideModifyWindow) を出したまま、レーンで直接 seg を編集する。
-    //   スライドをタップ            → そのスライドを選ぶ (赤くなる)
-    //   選んだスライドの点 (seg) を動かす → ドラッグ (縦は 1/n 拍、横はグリッドに吸着)。ドラッグ1回が Undo 1回分
-    //   選んだスライドの点 (seg) をタップ → その点を選ぶ。隣に「削除」が出て、押すとその seg が消える
-    //   それ以外の所をタップ        → 点を選んでいるときは選択を外すだけ。選んでいないときは、選んだスライドの最後に seg を追加
-    //                              (Slide ツールと同じく、置いた順が seg の順番)
+    // 上の窓は無い。レーンで直接 seg を編集する (本家と同じ)。
+    //   seg (点) を掴む            → 掴んだ点があるスライドが選択状態になり、そのまま動かせる (スライドを先に選ぶ必要はない)
+    //                               動かせるのは横 (x) だけ。縦 (時間) にも動かすには SETTING の「allowSegVerticalMove」をオン
+    //                               ドラッグ1回が Undo 1回分
+    //   選択中のスライドの上 (始点・リボン・点のどこでも) をタップ → 選択を外す
+    //   別のスライドの本体をタップ    → そのスライドを選ぶ
+    //   選択中のスライドで、それ以外の空きをタップ → そのスライドの最後に seg を追加
+    //                               (Slide ツールと同じく、置いた順が seg の順番。SETTING の「時系列順でないsegを許可」がオフのときは、
+    //                                終点の seg より前の時間をタップしても、seg は足さずに選択を外す)
+    // seg の削除は Remove ツール (removeTapped): タップした位置にいちばん近い seg と、それ以降の seg を消す
 
     /// 編集中のスライドの、譜面上のインデックス (無ければ nil)
     var modifySlideIndex: Int? {
@@ -862,45 +878,20 @@ extension EditorState {
         selectedIDs = [id]
     }
 
-    /// 選んでいる点 (seg) の隣に出す「削除」ボタンの範囲 (レーンの座標)。描画 (drawSlideModify) と当たり判定で同じものを使う。
-    /// 点が右端に近いときは左側に出す。点を動かしている間・再生中・点が画面外のときは出さない (nil)
-    func segDeleteRect(g: LaneGeo) -> CGRect? {
-        guard tool == .slideModify, !isPlaying,
-              !(dragMode == .segDrag && dragMoved),
-              let i = modifySlideIndex, let j = modifySegIndex,
-              j < chart.notes[i].segs.count else { return nil }
-        let n = chart.notes[i]
-        let s = n.segs[j]
-        let cx = g.px(Double(n.x + s.x))
-        let cy = g.py(n.beat.value + s.beat.value)
-        if cy < -10 || cy > g.H + 10 { return nil }
-        let w: CGFloat = 64
-        let h: CGFloat = 36
-        var x = cx + 22
-        if x + w > g.W - 4 { x = cx - 22 - w }
-        let y = max(2, min(g.H - h - 2, cy - h / 2))
-        return CGRect(x: x, y: y, width: w, height: h)
-    }
-
-    /// 選んでいる点 (seg) を消す。1つしか無い seg は消せない (消すと通常のノーツになってしまうため)
-    func deleteModifySeg() {
-        guard let i = modifySlideIndex, let j = modifySegIndex else { return }
-        removeSeg(note: i, seg: j)
+    /// 編集中のスライドの選択を外す (始点のタップ)
+    func deselectModifySlide() {
+        if let id = modifySlideID { selectedIDs.remove(id) }
+        modifySlideID = nil
         modifySegIndex = nil
     }
 
-    /// 「完了」: Slide modify を終える (選択は残る)
-    func finishSlideModify() {
-        tool = .unselected
-    }
-
-    /// Slide modify 中にレーンをタップしたとき (点のドラッグ・タップは beginTouch で別に扱う)。
-    /// 「削除」ボタンなら、選んでいる点を消す。
+    /// Slide modify 中にレーンをタップしたとき (点の掴み・ドラッグは beginTouch で別に扱う)。
+    /// 選択中のスライドの上 (始点・リボン・点のどこでも) なら、選択を外す。
     /// 編集中でない別のスライドに触れたら、そちらを選ぶ。
-    /// それ以外 (空き / 編集中スライドの帯の上) は、点を選んでいるときは選択を外すだけ (うっかり seg を足さない)。選んでいないときは seg を足す
+    /// それ以外 (空き) は、選択中のスライドがあれば seg を足す。無ければ何もしない
     func slideModifyTap(at p: CGPoint, g: LaneGeo) {
-        if let r = segDeleteRect(g: g), r.contains(p) {
-            deleteModifySeg()
+        if let i = modifySlideIndex, chart.notes[i].isSlide, noteHit(chart.notes[i], at: p, g: g) {
+            deselectModifySlide()
             return
         }
         for i in chart.notes.indices.reversed() {
@@ -910,14 +901,7 @@ extension EditorState {
                 return
             }
         }
-        guard let i = modifySlideIndex, chart.notes[i].isSlide else {
-            showToast("編集するスライドをタップして選んでください")
-            return
-        }
-        if modifySegIndex != nil {
-            modifySegIndex = nil
-            return
-        }
+        guard let i = modifySlideIndex, chart.notes[i].isSlide else { return }
         addSegAt(note: i, point: p, g: g)
     }
 
@@ -925,8 +909,9 @@ extension EditorState {
     private func addSegAt(note i: Int, point p: CGPoint, g: LaneGeo) {
         let n = chart.notes[i]
         let b = snapBeat(g.beatOf(p.y))
-        if !allowNegativeSeg && b < n.beat {
-            finishSlideModify()                         // 始点より前 (beat がマイナス) は置けない設定のとき: 「完了」と同じ
+        let lastBeat = n.segs.last.map { n.beat + $0.beat } ?? n.beat      // 終点の seg (いちばん最後に置いた点) の時間
+        if !allowUnorderedSeg && b < lastBeat {
+            deselectModifySlide()                       // 時系列順でない位置は置けない設定のとき: 置かずに、選択を外す
             return
         }
         let q = snapNote(centerX: g.xOf(p.x), widthUnits: n.w)
@@ -942,24 +927,35 @@ extension EditorState {
         showToast("seg #\(chart.notes[i].segs.count) を追加しました")
     }
 
-    /// 編集中のスライドの点 (seg) のうち、触れた位置にいちばん近いもの (26pt 以内)
-    private func hitSeg(note i: Int, at p: CGPoint, g: LaneGeo) -> Int? {
-        let n = chart.notes[i]
-        var best: Int? = nil
-        var bestD: CGFloat = 26
-        for j in n.segs.indices {
-            let s = n.segs[j]
-            let q = CGPoint(x: g.px(Double(n.x + s.x)), y: g.py(n.beat.value + s.beat.value))
-            let d = hypot(q.x - p.x, q.y - p.y)
-            if d < bestD {
-                bestD = d
-                best = j
+    /// 触れた位置にいちばん近い点 (seg) を、全スライドから探す (26pt 以内)。(譜面上のインデックス, seg のインデックス)。
+    /// ほぼ同じ距離なら、選択中のスライドの点を優先する (重なっていても、いま触っているスライドを動かせるように)
+    private func hitSegAny(at p: CGPoint, g: LaneGeo) -> (Int, Int)? {
+        let reach: CGFloat = 26
+        var best: (Int, Int)? = nil
+        var bestScore = CGFloat.greatestFiniteMagnitude
+        for i in chart.notes.indices.reversed() {
+            let n = chart.notes[i]
+            if !n.isSlide { continue }
+            let bonus: CGFloat = (n.id == modifySlideID) ? 3 : 0
+            for j in n.segs.indices {
+                let s = n.segs[j]
+                let qy = g.py(n.beat.value + s.beat.value)
+                if abs(qy - p.y) > reach { continue }       // 譜面に点が何万個あっても軽いように、縦に遠いものは先に外す
+                let qx = g.px(Double(n.x + s.x))
+                let d = hypot(qx - p.x, qy - p.y)
+                if d >= reach { continue }
+                let score = d - bonus
+                if score < bestScore {
+                    bestScore = score
+                    best = (i, j)
+                }
             }
         }
         return best
     }
 
-    /// 点を指に合わせて動かす (10pt 以上動かしてから)
+    /// 点を指に合わせて動かす (10pt 以上動かしてから)。
+    /// 縦 (時間) は、SETTING の allowSegVerticalMove がオンのときだけ動かす。オフのときは掴んだ時の拍のまま、横だけ動く
     private func dragSeg(current: CGPoint, g: LaneGeo) {
         guard let id = segDragNoteID,
               let i = chart.notes.firstIndex(where: { $0.id == id }),
@@ -968,11 +964,26 @@ extension EditorState {
             return
         }
         let n = chart.notes[i]
-        var b = snapBeat(g.beatOf(current.y + segDragGrab.height))
-        if !allowNegativeSeg && b < n.beat { b = n.beat }      // オフのときは始点の位置で止まる
-        let q = snapNote(centerX: g.xOf(current.x + segDragGrab.width), widthUnits: n.w)
-        let newSeg = Seg(beat: b - n.beat, x: q.x - n.x)
         let cur = n.segs[segDragIndex]
+        var segBeat = segDragOrig?.beat ?? cur.beat     // 縦を許可しないときは、掴んだ時の拍 (吸着もさせない)
+        if allowSegVerticalMove {
+            var b = snapBeat(g.beatOf(current.y + segDragGrab.height))
+            if !allowUnorderedSeg {
+                // 時系列順でない位置には動かせない: 1つ前の点 (j == 0 なら始点) と、1つ後ろの seg の時間のあいだで止まる。
+                // もともと順番が崩れている側は縛らない (動かして直せるように)
+                let myBeat = n.beat + cur.beat
+                let j = segDragIndex
+                let prevBeat = j == 0 ? n.beat : n.beat + n.segs[j - 1].beat
+                if prevBeat <= myBeat && b < prevBeat { b = prevBeat }
+                if j + 1 < n.segs.count {
+                    let nextBeat = n.beat + n.segs[j + 1].beat
+                    if nextBeat >= myBeat && b > nextBeat { b = nextBeat }
+                }
+            }
+            segBeat = b - n.beat
+        }
+        let q = snapNote(centerX: g.xOf(current.x + segDragGrab.width), widthUnits: n.w)
+        let newSeg = Seg(beat: segBeat, x: q.x - n.x)
         if newSeg.beat == cur.beat && newSeg.x == cur.x { return }
         if !segDragUndoPushed {
             pushUndo()                                  // 動かす前の状態を積む (指を離すまでが Undo 1回分)
@@ -982,7 +993,7 @@ extension EditorState {
     }
 
     private func finishSegDrag() {
-        defer { objectWillChange.send() }               // 動かしている間は消していた「削除」を、離したら出し直す
+        modifySegIndex = nil                            // 掴んでいた点の目印 (白い輪) を消す
         let pushed = segDragUndoPushed
         let orig = segDragOrig
         let id = segDragNoteID
@@ -1002,18 +1013,51 @@ extension EditorState {
         chartChanged()
     }
 
-    // MARK: - Slide modify (seg の削除)
+    // MARK: - Remove ツール (タップで削除)
 
-    /// seg を1つ消す (1つしか無いときは消さない)
-    func removeSeg(note i: Int, seg j: Int) {
-        guard i < chart.notes.count, j < chart.notes[i].segs.count else { return }
-        if chart.notes[i].segs.count <= 1 {
-            showToast("seg は1つ以上必要です")
+    /// Remove ツールで、ノーツ (chart.notes[i]) をタップしたときの削除。
+    /// タップ / ウィップ: そのノーツを消す。
+    /// スライド: 触れた位置にいちばん近い点 (始点 / seg) を探して、
+    ///   ・始点か 1 番目の seg (segs[0]) がいちばん近い → スライド全体を消す (始点だけ残っても意味がないため)
+    ///   ・2 番目以降の seg がいちばん近い → その seg と、それ以降の seg を消す。
+    ///     「それ以降」は時間の順ではなく、譜面に記録されている seg の並び (置いた順) で数える
+    /// 点までの近さは、点の高さ (拍) はそのまま、横はスライドの幅の中なら 0 として測る (幅の広いスライドで、帯の端を触っても縦でいちばん近い点が選ばれる)
+    func removeTapped(note i: Int, at p: CGPoint, g: LaneGeo) {
+        guard i < chart.notes.count else { return }
+        let n = chart.notes[i]
+        if !n.isSlide {
+            pushUndo()
+            chart.notes.remove(at: i)
+            chartChanged()
             return
         }
+        let hw = CGFloat(n.w) / 255.0 * g.trackW / 2.0
+        var pts: [CGPoint] = [CGPoint(x: g.px(Double(n.x)), y: g.py(n.beat.value))]     // 0 = 始点、k = segs[k-1]
+        for s in n.segs {
+            pts.append(CGPoint(x: g.px(Double(n.x + s.x)), y: g.py(n.beat.value + s.beat.value)))
+        }
+        var bestK = 0
+        var bestScore = CGFloat.greatestFiniteMagnitude
+        for k in pts.indices {
+            let dx = max(0, abs(pts[k].x - p.x) - hw)
+            let dy = pts[k].y - p.y
+            let score = hypot(dx, dy) + 0.001 * hypot(pts[k].x - p.x, dy)       // 同じ近さのときは、点の中心にいちばん近いもの
+            if score < bestScore {
+                bestScore = score
+                bestK = k
+            }
+        }
+        if bestK <= 1 {
+            pushUndo()
+            chart.notes.remove(at: i)
+            chartChanged()
+            return
+        }
+        let removed = n.segs.count - (bestK - 1)
         pushUndo()
-        chart.notes[i].segs.remove(at: j)
+        chart.notes[i].segs.removeSubrange((bestK - 1)...)
         chartChanged()
+        showToast("seg #\(bestK) 以降 (\(removed) 個) を削除しました")
     }
 
     // MARK: - BPM

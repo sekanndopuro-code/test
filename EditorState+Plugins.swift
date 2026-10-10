@@ -24,24 +24,27 @@ extension EditorState {
             bridge.flushMain()
             self.pluginRunning = false
             self.pluginBridge = nil
-            self.pluginLog = bridge.takeLog()
+            var log = bridge.takeLog()
             let unsupported = bridge.takeUnsupported()
+            let notified = bridge.wasNotified()
             switch result {
             case .ok:
+                // OK を押させるダイアログは出さない (作譜の邪魔になる)。画面の下の知らせだけにして、詳細は Adv. の「出力」欄に残す
                 if unsupported.isEmpty {
-                    self.showToast("「\(title)」を実行しました")
+                    // プラグイン自身が ShowMessage / ShowTip で知らせた後は、「実行しました」で上書きしない
+                    if !notified { self.showToast("「\(title)」を実行しました") }
                 } else {
                     let names = unsupported.joined(separator: ", ")
-                    self.pluginDialog = PluginDialog(
-                        kind: .message,
-                        title: title,
-                        message: "実行しました。ただし、まだ対応していない関数が呼ばれたので、何もせずに通過しました:\n" + names)
+                    if !log.isEmpty && !log.hasSuffix("\n") { log += "\n" }
+                    log += "[未対応] まだ対応していない関数が呼ばれたので、何もせずに通過しました: " + names + "\n"
+                    if !notified { self.showPluginNotice("「\(title)」を実行しました (未対応の関数を通過: \(names))") }
                 }
             case .aborted:
                 self.showToast("「\(title)」を中断しました")
             case .failed(let msg):
                 self.pluginDialog = PluginDialog(kind: .message, title: title + " — エラー", message: msg)
             }
+            self.pluginLog = log
         }
     }
 
