@@ -76,6 +76,8 @@ jobs:
             <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
             <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
             <key>UILaunchScreen</key><dict/>
+            <key>UIFileSharingEnabled</key><true/>
+            <key>LSSupportsOpeningDocumentsInPlace</key><true/>
             <key>UISupportedInterfaceOrientations</key>
             <array>
               <string>UIInterfaceOrientationLandscapeRight</string>
