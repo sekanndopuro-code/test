@@ -28,6 +28,78 @@ jobs:
       - name: Xcode のバージョンを表示
         run: xcodebuild -version
 
+      # Rubber Band 本体を取得し、Swift から参照できる C++ モジュールを用意する。
+      - name: Rubber Band を取り込む
+        run: |
+          set -e
+          git clone --depth 1 --branch v4.0.0 https://github.com/breakfastquay/rubberband.git /tmp/rb
+          D=Vendor/CRubberBand
+          mkdir -p "$D/include"
+          cp -R /tmp/rb/src "$D/src"
+          cp -R /tmp/rb/rubberband "$D/rubberband"
+          cp -R /tmp/rb/single "$D/single"
+          cp /tmp/rb/COPYING "$D/COPYING"
+          cp /tmp/rb/rubberband/rubberband-c.h "$D/include/rubberband-c.h"
+          printf 'module CRubberBand {\n    header "rubberband-c.h"\n    export *\n}\n' > "$D/include/module.modulemap"
+
+      # Playgrounds 用の Package.swift は残さず、Actions のビルド中だけ C++ ターゲットを加える。
+      - name: ビルド用の Package.swift に差し替える
+        run: |
+          cat > Package.swift <<'EOF'
+          // swift-tools-version: 5.8
+          import PackageDescription
+          import AppleProductTypes
+
+          let package = Package(
+              name: "MalodySlideEditor",
+              platforms: [
+                  .iOS("16.0")
+              ],
+              products: [
+                  .iOSApplication(
+                      name: "MalodySlideEditor",
+                      targets: ["AppModule"],
+                      bundleIdentifier: "local.malody.slideeditor",
+                      teamIdentifier: "",
+                      displayVersion: "1.0",
+                      bundleVersion: "1",
+                      appIcon: .placeholder(icon: .map),
+                      accentColor: .presetColor(.cyan),
+                      supportedDeviceFamilies: [
+                          .pad,
+                          .phone
+                      ],
+                      supportedInterfaceOrientations: [
+                          .landscapeRight,
+                          .landscapeLeft
+                      ]
+                  )
+              ],
+              targets: [
+                  .executableTarget(
+                      name: "AppModule",
+                      dependencies: ["CRubberBand"],
+                      path: ".",
+                      exclude: ["Vendor"]
+                  ),
+                  .target(
+                      name: "CRubberBand",
+                      path: "Vendor/CRubberBand",
+                      sources: ["single/RubberBandSingle.cpp"],
+                      publicHeadersPath: "include",
+                      cxxSettings: [
+                          .headerSearchPath("."),
+                          .define("NDEBUG")
+                      ],
+                      linkerSettings: [
+                          .linkedFramework("Accelerate")
+                      ]
+                  )
+              ],
+              cxxLanguageStandard: .cxx17
+          )
+          EOF
+
       - name: ビルド (署名なし)
         run: |
           set -o pipefail
