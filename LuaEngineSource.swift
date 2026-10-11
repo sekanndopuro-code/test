@@ -2528,7 +2528,17 @@ function makeEditor() {
   // ----- 画面表示・入力 -----
   def('ShowMessage', (s) => { native('message', tostr(s)); });
   def('ShowTip', (s) => { native('tip', tostr(s)); });
-  def('GetUserInput', (title, dflt) => native('input', title === undefined ? '' : tostr(title), dflt === undefined ? '' : tostr(dflt)));
+  // GetUserInput(題, 初期値, コールバック): Malody V のプラグインは、答えを function(値) ... end で受け取る書き方が多い (wipe2hold など)。
+  //   OK を押したときだけコールバックを呼ぶ (キャンセルでは呼ばない)。コールバックを渡さず、戻り値で受け取る書き方もそのまま使える。
+  //   コールバックは 3 番目 (題, 初期値, コールバック) が基本。初期値を省いた (題, コールバック) も受け付ける
+  def('GetUserInput', (title, dflt, cb) => {
+    let initial = dflt;
+    let fn = cb;
+    if (typeof dflt === 'function') { fn = dflt; initial = undefined; }
+    const answer = native('input', title === undefined ? '' : tostr(title), initial === undefined ? '' : tostr(initial));
+    if (typeof fn === 'function' && answer !== undefined) call(fn, answer);
+    return answer;
+  });
 
   // ----- スプライト (レーンの上に画像を重ねる。操作型プラグインのつまみなど) -----
   //   モジュールの .Beat (拍の表) / .X (中心。レーン幅に対する %) / .Width (幅。レーン幅に対する %) を書き換えると、すぐ画面に反映される

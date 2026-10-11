@@ -245,6 +245,7 @@ Swift Playgrounds のアプリには Lua 本体 (C 言語) を組み込めない
 | **実装済み (使い方は推測。実際のプラグインで確かめて調整)** | `GetCurrentTime` (ms) `GetSystemTime` `GetCurrentBeat` `GetCurrentDivide` `GetNoteCount` `GetNoteAt` `GetTimeCount` `GetTimeAt` `GetEffectCount` `GetEffectAt` `AddTime` `DeleteTime` `AddEffect` `DeleteEffect` `SelectNote` `SetGridLine` `SeekTo` `MakeBeat` `GetUserInput` |
 | **未対応 (呼ばれると、何もせず通過して、実行後にどれが呼ばれたかを表示)** | `GetNoteFlag` `GetNoteGroup` (どちらも 0 を返す) `SetNoteFlag` `SetNoteGroup` `WriteFilePlugin` `ReadFileSelect` `ReadBytesSelect` `ReadData` `WriteData` `WriteChartCustom` `CallShortcut` `GetUserSelect` `GetUserOption` `AddText` `AddSpriteUndo` `AddTextUndo` `RemoveSpriteUndo` |
 
+- `GetUserInput(題, 初期値, コールバック)`: OK を押したときだけ、答えの文字列を `コールバック(値)` に渡して呼ぶ (キャンセルでは呼ばない)。戻り値でも同じ文字列を返すので、コールバックを使わない書き方もできる。`(題, コールバック)` のように初期値を省いてもよい。`wipe2hold` のようにコールバックで受け取るプラグインは、この対応で動く (操作型プラグインの中では、これまでどおり nil が返り、コールバックは呼ばれない)
 - `GetNoteBeat(note, true)` は始点、`GetNoteBeat(note, false)` は終点 (スライドは、始点 + 最後の seg の相対 beat)。`GetNoteTime` も同じ
 - ノーツの種類は `Tap = 1` / `Wipe = 1024` / `Slide = 2048` (`GetNoteType` の戻り値、`AddNote` の引数)。スライドは「seg を持つノーツ」なので、`AddNote(2048)` で作ったノーツは、`AddNoteSlideBody` で seg を足すまではタップとして保存される
 - `AddNoteSlideBody(note, beat)` は、seg を **beat の順になる位置に挿入**して、その位置 (0 始まり) を返す (本物の Malody と同じ。同じ beat なら、あとから足したほうが後ろ)。`SetNoteSlideBodyX` などの添字は、この並び順
