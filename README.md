@@ -20,8 +20,9 @@
 | SeekDensity.swift | シークバー (再生ボタンの下) のノーツ密度ヒストグラムの計算 (120 区間 / 20 段階)。描画は `Renderers.swift` の `SeekRenderer` |
 | EditorView.swift | 画面レイアウト・右ボタン列・ポップアップ |
 | Sheets.swift | `Beat.parse` (拍の入力) だけ。META のシートはやめて、右ボタン列 + 右ウィンドウになった (下の「META / SETTING」) |
-| EditorState+Meta.swift | **META の動き**: 列を開く / 閉じる (`openMetaMenu` / `closeMetaMenu`)、More の mcz 共有 (`shareMCZNow` + 共有シート `MCZSharer`)、Quit (`quitEditor`) |
-| MetaMenuIcons.swift | META の列のアイコン (Information = `InfoIcon` / Quit = `PowerIcon`)。Back と More は EDIT 中と同じ |
+| EditorState+Meta.swift | **META の動き**: 列を開く / 閉じる (`openMetaMenu` / `closeMetaMenu`)、More の mcz 共有 (`shareMCZNow` + 共有シート `MCZSharer`)、Review の多重ノーツ探し (`reviewChart`)、Quit (`quitEditor`) |
+| MetaMenuIcons.swift | META の列のアイコン (Information = `InfoIcon` / Review = `ReviewIcon` / Quit = `PowerIcon`)。Back と More は EDIT 中と同じ |
+| ReviewNotice.swift | Review で多重ノーツが無かったときに、画面の上へ一瞬だけ出る「0 issue found」の札 (`ReviewNoticeLayer`)。Grid settings の枠を縮めた形 (`ReviewNoticeShape`) |
 | SideWindow.swift | **BPM list / Effect list / Information / SETTING** の右ウィンドウ。シートではなく EditorView に重ね、右の端から約 0.16 秒で滑って入る (`SidePanelLayer` / `SideWindow`)。ウィンドウより左を触ると、すぐ閉じる。出し入れは `EditorState.openSidePanel(_:)` / `closeSidePanel()` |
 | GridSettingsDialog.swift | **Grid settings** (More メニューから)。シートではなく、EditorView に重ねる本家風の中央ダイアログ (`GridSettingsDialog`)。背景のぼかし `BackdropBlur` もここ |
 | MoreMenuIcons.swift | More メニューのアイコン (`MoreMenuIcon`)。本家の画面収録から起こした輪郭 (`MoreMenuIconData`) と、自作の Time range (正方形 + 上矢印) |
@@ -271,9 +272,10 @@ Swift Playgrounds のアプリには Lua 本体 (C 言語) を組み込めない
 ## META / SETTING (右ボタン列 + 右ウィンドウ。シートはやめた)
 BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.information` / `.setting` を足して、`SidePanelLayer` / `SideWindow` がそのまま出し入れする (右の端から滑って入る・ウィンドウより左を触ると閉じる・右ボタン列は開いている間だけ見えなくなる)。
 
-- **META** (`EditorState.metaOpen`): 押すと、右ボタン列が EDIT と同じ動き (`panelSwap`) で **Back / Information / More / Quit** に入れ替わる。アイコンの左の名前 (Back / Information / More / Quit) も EDIT と同じく、2.6 秒たつと消える。本家の Delete all / Upload は使わない。階層は無い
+- **META** (`EditorState.metaOpen`): 押すと、右ボタン列が EDIT と同じ動き (`panelSwap`) で **Back / Information / More / Review / Quit** に入れ替わる。アイコンの左の名前 (Back / Information / More / Review / Quit) も EDIT と同じく、2.6 秒たつと消える。本家の Delete all / Upload は使わない。階層は無い
   - **Information**: 右ウィンドウ (`InformationWindowContent`)。曲名 / Original Title / アーティスト / Original Artist / Version / Creator (入力欄。打つたびに譜面へ反映してオートセーブ)、曲のファイル / 背景ファイル (見るだけ)、オフセット (ms。入力欄 + −10 / +10 ボタン。マイナスも打てる)。縦にスクロールでき、入力欄以外を触るとキーボードが下がる
   - **More (•••)**: 押した瞬間に mcz を作って、共有シート (保存 / AirDrop / ファイルなど) を出す。もう 1 回タップする必要は無い (`EditorState.shareMCZNow` → `MCZSharer`)。失敗したときはトーストで知らせる
+  - **Review** (自作。More の下、Quit の上。アイコンは正方形の中に小さい正方形 = `ReviewIcon`): 多重ノーツ探し (`EditorState.reviewChart`)。**同じ拍・同じ中心 x** に「tap と tap」または「tap と wipe」が重なっているところを探す (wipe と wipe、スライドの始点・seg は調べない。幅 w は見ない)。見つかったら、再生中なら止めて、いちばん早い拍へ飛ぶ (複数あっても時系列で最初の 1 か所。直さずにもう一度押すと、同じところへ飛ぶ)。META の列は開いたまま。見つからなければ、画面の上に半透明の黒い札「0 issue found」が一瞬だけ出て勝手に消える (`ReviewNoticeLayer`。Grid settings と同じ濃さ・縁・形を縮めたもの。0.08 秒で出て、0.4 秒見せて、0.22 秒で消える)
   - **Quit**: 押した瞬間に、再生を止めて・保存して・エディタを閉じてファイル選択へ戻る (`EditorState.quitEditor`)。確認ダイアログは出さない (保存してから閉じるので、編集は失われない)
   - **Back**: いつもの列 (EDIT / BPM / EFFECT / TEST / META / SETTING) に戻る
 - **SETTING**: 右ウィンドウ (`SettingWindowContent`)。項目は、これまでの SETTING と同じ (曲の音量 / ノーツサウンドの音量 / 背景画像の暗さ / 立ち上がりをはっきりさせる / beatが時系列順でないsegを置くのを許可する / slide modifyでのsegの移動で縦方向の移動を許可する / 長押しで選択解除)。文字・縁取り・選んでいる色 (`Color.panelBlue`) を他の右ウィンドウにそろえ、縦にスクロールできる。チェックボックスは白い縁取りの四角

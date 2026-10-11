@@ -2,6 +2,7 @@ import SwiftUI
 
 // META の列のアイコン。Back と More (•••) は EDIT 中と同じ (PanelIconView の .back / .more)。
 // 本家にある Information (レコードの絵) と Quit (電源の絵) は、他のアイコンと同じ太さ (線 4pt、角は丸い) で描いている。
+// 自作の Review (四角の中に小さい四角) も、同じ太さで描いた。
 // どちらも、他のアイコンと同じく、パスで描いている (SF Symbols に頼らない)。
 
 /// Information: 角丸の四角の中に、レコード盤 (輪 + 真ん中の点)
@@ -46,6 +47,22 @@ struct PowerIcon: View {
             bar.move(to: CGPoint(x: cx, y: cy - r - 4))
             bar.addLine(to: CGPoint(x: cx, y: cy - 1))
             ctx.stroke(bar, with: .color(color), style: StrokeStyle(lineWidth: 4, lineCap: .round))
+        }
+        .frame(width: 42, height: 36)
+    }
+}
+
+/// Review: 正方形の中に、小さい正方形 (多重ノーツ探し)。外側は他のアイコンと同じ太さ (線 4pt)、内側は Information の輪と同じ 3.4pt
+struct ReviewIcon: View {
+    let color: Color
+
+    var body: some View {
+        Canvas { ctx, size in
+            let cx = size.width / 2, cy = size.height / 2
+            let outer = Path(roundedRect: CGRect(x: cx - 15, y: cy - 15, width: 30, height: 30), cornerRadius: 6)
+            ctx.stroke(outer, with: .color(color), style: StrokeStyle(lineWidth: 4, lineJoin: .round))
+            let inner = Path(roundedRect: CGRect(x: cx - 5.5, y: cy - 5.5, width: 11, height: 11), cornerRadius: 2)
+            ctx.stroke(inner, with: .color(color), style: StrokeStyle(lineWidth: 3.4, lineJoin: .round))
         }
         .frame(width: 42, height: 36)
     }

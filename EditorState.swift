@@ -152,7 +152,8 @@ final class EditorState: ObservableObject {
     @Published var ghost: Ghost? = nil
     @Published var toast: String? = nil
     @Published var saveStatus = "保存済み"
-    @Published var metaOpen = false           // META を押した後の右ボタン列 (Back / Information / More / Quit)。EDIT と同じく、アイコン列が入れ替わる
+    @Published var metaOpen = false           // META を押した後の右ボタン列 (Back / Information / More / Review / Quit)。EDIT と同じく、アイコン列が入れ替わる
+    @Published var reviewNoticeTick = 0       // review で重なりが見つからなかった回数。増えるたびに、画面の上に「0 issue found」が一瞬だけ出る (ReviewNotice.swift)
     @Published var sidePanel: SidePanel? = nil    // BPM / Effect / Information / SETTING の右ウィンドウ。出し入れは openSidePanel / closeSidePanel (横から滑って一瞬で出入りする)
     @Published var showGridDialog = false     // Grid settings のダイアログ (シートではなく EditorView の上に重ねる。アニメーションなしで一瞬で出る)
     @Published var testLaunch: TestPlayLaunch? = nil

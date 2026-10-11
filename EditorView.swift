@@ -654,7 +654,7 @@ struct RightPanel: View {
     }
 
     /// META 中のアイコンの左に出る名前 (上から、metaButtons の並びと同じ順)
-    private var metaLabels: [String] { ["Back", "Information", "More", "Quit"] }
+    private var metaLabels: [String] { ["Back", "Information", "More", "Review", "Quit"] }
 
     /// 名前の列。ボタン列の左端のすぐ左 (レーンの上) に、右そろえで並ぶ。タッチは下のレーンへ通す
     @ViewBuilder
@@ -722,7 +722,7 @@ struct RightPanel: View {
         }
     }
 
-    /// META を押した後の列。本家の 6 つのうち、使う Information / More / Quit だけ (階層なし)
+    /// META を押した後の列。本家の 6 つのうち、使う Information / More / Quit だけ (階層なし)。More と Quit の間に、自作の Review
     private func metaButtons(pitch: CGFloat) -> some View {
         VStack(spacing: 0) {
             PanelButton(glyph: "←", icon: { AnyView(PanelIconView(kind: .back, color: $0)) }) {      // Back
@@ -735,6 +735,10 @@ struct RightPanel: View {
             .frame(height: pitch)
             PanelButton(glyph: "•••", icon: { AnyView(PanelIconView(kind: .more, color: $0)) }) {      // More: すぐ mcz を共有
                 state.shareMCZNow()
+            }
+            .frame(height: pitch)
+            PanelButton(glyph: "□", icon: { AnyView(ReviewIcon(color: $0)) }) {      // Review: 多重ノーツを探して、いちばん早い拍へ飛ぶ (無ければ「0 issue found」)
+                state.reviewChart()
             }
             .frame(height: pitch)
             PanelButton(glyph: "⏻", icon: { AnyView(PowerIcon(color: $0)) }) {      // Quit: すぐ保存して閉じる
@@ -849,6 +853,7 @@ struct EditorView: View {
         .overlay(gridDialogLayer)
         .overlay(SidePanelLayer(state: state))           // BPM list / Effect list / Information / SETTING: 右からスライドして出る (トーストより下の層)
         .overlay(toastLayer, alignment: .bottom)
+        .overlay(ReviewNoticeLayer(tick: state.reviewNoticeTick), alignment: .top)    // review の「0 issue found」(画面の上に一瞬だけ)
         .alert("分割 (1/n)", isPresented: $showInput) {
             TextField("2〜1024", text: $inputText)
                 .keyboardType(.numberPad)

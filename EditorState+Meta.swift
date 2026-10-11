@@ -1,17 +1,18 @@
 import SwiftUI
 import UIKit
 
-// MARK: - META (Back / Information / More / Quit)
+// MARK: - META (Back / Information / More / Review / Quit)
 //
 // 本家は、META を押すとアイコンが 5〜6 個 (Back / Information / Delete all / Upload / More / Quit) 出て、
-// More の先にもう一段メニューがある。ここでは使う 3 つだけにして、階層は作らない:
+// More の先にもう一段メニューがある。ここでは使う 4 つだけにして、階層は作らない:
 //   ・Information … 右ウィンドウ (BPM list / Effect list と同じ滑って入る窓) で曲名・作者・オフセットなどを編集
 //   ・More (•••)  … 押した瞬間に mcz を作って、共有シートを出す (「譜面をパッケージ化してエクスポート」)
+//   ・Review      … 多重ノーツ (同じ拍・同じ中心 x に、tap と tap / tap と wipe が重なっているところ) を探して、いちばん早い拍へ飛ぶ。無ければ「0 issue found」
 //   ・Quit        … 押した瞬間に保存して、エディタを閉じてファイル選択へ戻る
 // 右ボタン列の入れ替わり・名前 (Back / Information / ...) の出方は EDIT と同じ (EditorView.swift の RightPanel)。
 
 extension EditorState {
-    /// META を押す。右ボタン列が META 用の 4 つ (Back / Information / More / Quit) に入れ替わる
+    /// META を押す。右ボタン列が META 用の 5 つ (Back / Information / More / Review / Quit) に入れ替わる
     func openMetaMenu() {
         popup = .none
         metaOpen = true
@@ -30,6 +31,46 @@ extension EditorState {
         } catch {
             showToast("エクスポートに失敗しました: \(error.localizedDescription)")
         }
+    }
+
+    /// Review: 多重ノーツ (拍も中心 x も全く同じ位置に重なっている tap と tap / tap と wipe) を探す。
+    ///   ・見つかったら、いちばん早い拍へ飛ぶ (再生中なら止めてから飛ぶ)。複数あっても、時系列で最初の 1 か所だけ
+    ///   ・見つからなければ、画面の上に「0 issue found」が一瞬だけ出る (`reviewNoticeTick` を進める。表示は ReviewNotice.swift)
+    ///   ・スライド (seg のあるノーツ) は、始点も seg も調べない。wipe と wipe の重なりも調べない
+    func reviewChart() {
+        if let beat = firstOverlapBeat() {
+            if isPlaying { pause() }
+            setViewBeat(beat.value)
+        } else {
+            reviewNoticeTick &+= 1
+        }
+    }
+
+    /// 同じ (拍, 中心 x) に、tap が 1 つ以上あり、tap + wipe が合わせて 2 つ以上あるところのうち、いちばん早い拍。無ければ nil。
+    /// 数え方は、描画 (Renderers) と同じ: スライド以外で、wipe でないものは tap
+    private func firstOverlapBeat() -> Beat? {
+        struct Spot: Hashable {
+            let beat: Beat
+            let x: Int
+        }
+        var taps: [Spot: Int] = [:]
+        var wipes: [Spot: Int] = [:]
+        for n in chart.notes where !n.isSlide {
+            let spot = Spot(beat: n.beat, x: n.x)
+            if n.isWipe {
+                wipes[spot, default: 0] += 1
+            } else {
+                taps[spot, default: 0] += 1
+            }
+        }
+        var best: Beat? = nil
+        for (spot, tapCount) in taps {
+            // tap が 2 つ以上 (tap と tap)、または tap のところに wipe が 1 つ以上 (tap と wipe)
+            guard tapCount >= 2 || (wipes[spot] ?? 0) >= 1 else { continue }
+            if let b = best, b <= spot.beat { continue }
+            best = spot.beat
+        }
+        return best
     }
 
     /// Quit: 再生を止めて、保存して、エディタを閉じる (確認ダイアログなし)
