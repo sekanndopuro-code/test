@@ -802,7 +802,23 @@ extension EditorState {
         showToast("\(clip.count) 個を貼り付けました")
     }
 
-    /// x=127 を中心に左右反転 (x' = 254 - x、seg の相対x は符号反転)。選択が無いときは全ノーツ
+    /// レーンの真ん中 (x=127.5) を軸にした、中心 x の左右反転。
+    /// レーンは x=0...255 なので、鏡の軸は 127.5 (x' = 255 - x)。以前は 127 (254 - x) を軸にしていて、反転後が 1 ずれていた。
+    /// グリッド有効で、反転前の中心がグリッド線の上にあったときは、反転後も **グリッド線 (j → gridLines - j) の上** に置く
+    /// (255 - x の丸めで、線から 1 ずれることがないように。gridLineX は「置く」「動かす」ときと同じ丸め方)。
+    /// グリッド線の上にないノーツ (Grid align オフで置いたもの等) は、そのまま 255 - x
+    private func flippedX(_ x: Int) -> Int {
+        if gridAlign && gridLines >= 1 {
+            let j = nearestGridIndex(Double(x))
+            if gridLineX(j) == x {
+                return gridLineX(gridLines - j)
+            }
+        }
+        return 255 - x
+    }
+
+    /// レーンの真ん中 (x=127.5) を軸に左右反転。選択が無いときは全ノーツ。
+    /// スライドは、始点と各 seg の中心を1点ずつ反転して、seg の相対 x を入れ直す (グリッド線の上にあった点は、反転後もグリッド線の上)
     func flipHorizontal() {
         var targets = selectedIndices()
         if targets.isEmpty {
@@ -812,10 +828,13 @@ extension EditorState {
         if targets.isEmpty { return }
         pushUndo()
         for i in targets {
-            chart.notes[i].x = 254 - chart.notes[i].x
+            let headX = chart.notes[i].x
+            let newHead = flippedX(headX)
             for j in chart.notes[i].segs.indices {
-                chart.notes[i].segs[j].x = -chart.notes[i].segs[j].x
+                let absX = headX + chart.notes[i].segs[j].x      // seg の絶対 x (seg.x は始点からの相対値)
+                chart.notes[i].segs[j].x = flippedX(absX) - newHead
             }
+            chart.notes[i].x = newHead
         }
         chartChanged()
     }

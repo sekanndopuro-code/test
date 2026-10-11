@@ -110,6 +110,25 @@ struct LaneView: View {
         // ここで .clipped() はしない (枠の外まで描くため)。左の帯・シークバーより下の層に置くのは EditorView 側の zIndex
     }
 
+    /// 新しいタッチの始まりの処理 (使い道を決める)。onChanged の最初の1回で呼ぶ。
+    /// 指が触れてすぐ離れた短いタップでは、onChanged が1回も呼ばれずに onEnded だけ届くことがあるので、onEnded からも呼ぶ。
+    /// - Returns: 編集ツールのタッチとして始めたら true (呼び出し側は、この回の続きの処理をしない)
+    @discardableResult
+    private func beginSession(_ v: DragGesture.Value, size: CGSize) -> Bool {
+        touchStart = v.startLocation
+        scrollOrigin = nil
+        panBlocked = pinchStart != nil      // 本当にピンチの最中のときだけ、スクロールを止める
+        // 編集ツールを選んでいるときだけ編集操作。未選択 (または閲覧モード) のときは上下スライドだけ
+        session = state.laneToolActive ? .tool : .pan
+        state.holdCancel()
+        if session == .tool {
+            state.laneTouch(start: v.startLocation, current: v.location, size: size, phase: .began)
+            return true
+        }
+        if !panBlocked { state.holdBegan() }     // ツール未選択: 押し続けると選択が解除される (SETTING の秒数)
+        return false
+    }
+
     private func laneGesture(size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { v in
@@ -117,17 +136,7 @@ struct LaneView: View {
                 // ピンチに取り消されたタッチは onEnded が届かないことがあり、session / panBlocked が残ったままになる。
                 // その状態だと、ピンチの後の最初のドラッグが「ピンチの続き」と見なされて無視されていた。
                 if session == .idle || touchStart != v.startLocation {
-                    touchStart = v.startLocation
-                    scrollOrigin = nil
-                    panBlocked = pinchStart != nil      // 本当にピンチの最中のときだけ、スクロールを止める
-                    // 編集ツールを選んでいるときだけ編集操作。未選択 (または閲覧モード) のときは上下スライドだけ
-                    session = state.laneToolActive ? .tool : .pan
-                    state.holdCancel()
-                    if session == .tool {
-                        state.laneTouch(start: v.startLocation, current: v.location, size: size, phase: .began)
-                        return
-                    }
-                    if !panBlocked { state.holdBegan() }     // ツール未選択: 押し続けると選択が解除される (SETTING の秒数)
+                    if beginSession(v, size: size) { return }
                 }
                 switch session {
                 case .tool:
@@ -149,6 +158,12 @@ struct LaneView: View {
             }
             .onEnded { v in
                 state.holdCancel()
+                // onChanged が1回も届かないまま離された (指が触れてすぐ離れた短いタップ。メニューを閉じた直後などに起きる) とき。
+                // これまでは session が idle のままで、タップが丸ごと無視されていた (Time range の始点・LASSO のタップ解除が反応しない)。
+                // 編集ツールのときだけ、ここで「始まり → 終わり」を続けて処理する
+                if (session == .idle || touchStart != v.startLocation) && state.laneToolActive {
+                    beginSession(v, size: size)
+                }
                 if session == .tool {
                     state.laneTouch(start: v.startLocation, current: v.location, size: size, phase: .ended)
                 }
@@ -881,12 +896,15 @@ struct EditorView: View {
         }
     }
 
-    @ViewBuilder
+    /// 再生速度 / 分割 / More のメニュー。
+    /// 層そのものは常に EditorView に載せたままにして、開いていないあいだは「タッチを受けない」だけにする (SidePanelLayer と同じ作り)。
+    /// 以前は、メニューを閉じるたびに画面いっぱいの層ごと取り外していて、Lasso / Time range を選んだ直後の
+    /// 最初のレーンのタッチが効かないことがあった
     private var popupLayer: some View {
-        if state.popup != .none {
-            GeometryReader { proxy in
-                let isMore = state.popup == .more
-                ZStack(alignment: isMore ? .topTrailing : .bottomTrailing) {
+        GeometryReader { proxy in
+            let isMore = state.popup == .more
+            ZStack(alignment: isMore ? .topTrailing : .bottomTrailing) {
+                if state.popup != .none {
                     Color.black.opacity(0.001)
                         .contentShape(Rectangle())
                         .onTapGesture { state.popup = .none }
@@ -897,9 +915,10 @@ struct EditorView: View {
                         .padding(isMore ? Edge.Set.top : Edge.Set.bottom,
                                  isMore ? moreMenuTop(height: proxy.size.height) : RightPanel.popupBottomInset)
                 }
-                .frame(width: proxy.size.width, height: proxy.size.height)
             }
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
+        .allowsHitTesting(state.popup != .none)
     }
 
     @ViewBuilder
