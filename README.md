@@ -15,7 +15,7 @@
 | AudioController.swift | 音源。AVAudioPlayer → ダメなら WebKit でデコード。曲の音量 `volume` |
 | KeySound.swift | ノーツ音(キー音)。鈴くらいの高さの短い音をコードで合成して鳴らす |
 | EditorState.swift | 状態・再生クロック・Undo・オートセーブ・エクスポート |
-| EditorState+Tools.swift | ノーツ配置/削除/範囲コピー/反転/Slide<->Wipe/BPM/effect/seg編集 |
+| EditorState+Tools.swift | ノーツ配置/削除/範囲コピー/反転/Slide<->Wipe/BPM/effect/seg編集 / **Grid align の吸着** (`snapNote` = 置くとき、`applyCenteredMove` = 動かすとき) |
 | Renderers.swift | レーン・縦タイムライン・シークバーの描画 (Canvas) |
 | SeekDensity.swift | シークバー (再生ボタンの下) のノーツ密度ヒストグラムの計算 (120 区間 / 20 段階)。描画は `Renderers.swift` の `SeekRenderer` |
 | EditorView.swift | 画面レイアウト・右ボタン列・ポップアップ |
@@ -53,7 +53,7 @@
   - **再生速度 / 分割のメニュー** (`EditorView.popupList`): 本家の動画から実測した値で、幅 57.8pt・1行 51.6pt・上下の余白 10.4pt、背景は黒の 50% (下の譜面が透ける)、縁は白 70% の細い線。画面の下端から 2.5pt 上に下端をそろえて出し (再生速度も分割も同じ)、ボタン列の左端から 10.8pt 空ける。項目は本家より多いまま (再生速度は 0.25x / 0.1x、分割は 1/48 などと「入力…」)。文字は `PanelFont.menu` (本家の字体は iPad に無いので、幅と高さの比が近い DIN Condensed で代用。字体を変えるときはここだけ)
   - **EDIT を押したときの動き** (`AnyTransition.panelSwap`): 古いアイコン列が右へ滑りながら消え (0.08 秒)、そのあと新しい列が右から滑り込む (0.12 秒)。Back のときも同じ。下の2つのアイコンは動かない
   - **EDIT 中の名前** (`PanelEditLabel`): 本家は、各アイコンの左に黒 80% の箱 (高さ 43pt) の上に白い字で Back / Note / Wipe / Slide / Remove / More が出て、EDIT に入って 2.6 秒たつと 0.7 秒かけて消える。同じ動きにしてある (本家に無いボタンは Lasso / Order / Adv. / Undo / Redo)。文字は `PanelFont.label` (Avenir Next Condensed)
-  - **EDIT 中のアイコン**: Back (←) / Note (角丸の細長い輪) / Wipe (線とひし形) / Slide (ギザギザの輪) / Remove (ゴミ箱) / More (点3つ) は、本家の動画から輪郭を起こしたもの。Order / Adv. / Undo / Redo は本家に無いので、これまでの絵のままOrder で選んだ数だけは、アイコンの右上に小さな数字で出る本家のフロッピー (保存) は、自作では保存が文字表示なので、まだ使っていない
+  - **EDIT 中のアイコン**: Back (←) / Note (角丸の細長い輪) / Wipe (線とひし形) / Slide (ギザギザの輪) / Remove (ゴミ箱) / More (点3つ) は、本家の動画から輪郭を起こしたもの。Adv. / Undo / Redo は本家に無いので、これまでの文字のまま。Order も本家に無く、縦長の長方形を2つ並べて中に小さく「1」「2」を描いた自作のアイコン (`OrderIcon` / PanelIcons.swift。線の太さ・高さは他のアイコンと同じ)Order で選んだ数だけは、アイコンの右上に小さな数字で出る本家のフロッピー (保存) は、自作では保存が文字表示なので、まだ使っていない
 - **時刻表示**: 細い字 (25.5pt) を 1文字 20.25pt の送りで並べ、白くやわらかく光らせる (`TimeLabelRenderer`)。「:」「.」は 3pt の四角で、1文字ぶんの枠を取る。上の時刻 (総時間) は画面の上端から、下の時刻 (現在時刻) は下端から、どちらも 113.5pt が中心。書体は標準の書体なので、本家の字形とは少し違う
 - ステータスバー: `MalodySlideEditorApp.swift` の `.statusBarHidden(true)` で隠す指定になっている。Swift Playgrounds の実行中は、Playgrounds 側が出すため消えないことがある
 

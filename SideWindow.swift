@@ -684,7 +684,7 @@ private struct SettingWindowContent: View {
         }
     }
 
-    /// チェックボックス 3 つ
+    /// チェックボックス 4 つ
     private var checkRows: some View {
         VStack(alignment: .leading, spacing: 16) {
             checkRow(title: "立ち上がりをはっきりさせる (伸ばす窓を小さく)",
@@ -702,6 +702,12 @@ private struct SettingWindowContent: View {
             checkRow(title: "slide modifyでのsegの移動で縦方向の移動を許可する",
                      note: "オフのとき (初期値): Slide modify で seg を動かしても、横 (x) にだけ動きます。時間 (拍) は変わりません。オンにすると、縦にも動かせます (1/n 拍に吸着)。",
                      isOn: $state.allowSegVerticalMove)
+
+            SideDivider()
+
+            checkRow(title: "grid alignがオンの時、グリッド上に常にノーツの中心を合わせる",
+                     note: "オンのとき (初期値・本家と同じ): ノーツを動かすと、動かした先でいちばん近いグリッド線に中心が吸着します。置いたときと同じ座標になるので、グリッドに乗っていないノーツを動かして、置いたノーツに重ねても中心が必ずそろいます。スライドは始点と各 seg の中心がそれぞれ吸着します。オフにすると、動かす前の位置から「グリッド1マスの整数倍」だけずらす固定変位になります。",
+                     isOn: $state.gridCenterAlign)
         }
     }
 

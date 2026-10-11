@@ -38,6 +38,19 @@ extension EditorState {
         }
     }
 
+    /// グリッド線 j 番 (左端の線が 0) の x 座標。snapNote で「置く」ときと同じ丸め方 (置いた座標と動かした座標が、必ず同じ値になる)
+    func gridLineX(_ j: Int) -> Int {
+        let cell = 255.0 / Double(max(1, gridLines))
+        return Int((cell * Double(j)).rounded())
+    }
+
+    /// x にいちばん近いグリッド線の番号 (0 ... gridLines)
+    func nearestGridIndex(_ x: Double) -> Int {
+        let n = max(1, gridLines)
+        let cell = 255.0 / Double(n)
+        return min(n, max(0, Int((x / cell).rounded())))
+    }
+
     var widthCells: Int {
         let cell = 255.0 / Double(max(1, gridLines))
         return min(gridLines, max(1, Int((Double(widthUnits) / cell).rounded())))
@@ -292,7 +305,8 @@ extension EditorState {
 
     /// 移動前の位置を基準に、指の移動量ぶんだけ動かす。
     /// 縦: 触れたノーツがスナップ(1/n拍)に乗るよう移動量を決め、選択中の全ノーツを同じ量だけ動かす (ノーツ同士の相対位置は保つ)。
-    /// 横: グリッド有効時はグリッド1マス単位。全体が x:0...255 から出ないように止める。
+    /// 横: グリッド有効時は、SETTING の「常にノーツの中心を合わせる」がオンなら、ノーツごとに中心を最寄りのグリッド線へ吸着 (applyCenteredMove)。
+    ///     オフなら、移動量をグリッド1マス単位に丸めた固定変位。どちらも x:0...255 から (いまより) はみ出さないように止める。
     private func applyMove(start: CGPoint, current: CGPoint, g: LaneGeo) {
         // 対象のノーツが入れ替わっていたら (別の指で Undo された等) 中止する
         for t in moveTargets {
@@ -310,6 +324,14 @@ extension EditorState {
         }
 
         let rawX = g.xOf(current.x) - g.xOf(start.x)
+
+        // Grid align + 「常にノーツの中心を合わせる」: ノーツごとに、動かした先でいちばん近いグリッド線へ中心を吸着させる
+        // (固定変位ではないので、どの位置から動かしても、置いたときと同じ座標になる)
+        if gridAlign && gridLines >= 1 && gridCenterAlign {
+            applyCenteredMove(rawX: rawX, delta: delta)
+            return
+        }
+
         var dx = snapDeltaX(rawX)
         let minDX = min(0, Int(ceil(-moveLeftEdge)))
         let maxDX = max(0, Int(floor(255.0 - moveRightEdge)))
@@ -324,6 +346,54 @@ extension EditorState {
         }
     }
 
+    /// 中心をグリッド線に合わせる移動 (gridCenterAlign がオン)。
+    /// スライドは、始点と各 seg の中心を、それぞれ最寄りのグリッド線に吸着させる (seg は始点からの相対値で持つので、新しい始点との差を入れ直す)。
+    /// 拍 (縦) の移動は、これまでどおり 1/n 拍の移動量を全ノーツ共通で足す
+    private func applyCenteredMove(rawX: Double, delta: Beat) {
+        moveLastDelta = delta
+        moveLastDX = 0
+        for t in moveTargets {
+            let orig = t.orig
+            let head = centeredMoveX(from: orig.x, rawX: rawX, widthUnits: orig.w)
+            var segs = orig.segs
+            for k in segs.indices {
+                let ax = centeredMoveX(from: orig.x + orig.segs[k].x, rawX: rawX, widthUnits: orig.w)
+                segs[k].x = ax - head
+            }
+            let newBeat = orig.beat + delta
+            let cur = chart.notes[t.index]
+            var same = (cur.beat == newBeat && cur.x == head && cur.segs.count == segs.count)
+            if same {
+                for k in segs.indices where cur.segs[k].x != segs[k].x { same = false; break }
+            }
+            if same { continue }                    // 前の指の位置と結果が同じなら、書き込まない (高密度のスライドでも軽いように)
+            chart.notes[t.index].beat = newBeat
+            chart.notes[t.index].x = head
+            if !segs.isEmpty { chart.notes[t.index].segs = segs }
+        }
+    }
+
+    /// 動かす前の中心 origX (絶対座標) を、指の移動量 rawX だけ動かした位置の、いちばん近いグリッド線の x にする。
+    /// ・指がまだ横へ半マス分も動いていないあいだは、動かさない (縦にだけ動かしたとき、グリッドに乗っていないノーツの x が勝手にずれないように)
+    /// ・ノーツがレーン (0...255) の外へ、いまよりはみ出す線は選ばない (幅は snapNote と同じく 1マスの整数倍に丸めて数える)。
+    ///   もともとはみ出しているノーツは、いまの位置か、内側の線までは動ける
+    private func centeredMoveX(from origX: Int, rawX: Double, widthUnits wu: Int) -> Int {
+        let n = max(1, gridLines)
+        let cell = 255.0 / Double(n)
+        if abs(rawX) < cell / 2 { return origX }
+        let cells = min(n, max(1, Int((Double(wu) / cell).rounded())))
+        let lo = Int(ceil(Double(cells) / 2.0))
+        let hi = n - lo
+        if lo > hi {
+            return Int((255.0 / 2.0).rounded())       // snapNote と同じ: レーンいっぱいの幅で中心を線に置けないときは、レーンの真ん中
+        }
+        let idx0 = nearestGridIndex(Double(origX))
+        let idx = nearestGridIndex(Double(origX) + rawX)
+        let low = min(lo, idx0)
+        let high = max(hi, idx0)
+        return gridLineX(max(low, min(high, idx)))
+    }
+
     private func snapDeltaX(_ raw: Double) -> Int {
         if gridAlign && gridLines >= 1 {
             let cell = 255.0 / Double(gridLines)
@@ -333,7 +403,19 @@ extension EditorState {
     }
 
     private func finishMove() {
-        let changed = !(moveLastDelta == .zero && moveLastDX == 0)
+        var changed = !(moveLastDelta == .zero && moveLastDX == 0)
+        if !changed {
+            // 中心吸着の移動は moveLastDX を使わないので、動かす前と見比べる (横にだけ動いた場合もここで分かる)
+            for t in moveTargets where t.index < chart.notes.count {
+                let n = chart.notes[t.index]
+                if n.x != t.orig.x || n.beat != t.orig.beat || n.segs.count != t.orig.segs.count {
+                    changed = true
+                    break
+                }
+                for k in n.segs.indices where n.segs[k].x != t.orig.segs[k].x { changed = true; break }
+                if changed { break }
+            }
+        }
         moveTargets = []
         if changed {
             chartChanged()

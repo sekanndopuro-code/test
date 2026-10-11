@@ -287,3 +287,52 @@ struct PanelEditLabel: View {
             .background(Color.black.opacity(0.8))
     }
 }
+
+// MARK: - Order (順番に選択) のアイコン
+//
+// 本家に無いボタンなので自作。縦長の長方形を 2つ並べ、その中に小さく「1」「2」を描く (「①②」の文字は横に広がりすぎていた)。
+// 線の太さ・角の丸さ・高さ (約 36pt) は、他のアイコンと同じ。数字は文字ではなくパスで描いている (字体に頼らない)。
+struct OrderIcon: View {
+    let color: Color
+
+    var body: some View {
+        Canvas { ctx, size in
+            let cx = size.width / 2, cy = size.height / 2
+            let boxW: CGFloat = 19, boxH: CGFloat = 34, gap: CGFloat = 5
+            let lineW: CGFloat = 3.2
+            let centers = [cx - (boxW + gap) / 2, cx + (boxW + gap) / 2]
+            let digitStyle = StrokeStyle(lineWidth: 2.6, lineCap: .round, lineJoin: .round)
+
+            for x in centers {
+                let box = Path(roundedRect: CGRect(x: x - boxW / 2, y: cy - boxH / 2, width: boxW, height: boxH), cornerRadius: 4.5)
+                ctx.stroke(box, with: .color(color), style: StrokeStyle(lineWidth: lineW, lineJoin: .round))
+            }
+
+            // 「1」: 上の旗 + 縦棒 (高さ 15pt)
+            let x1 = centers[0]
+            var one = Path()
+            one.move(to: CGPoint(x: x1 - 3.4, y: cy - 4.4))
+            one.addLine(to: CGPoint(x: x1 + 1.0, y: cy - 7.5))
+            one.addLine(to: CGPoint(x: x1 + 1.0, y: cy + 7.5))
+            ctx.stroke(one, with: .color(color), style: digitStyle)
+
+            // 「2」: 上の丸い弧 → 斜めの線 → 下の横棒 (高さ 15pt)
+            let x2 = centers[1]
+            let r: CGFloat = 4.2
+            let arcY = cy - 3.3
+            var two = Path()
+            var deg = 190.0
+            var first = true
+            while deg <= 385.0 {
+                let rad = deg * Double.pi / 180
+                let pt = CGPoint(x: x2 + r * CGFloat(cos(rad)), y: arcY + r * CGFloat(sin(rad)))
+                if first { two.move(to: pt); first = false } else { two.addLine(to: pt) }
+                deg += 5
+            }
+            two.addLine(to: CGPoint(x: x2 - 4.2, y: cy + 7.5))
+            two.addLine(to: CGPoint(x: x2 + 4.4, y: cy + 7.5))
+            ctx.stroke(two, with: .color(color), style: digitStyle)
+        }
+        .frame(width: 50, height: PanelIconView.refHeight + 6)      // 他のアイコンと同じ枠
+    }
+}

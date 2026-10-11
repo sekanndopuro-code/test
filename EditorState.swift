@@ -198,6 +198,14 @@ final class EditorState: ObservableObject {
         didSet { UserDefaults.standard.set(allowUnorderedSeg, forKey: "editor.allowUnorderedSeg") }
     }
 
+    // Grid align がオンのとき、ノーツを動かした後の「中心」を、いつもグリッド線の上に合わせるか。次回起動時も保存される。初期値はオン (本家と同じ)
+    //   オン: 動かしたノーツ (スライドなら始点と各 seg) の中心が、動かした先でいちばん近いグリッド線に吸着する。
+    //         置いたときの座標と同じ値になる (例: 123 にあったノーツを 64 の線へ持っていくと、ちょうど 64。±1 ずれない)
+    //   オフ: 指の移動量を「グリッド1マスの整数倍」に丸めて、動かす前の位置からその量だけずらす (固定変位)
+    @Published var gridCenterAlign = true {
+        didSet { UserDefaults.standard.set(gridCenterAlign, forKey: "editor.gridCenterAlign") }
+    }
+
     // Slide modify で seg を動かすとき、縦 (時間) 方向にも動かせるようにするか。次回起動時も保存される。初期値はオフ (本家と同じ)
     //   オフ: seg は横 (x) にだけ動く。拍 (時間) は掴んだ時のまま
     //   オン: 縦にも動く (1/n 拍に吸着)
@@ -330,6 +338,7 @@ final class EditorState: ObservableObject {
             self.allowUnorderedSeg = v          // 前の版の設定「beatがマイナスのsegを置くのを許可する」の値を引き継ぐ
         }
         if let v = ud.object(forKey: "editor.allowSegVerticalMove") as? Bool { self.allowSegVerticalMove = v }
+        if let v = ud.object(forKey: "editor.gridCenterAlign") as? Bool { self.gridCenterAlign = v }
         if let v = ud.object(forKey: "editor.holdDeselectSec") as? Double {
             self.holdDeselectSec = min(max(v, Self.holdRange.lowerBound), Self.holdRange.upperBound)
         }

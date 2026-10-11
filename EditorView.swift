@@ -541,7 +541,7 @@ struct PanelButton: View {
                     Text(badge)
                         .font(.system(size: 14, weight: .bold, design: .monospaced))
                         .foregroundColor(Color.laneCyan)
-                        .offset(x: 18, y: -17)
+                        .offset(x: 22, y: -21)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -783,7 +783,8 @@ struct RightPanel: View {
             // 「順番に選択」: スライドをタップした順に番号を付ける。結合系プラグイン (折り返し敷など) が、この順番で結合する。
             // ツールを離れても順番は残る (右上の数字が、選んだ数)。空きをタップするとリセット
             PanelButton(glyph: "①②", active: state.tool == .order,      // Order
-                        badge: state.orderIDs.isEmpty ? nil : "\(state.orderIDs.count)") {
+                        badge: state.orderIDs.isEmpty ? nil : "\(state.orderIDs.count)",
+                        icon: { AnyView(OrderIcon(color: $0)) }) {
                 state.toggleTool(.order)
                 if state.tool == .order {
                     state.showToast("スライドをタップした順に番号を付けます (空きをタップでリセット)")
