@@ -295,6 +295,7 @@ struct StripView: View {
 
     @ObservedObject var state: EditorState
     @State private var origin: Double? = nil
+    @State private var scrollBeats: Double = 1      // ドラッグを始めたときの「帯の高さ全体 = 何拍か」(ズームに比例。ドラッグ中は固定)
     @GestureState private var touching = false      // 指が触れている間だけ true (取り消されても自動で false に戻る)
 
     var body: some View {
@@ -311,8 +312,10 @@ struct StripView: View {
                             if origin == nil {
                                 if state.isPlaying { state.pause() }
                                 origin = state.viewBeat
+                                // スクロール量はズームに比例させる。ドラッグ中に別の指でズームが変わっても飛ばないよう、始めた時点の値で固定する
+                                scrollBeats = state.stripScrollBeats
                             }
-                            let ppb = Double(proxy.size.height) / state.stripBeats
+                            let ppb = Double(proxy.size.height) / scrollBeats
                             if let o = origin {
                                 state.setViewBeat(o + Double(v.translation.height) / ppb)
                             }

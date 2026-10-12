@@ -76,6 +76,7 @@ enum LaneRenderer {
         drawVLines(&c, g, lines: state.gridLines)
         drawHLines(&c, g, den: state.snapDen)
         drawBPM(&c, g, state)
+        drawEffects(&c, g, state)
         drawRange(&c, g, state)
         drawNotes(&c, g, state.chart.notes, selected: state.selectedIDs)
         drawOrder(&c, g, state)
@@ -154,6 +155,39 @@ enum LaneRenderer {
             c.stroke(p, with: .color(Color.yellow.opacity(0.35)), style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
             let t = Text(String(format: "BPM %.2f", tp.bpm)).font(.system(size: 11, design: .monospaced)).foregroundColor(Color.yellow.opacity(0.8))
             c.draw(t, at: CGPoint(x: g.trackL + g.trackW - 4, y: y - 9), anchor: .trailing)
+        }
+    }
+
+    /// effect (scroll / jump) がある拍に、青い点線と値を出す。
+    /// BPM (黄色の点線、値はレーンの右側) と同じ拍に重なっても読めるように、値はレーンの左側に出す。
+    /// 同じ拍に scroll と jump があるときは、線は 1 本、値は「scroll 2  jump 1000」のように 1 行に並べる
+    static func drawEffects(_ c: inout GraphicsContext, _ g: LaneGeo, _ s: EditorState) {
+        if s.chart.effects.isEmpty { return }
+        // 画面に見えている effect だけを拾う (effect が多い譜面でも、毎フレームの負担を小さくする)
+        var rows: [(beat: Double, items: [EffectPoint])] = []
+        for e in s.chart.effects {
+            let b = e.beat.value
+            let y = g.py(b)
+            if y < -20 || y > g.H + 20 { continue }
+            if let k = rows.firstIndex(where: { abs($0.beat - b) < 1e-9 }) {
+                rows[k].items.append(e)
+            } else {
+                rows.append((beat: b, items: [e]))
+            }
+        }
+        let blue = Color(red: 0.35, green: 0.65, blue: 1.0)
+        for row in rows {
+            let y = g.py(row.beat)
+            var p = Path()
+            p.move(to: CGPoint(x: g.trackL, y: y))
+            p.addLine(to: CGPoint(x: g.trackL + g.trackW, y: y))
+            // 点線の位相を BPM の黄色の点線とずらして、同じ拍に重なっても両方の色が見えるようにする
+            c.stroke(p, with: .color(blue.opacity(0.6)), style: StrokeStyle(lineWidth: 1, dash: [6, 4], dashPhase: 5))
+            // scroll を先に、jump を後に並べる (同じ時刻では scroll を変えてから、その値で jump するため)
+            let items = row.items.sorted { $0.kind == .scroll && $1.kind != .scroll }
+            let text = items.map { "\($0.kind.label) \($0.valueText)" }.joined(separator: "  ")
+            let t = Text(text).font(.system(size: 11, design: .monospaced)).foregroundColor(blue.opacity(0.95))
+            c.draw(t, at: CGPoint(x: g.trackL + 4, y: y - 9), anchor: .leading)
         }
     }
 

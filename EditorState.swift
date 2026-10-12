@@ -407,6 +407,13 @@ final class EditorState: ObservableObject {
     /// 本家の実測: 1拍 = 約 178pt (iPad Air 4 の高さ 820pt で 約 4.6拍)
     var stripBeats: Double { 4.6 }
 
+    /// 左の帯を上下になぞったとき、帯の高さ全体ぶん指を動かすと進む拍数。
+    /// 帯の見た目の倍率 (stripBeats) は本家どおり固定のまま、スクロール量だけをズームに比例させる
+    /// (= レーンの表示範囲 visibleBeats。拡大するほど細かく、縮小するほど大きく動く)。
+    /// 帯の高さ ≒ レーンの高さなので、帯をなぞった距離と、レーンの譜面が動く距離がそろう。
+    /// 動きが速すぎる / 遅すぎるときは、ここに倍率 (例: visibleBeats * 0.5) をかけて調整する
+    var stripScrollBeats: Double { visibleBeats }
+
     var zoomLabel: String { zoomIndex >= 16 ? "1/32拍" : "\(zoomIndex + 1)/16" }
 
     var maxBeat: Double { max(1, timeMap.beat(atSec: totalSec)) }
