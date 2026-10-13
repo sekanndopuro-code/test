@@ -1,193 +1,100 @@
-# MalodySlideEditor を GitHub の Mac で自動ビルドして、SideStore 用の ipa を作る設定ファイルです。
-# このファイルは、リポジトリの  .github/workflows/build-ipa.yml  という場所に置きます。
+# MalodySlideEditor の XcodeGen 設定ファイルです。
+# GitHub Actions が `xcodegen generate` でこのファイルから MalodySlideEditor.xcodeproj と
+# Generated/Info.plist を作り、xcodebuild でビルドします (Mac が無くても ipa が作れる)。
 #
-# 動くタイミング:
-#   1) main ブランチに変更を保存(Commit)したとき  2) Actions タブの「Run workflow」ボタンを押したとき
-# 結果:
-#   リポジトリの Releases に「latest」が作られ、その中に MalodySlideEditor.ipa が入ります。
+# - Package.swift は Swift Playgrounds で開く用です。この project.yml とは独立していて、
+#   お互いに影響しません (xcodebuild には -project を明示しているので Package.swift は読まれません)。
+# - Vendor/CRubberBand は、リポジトリには置かず、Actions が Rubber Band v4.0.0 を取ってきて作ります。
+#   (.github/workflows/build-ipa.yml の「Rubber Band を取り込む」)
+#   なので、Playgrounds で開いたときは Rubber Band なし (自前のフェーズボコーダー) になります。
 
-name: ipaを作る
+name: MalodySlideEditor
 
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+schemes:
+  # xcodebuild archive -scheme MalodySlideEditor で使う共有スキーム。
+  # この版の XcodeGen はスキームを自動では作らないので、明示しておく。
+  MalodySlideEditor:
+    build:
+      targets:
+        MalodySlideEditor: all
+    archive:
+      config: Release
 
-permissions:
-  contents: write        # Releases に ipa を載せるために必要
+targets:
+  MalodySlideEditor:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
 
-jobs:
-  build:
-    runs-on: macos-15    # GitHub が貸してくれる Mac (Xcode 入り)
-    timeout-minutes: 30
+    sources:
+      # リポジトリ直下の Swift ファイルだけを取り込む。
+      # (Package.swift は Playgrounds 用なので除外。Vendor/ README.md なども対象外)
+      - path: .
+        includes:
+          - "*.swift"
+        excludes:
+          - "Package.swift"
+      # Rubber Band 本体。1 ファイルにまとめたビルド用ファイルだけをコンパイルする。
+      # (中で ../src/... を相対 include しているので、Vendor/CRubberBand の配置は変えないこと)
+      - path: Vendor/CRubberBand/single/RubberBandSingle.cpp
 
-    steps:
-      - name: ソースを取ってくる
-        uses: actions/checkout@v4
+    dependencies:
+      # Rubber Band (vDSP FFT) が使う。
+      - sdk: Accelerate.framework
 
-      - name: Xcode のバージョンを表示
-        run: xcodebuild -version
+    # Info.plist はここから生成する。
+    # CFBundleIdentifier / CFBundleExecutable / CFBundlePackageType などは XcodeGen が自動で入れる。
+    # CFBundleSupportedPlatforms / MinimumOSVersion / UIDeviceFamily は、ビルド時に Xcode が
+    # 下の deploymentTarget と TARGETED_DEVICE_FAMILY から入れる。
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDevelopmentRegion: en
+        CFBundleName: MalodySlideEditor
+        CFBundleDisplayName: MalodySlideEditor
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSRequiresIPhoneOS: true
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationLandscapeLeft
+        "UISupportedInterfaceOrientations~ipad":
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationLandscapeLeft
 
-      # Rubber Band 本体を取得し、Swift から参照できる C++ モジュールを用意する。
-      - name: Rubber Band を取り込む
-        run: |
-          set -e
-          git clone --depth 1 --branch v4.0.0 https://github.com/breakfastquay/rubberband.git /tmp/rb
-          D=Vendor/CRubberBand
-          mkdir -p "$D/include"
-          cp -R /tmp/rb/src "$D/src"
-          cp -R /tmp/rb/rubberband "$D/rubberband"
-          cp -R /tmp/rb/single "$D/single"
-          cp /tmp/rb/COPYING "$D/COPYING"
-          cp /tmp/rb/rubberband/rubberband-c.h "$D/include/rubberband-c.h"
-          printf 'module CRubberBand {\n    header "rubberband-c.h"\n    export *\n}\n' > "$D/include/module.modulemap"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.malody.slideeditor
+        PRODUCT_NAME: MalodySlideEditor
+        TARGETED_DEVICE_FAMILY: "1,2"     # 1 = iPhone, 2 = iPad
+        SWIFT_VERSION: "5.0"
 
-      # Playgrounds 用の Package.swift は残さず、Actions のビルド中だけ C++ ターゲットを加える。
-      - name: ビルド用の Package.swift に差し替える
-        run: |
-          cat > Package.swift <<'EOF'
-          // swift-tools-version: 5.8
-          import PackageDescription
-          import AppleProductTypes
+        # --- Rubber Band (C++) をこのターゲットに入れるための設定 ---
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        CLANG_CXX_LIBRARY: libc++
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - NDEBUG
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/Vendor/CRubberBand"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lc++"
 
-          let package = Package(
-              name: "MalodySlideEditor",
-              platforms: [
-                  .iOS("16.0")
-              ],
-              products: [
-                  .iOSApplication(
-                      name: "MalodySlideEditor",
-                      targets: ["AppModule"],
-                      bundleIdentifier: "local.malody.slideeditor",
-                      teamIdentifier: "",
-                      displayVersion: "1.0",
-                      bundleVersion: "1",
-                      appIcon: .placeholder(icon: .map),
-                      accentColor: .presetColor(.cyan),
-                      supportedDeviceFamilies: [
-                          .pad,
-                          .phone
-                      ],
-                      supportedInterfaceOrientations: [
-                          .landscapeRight,
-                          .landscapeLeft
-                      ]
-                  )
-              ],
-              targets: [
-                  .executableTarget(
-                      name: "AppModule",
-                      dependencies: ["CRubberBand"],
-                      path: ".",
-                      exclude: ["Vendor"]
-                  ),
-                  .target(
-                      name: "CRubberBand",
-                      path: "Vendor/CRubberBand",
-                      sources: ["single/RubberBandSingle.cpp"],
-                      publicHeadersPath: "include",
-                      cxxSettings: [
-                          .headerSearchPath("."),
-                          .define("NDEBUG")
-                      ],
-                      linkerSettings: [
-                          .linkedFramework("Accelerate")
-                      ]
-                  )
-              ],
-              cxxLanguageStandard: .cxx17
-          )
-          EOF
-
-      - name: ビルド (署名なし)
-        run: |
-          set -o pipefail
-          xcodebuild build \
-            -scheme MalodySlideEditor \
-            -destination 'generic/platform=iOS' \
-            -configuration Release \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            2>&1 | tee build.log
-
-      # xcodebuild は Swift Playgrounds 形式のパッケージから「実行ファイル」までしか作ってくれず、
-      # .app (アプリの入れ物) は作ってくれない。なので、.app は自分で組み立てる。
-      - name: 実行ファイルから .app を組み立てて ipa にまとめる
-        run: |
-          BIN=build/Build/Products/Release-iphoneos/MalodySlideEditor
-          if [ ! -f "$BIN" ]; then
-            echo "error: 実行ファイルが見つかりません: $BIN"
-            find build/Build/Products -maxdepth 3 || true
-            exit 1
-          fi
-          file "$BIN"
-          rm -rf Payload MalodySlideEditor.ipa
-          mkdir -p Payload/MalodySlideEditor.app
-          cp "$BIN" Payload/MalodySlideEditor.app/MalodySlideEditor
-          chmod +x Payload/MalodySlideEditor.app/MalodySlideEditor
-          cat > Payload/MalodySlideEditor.app/Info.plist <<'PLISTEOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleDevelopmentRegion</key><string>en</string>
-            <key>CFBundleExecutable</key><string>MalodySlideEditor</string>
-            <key>CFBundleIdentifier</key><string>local.malody.slideeditor</string>
-            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-            <key>CFBundleName</key><string>MalodySlideEditor</string>
-            <key>CFBundleDisplayName</key><string>MalodySlideEditor</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>1.0</string>
-            <key>CFBundleVersion</key><string>1</string>
-            <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
-            <key>MinimumOSVersion</key><string>16.0</string>
-            <key>LSRequiresIPhoneOS</key><true/>
-            <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
-            <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
-            <key>UILaunchScreen</key><dict/>
-            <key>UIFileSharingEnabled</key><true/>
-            <key>LSSupportsOpeningDocumentsInPlace</key><true/>
-            <key>UISupportedInterfaceOrientations</key>
-            <array>
-              <string>UIInterfaceOrientationLandscapeRight</string>
-              <string>UIInterfaceOrientationLandscapeLeft</string>
-            </array>
-            <key>UISupportedInterfaceOrientations~ipad</key>
-            <array>
-              <string>UIInterfaceOrientationLandscapeRight</string>
-              <string>UIInterfaceOrientationLandscapeLeft</string>
-            </array>
-          </dict>
-          </plist>
-          PLISTEOF
-          plutil -lint Payload/MalodySlideEditor.app/Info.plist
-          zip -qry MalodySlideEditor.ipa Payload
-          ls -lh MalodySlideEditor.ipa
-
-      - name: Releases に載せる (ipa を直接ダウンロードできるようにする)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest MalodySlideEditor.ipa \
-            --target "$GITHUB_SHA" \
-            --title "最新ビルド" \
-            --notes "SideStore で入れる用の ipa です (署名なし)。"
-
-      - name: ipa を Actions の成果物としても保存 (予備)
-        uses: actions/upload-artifact@v4
-        with:
-          name: MalodySlideEditor-ipa
-          path: MalodySlideEditor.ipa
-
-      # 失敗したときだけ動く。ここに出る文章を、そのままコピーして Claude に貼ってください
-      - name: 失敗したときの要点
-        if: failure()
-        run: |
-          echo "=== error の行 ==="
-          grep -n "error:" build.log | head -40 || true
-          echo "=== ログの最後 40 行 ==="
-          tail -40 build.log || true
+        # Swift から `import CRubberBand` できるようにする (Vendor/CRubberBand/include/module.modulemap)。
+        # Swift Package Manager が内部でやっているのと同じ指定 (-I と -fmodule-map-file の両方)。
+        SWIFT_INCLUDE_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/Vendor/CRubberBand/include"
+        OTHER_SWIFT_FLAGS:
+          - "$(inherited)"
+          - "-Xcc"
+          - "-fmodule-map-file=$(SRCROOT)/Vendor/CRubberBand/include/module.modulemap"
+        # 従来方式 (implicit modules) に固定して、モジュール解決の挙動を安定させる。
+        SWIFT_ENABLE_EXPLICIT_MODULES: "NO"
