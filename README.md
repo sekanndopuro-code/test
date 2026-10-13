@@ -5,6 +5,7 @@
    (開けない場合: Playgrounds で新規 App を作り、既存の .swift を削除して、このフォルダ内の `*.swift` を全てコピー)
 2. **プレビュー欄ではなく、右上の「アプリを実行」でフルスクリーン実行**してください(プレビュー接続エラー回避)
 3. 起動画面の「ファイルを選択…」で、mc・音源(ogg など)・背景画像(任意)を**まとめて選ぶ** (拡張子で自動判別。mc だけ / mc と音源だけでもよい)。「エディタを開く」で開始
+   - **mcz は「mczを展開して読み込む…」**で選ぶと、展開して中の mc・音源・背景画像をまとめて読み込む (下の「起動画面のファイル選択」)
 
 ## ファイル構成 (機能追加の入口)
 | ファイル | 役割 |
@@ -12,6 +13,8 @@
 | Beat.swift | [整数,分子,分母] の拍。0拍始まり |
 | ChartModel.swift | mc の読み書き。未知のキーは保存時に温存 / BPM(TimeMap) / effect (`EffectPoint`: scroll / jump) |
 | ZipWriter.swift | mcz(zip) 書き出し |
+| ZipReader.swift | mcz(zip) 読み込み。無圧縮 (stored) と deflate に対応 (`ZipReader`)。deflate の展開は Apple の Compression (`COMPRESSION_ZLIB` = zip と同じ raw deflate)。ZIP64 / パスワード付きは非対応 |
+| MCZImporter.swift | mcz を展開して `Documents/MalodySlideEditor/<mcz名>/` へ全部書き出す (`MCZImporter.unpack`)。譜面を選ぶ画面に出す version / creator もここで読む |
 | AudioController.swift | 音源。AVAudioPlayer → ダメなら WebKit でデコード。曲の音量 `volume` |
 | KeySound.swift | ノーツ音(キー音)。鈴くらいの高さの短い音をコードで合成して鳴らす |
 | EditorState.swift | 状態・再生クロック・Undo・オートセーブ・エクスポート |
@@ -26,7 +29,7 @@
 | SideWindow.swift | **BPM list / Effect list / Information / SETTING** の右ウィンドウ。シートではなく EditorView に重ね、右の端から約 0.16 秒で滑って入る (`SidePanelLayer` / `SideWindow`)。ウィンドウより左を触ると、すぐ閉じる。出し入れは `EditorState.openSidePanel(_:)` / `closeSidePanel()` |
 | GridSettingsDialog.swift | **Grid settings** (More メニューから)。シートではなく、EditorView に重ねる本家風の中央ダイアログ (`GridSettingsDialog`)。背景のぼかし `BackdropBlur` もここ |
 | MoreMenuIcons.swift | More メニューのアイコン (`MoreMenuIcon`)。本家の画面収録から起こした輪郭 (`MoreMenuIconData`) と、自作の Time range (正方形 + 上矢印) |
-| RootView.swift | 起動時のファイル選択。**まとめて選んだファイルを拡張子で mc / 音源 / 背景画像に自動で振り分ける** (下の「起動画面のファイル選択」) |
+| RootView.swift | 起動時のファイル選択。**まとめて選んだファイルを拡張子で mc / 音源 / 背景画像に自動で振り分ける** + **mcz の展開読み込み** (下の「起動画面のファイル選択」) |
 | TestPlay.swift | テストプレイ。MalodySlideTestplayer の判定・音声・描画をそのまま組み込み (Note→PlayNote に改名) |
 | PCMCache.swift | 曲全体を背景スレッドで先に PCM へ展開しておく `CachedPCMSource` (再生ボタンの待ち時間を縮める。エディタの再生だけで使う) |
 | RubberBandPCMSource.swift | **Rubber Band 版の時間伸縮** (0.75 / 0.5 / 0.25 / 0.1 倍の音)。`CRubberBand` (C++) があるビルド = GitHub Actions のときだけ有効。Swift Playgrounds では中身が空になり、`TimeStretch.swift` の自前版で動く。組み込み方は `RubberBand導入手順.md` |
@@ -46,14 +49,23 @@
 - **mc**: `.mc` / **音源**: `ogg mp3 wav m4a aac flac aif aiff caf` (これ以外でも、システムが「音声」と判断する拡張子は音源) / **背景画像**: `png jpg jpeg webp heic heif gif bmp tif tiff` (同じく、システムが「画像」と判断するものは画像)。大文字・小文字は区別しない。足したい拡張子は `RootView.audioExts` / `imageExts` に書く
 - どの組み合わせでもよい (mc だけ / mc + 音源 / 3つ全部 / 選ぶ順がバラバラ)。mc だけなら、音源・背景なしで開く
 - **今回の選択に mc が入っている** → 別の譜面に切り替えたものとして、前に選んでいた音源・背景は外す (今回いっしょに選んだものだけが付く)。**mc が入っていない** → いまの mc はそのままで、音源 / 背景だけ入れ替える (あとから音源だけ足すこともできる)
-- 同じ種類が複数あれば最初の1つだけ使い、その旨を画面に出す。拡張子で判別できないファイル / mcz (未対応) は無視して、理由を画面に出す
+- 同じ種類が複数あれば最初の1つだけ使い、その旨を画面に出す。拡張子で判別できないファイルは無視して、理由を画面に出す
 - 画面の3行 (譜面 / 音源 / 背景画像) は、読み込み状況の表示だけ
+
+### mcz を展開して読み込む (「mczを展開して読み込む…」)
+- mcz を 1 つ選ぶと、`Documents/MalodySlideEditor/<mcz名>/` に**全部展開**して (zip 内のフォルダ階層は取り除く。`__MACOSX` と `._` で始まるファイルは無視)、その中の mc・音源・背景画像を読み込む。Files アプリの「このiPad内 > (アプリ名) > MalodySlideEditor」から展開したファイルが見える
+- **展開先の mc を開く**ので、オートセーブはその mc に書き戻される (元の mcz は書き換えない)
+- 同じ名前のフォルダがすでにあるときは `<mcz名> 2` のように別のフォルダに展開する (前に編集した mc を上書きしないため)
+- mc が複数入っている mcz (難易度ごとなど) は、「開く譜面を選ぶ」画面 (version / creator つき) で 1 つ選ぶ。mc が 1 つならそのまま読み込む
+- 音源・背景画像は、選んだ mc に書いてある名前 (曲のファイル = `sound` / 背景ファイル = `meta.background`) と同じファイルを優先する。名前が合うものが無いときは、拡張子で最初に見つかった音源 / 画像を使う
+- 「ファイルを選択…」で mcz **だけ**を選んでも、同じ動きになる (mc などと同時に選んだ mcz は無視する)
 
 ## 画面の比率 / 背景画像 (iPad Air 4 の横画面 1180×820pt を基準に、本家の画面を測って合わせている)
 - 左から: **左の帯 145pt** (`StripView.width`。拍の番号と目盛り) → シークバー 66pt → 時刻表示 38pt → レーン (右の余白を含めて 約 873pt。譜面の左端 `LaneGeo.trackL` = 25.2pt、幅 `trackW` = ビューの幅 − 35.4pt (約 837.6pt。左の余白 25.2 + 右の余白 10.2)。どちらも本家の縦線 (32分割) を実測した値) → 右ボタン列 58pt (`RightPanel.width`。本家は左端に細い白線があり、アイコンの中心は列の真ん中)。再生ボタンは本家と同じ六角形 (`SeekPanel` / `PlayToggleButton`)
 - **背景画像**: 起動画面で選んだ背景画像を、`EditorBackground` (EditorView.swift) が画面全体 (ホームインジケータの下まで) に敷き、黒を重ねて暗くする。レーン・右ボタン列は背景を塗らず (右ボタン列は半透明の黒)、画像が透けて見える。左の帯とシークバーは、本家と同じ半透明の暗い色 (`StripRenderer.faceColor` = 黒の約58%。背景画像と、レーンからはみ出したノーツが透ける) で塗り、時刻表示の欄からレーンの番号欄までは明るい半透明のパネル (`Color.timePanel`) を敷く。画像が無いときは、これまでどおり黒
   - 暗さは SETTING の **背景画像の暗さ** (0〜95%、初期値 70%。背景画像があるときだけ表示。保存される: UserDefaults `editor.bgDim`。本家の画面を測ると、背景は このエディタの 60% 設定より約 0.72 倍暗い → 70% が近い)。`EditorState.bgDim`
   - 画像は長辺 2048px 以内に縮めて読み込む (`EditorState.makeBackground`)。mcz 書き出しには、元の画像をそのまま入れる (従来どおり)
+  - **写真から入れ替える**: META → Information の「背景ファイル」の下の **写真から読み込む** (`PhotosPicker`。「ファイル」アプリではなく写真アプリ)。すでに背景があれば置き換える。HEIC / PNG などは JPEG (画質 0.9) に変換し、すでに向きが正しい JPEG は元のまま使う (`EditorState.backgroundJPEG`)。背景ファイル名は今書いてある名前を引き継ぎ (拡張子が jpg / jpeg 以外なら `.jpg` に直す。空なら `bg.jpg`)、`meta.background` にも書く。Quit しても消えないよう、画像ファイルとしても残す (mc がアプリ内のフォルダにあるときはそのフォルダ、それ以外は `Documents/MalodySlideEditor/<mc名>/`)。Quit して開き直しても、同じ起動画面のあいだは入れ替えた画像が使われる (`EditorState.applyBackground`)
 - 拍の番号は、本家と同じく **N 拍目と N+1 拍目の線の真ん中**に置く (左の帯も、レーンも、標準の書体を横に 0.77〜0.78 倍に潰した細長い数字。帯は数字の高さ 約24.5pt、レーンは 約14.5pt。`drawNumber`)。左の帯の細かい目盛りは、左から 約 27pt の長さ
 - **左の帯の見た目の倍率は固定**: 本家はレーンのズームに連動せず、1拍 = 約 178pt (高さ 820pt で 約 4.6拍。`EditorState.stripBeats`)。ただし、**帯を上下になぞったときのスクロール量はズームに比例する** (`EditorState.stripScrollBeats` = レーンの表示拍数 `visibleBeats`。帯の高さぶん指を動かすと、レーンの高さぶん譜面が動く。拡大するほど細かく、縮小するほど大きく動く。ピンチ中の小数のズームにもなめらかに追従する。1回のドラッグの間は、始めた時点のズームで固定)。帯の右には暗い側面 (斜めの面取り、約10.5pt) が続く。側面は帯の枠の外なので `SeekRenderer` が描く
 - **拡大/縮小ボタン**: 左端が画面の外で切れた五角形 (`ZoomButtonShape`、幅 39 × 高さ 45pt、先端は x=37.7)。塗りは不透明な (127, 131, 138)、縁は白 1.5pt、記号は 25 × 3.3pt の白い棒。上端は − が 10.75pt、＋が 68pt (`ZoomButton` / EditorView.swift)
@@ -112,7 +124,7 @@
 - オートセーブ: 編集の1.2秒後に元の .mc へ上書き + アプリ内 Documents/MalodySlideEditor/ にバックアップ
 - **Files アプリからプラグインを管理する**: Info.plist に `UIFileSharingEnabled` = YES と `LSSupportsOpeningDocumentsInPlace` = YES を入れて作った ipa なら、Files アプリの「このiPad内 > (アプリ名)」に Documents が見える。
   その中の `Plugins/` に .lua (サブフォルダに入れた .lua と画像もよい) を入れると使え、消すと一覧から消える。.zip は自動では展開されないので、アプリの「プラグイン(lua)を読み込む」から入れる。`MalodySlideEditor/` には譜面のバックアップが入る
-- mcz は `<mc名>/` フォルダ内に mc・音源・背景を無圧縮zipで格納
+- mcz は `<mc名>/` フォルダ内に mc・音源・背景を無圧縮zipで格納 (書き出し)。読み込みは deflate の mcz も読める (`ZipReader`)
 - 再生中の描画: レーン等の Canvas は `FrameCanvas`(EditorView.swift) 経由で毎フレーム描き直す
 - テストプレイ: 右の TEST ボタン。エディタで表示中の位置(2秒前)から始まる。最初から遊ぶときは先頭にシークしてから押す
 - **BPM list / Effect list の開き方**: 下から上がるシートではなく、本家と同じく画面の右の端から横に滑って入る右ウィンドウ (幅 445.5pt、高さは画面の上下 23pt を残していっぱい、黒 72% の半透明。右ボタン列の上まで覆い、列のアイコンは開いている間だけ見えなくなる)。本家の「値を入れて Add すると勝手に閉じる」は再現していない。閉じるのは、ウィンドウより左 (範囲外) を触ったとき。キーボードが出ると、ウィンドウの下端がキーボードの上へ上がる
@@ -282,7 +294,7 @@ Swift Playgrounds のアプリには Lua 本体 (C 言語) を組み込めない
 BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.information` / `.setting` を足して、`SidePanelLayer` / `SideWindow` がそのまま出し入れする (右の端から滑って入る・ウィンドウより左を触ると閉じる・右ボタン列は開いている間だけ見えなくなる)。
 
 - **META** (`EditorState.metaOpen`): 押すと、右ボタン列が EDIT と同じ動き (`panelSwap`) で **Back / Information / More / Review / Quit** に入れ替わる。アイコンの左の名前 (Back / Information / More / Review / Quit) も EDIT と同じく、2.6 秒たつと消える。本家の Delete all / Upload は使わない。階層は無い
-  - **Information**: 右ウィンドウ (`InformationWindowContent`)。曲名 / Original Title / アーティスト / Original Artist / Version / Creator (入力欄。打つたびに譜面へ反映してオートセーブ)、曲のファイル / 背景ファイル (見るだけ)、オフセット (ms。入力欄 + −10 / +10 ボタン。マイナスも打てる)。縦にスクロールでき、入力欄以外を触るとキーボードが下がる
+  - **Information**: 右ウィンドウ (`InformationWindowContent`)。曲名 / Original Title / アーティスト / Original Artist / Version / Creator (入力欄。打つたびに譜面へ反映してオートセーブ)、**曲のファイル / 背景ファイル (mc に書くファイル名の入力欄。書き換えられる。付属の音源・画像のファイル名そのものは変わらず、mc の記述だけが変わる。mcz に書き出すときは新しい名前で入る。曲のファイルを空にすると、読み込んだ音源のファイル名が使われる)**、背景ファイルの下の **写真から読み込む**、オフセット (ms。入力欄 + −10 / +10 ボタン。マイナスも打てる)。縦にスクロールでき、入力欄以外を触るとキーボードが下がる
   - **More (•••)**: 押した瞬間に mcz を作って、共有シート (保存 / AirDrop / ファイルなど) を出す。もう 1 回タップする必要は無い (`EditorState.shareMCZNow` → `MCZSharer`)。失敗したときはトーストで知らせる
   - **Review** (自作。More の下、Quit の上。アイコンは正方形の中に小さい正方形 = `ReviewIcon`): 多重ノーツ探し (`EditorState.reviewChart`)。**同じ拍・同じ中心 x** に「tap と tap」または「tap と wipe」が重なっているところを探す (wipe と wipe、スライドの始点・seg は調べない。幅 w は見ない)。見つかったら、再生中なら止めて、いちばん早い拍へ飛ぶ (複数あっても時系列で最初の 1 か所。直さずにもう一度押すと、同じところへ飛ぶ)。META の列は開いたまま。見つからなければ、画面の上に半透明の黒い札「0 issue found」が一瞬だけ出て勝手に消える (`ReviewNoticeLayer`。Grid settings と同じ濃さ・縁・形を縮めたもの。0.08 秒で出て、0.4 秒見せて、0.22 秒で消える)
   - **Quit**: 押した瞬間に、再生を止めて・保存して・エディタを閉じてファイル選択へ戻る (`EditorState.quitEditor`)。確認ダイアログは出さない (保存してから閉じるので、編集は失われない)

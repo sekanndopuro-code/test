@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 
 // MARK: - 右からスライドして出るウィンドウ (BPM list / Effect list / Information / SETTING)
 //
@@ -489,12 +490,15 @@ private struct EffectWindowContent: View {
 //
 // 本家の Information と同じく、ラベルを上に、白い縁取りの入力欄を下に並べた縦長のウィンドウ。
 // 入力欄は、触ったら編集できる (打つたびに譜面へ反映して、オートセーブする)。縦にスクロールできる。
-// 曲のファイル / 背景ファイルは、見るだけ (mcz の中のファイル名)。
+// 曲のファイル / 背景ファイルは、mc に書いてあるファイル名の入力欄 (打つたびに譜面へ反映して、オートセーブする)。
+//   書き換えても、付属の音源・画像のファイル名そのものは変わらない (mc の記述だけが変わる。mcz に書き出すときは、新しい名前で入る)。
+// 背景ファイルの下の「写真から読み込む」は、写真アプリから選んだ画像に背景を入れ替える (すでに背景があれば置き換える)。
 
 /// 幅いっぱいの入力欄 (左そろえ)。BPM / Effect の SideField (170pt・中央そろえ) とは別
 private struct SideWideField: View {
     @Binding var text: String
     var keyboard: UIKeyboardType = .default
+    var isFileName = false      // ファイル名の欄は、先頭を勝手に大文字にしない
 
     var body: some View {
         TextField("", text: $text)
@@ -504,6 +508,7 @@ private struct SideWideField: View {
             .multilineTextAlignment(.leading)
             .keyboardType(keyboard)
             .autocorrectionDisabled()
+            .textInputAutocapitalization(isFileName ? TextInputAutocapitalization.never : nil)
             .padding(.horizontal, 12)
             .frame(maxWidth: .infinity)
             .frame(height: 44)
@@ -514,11 +519,19 @@ private struct SideWideField: View {
 private struct InformationWindowContent: View {
     @ObservedObject var state: EditorState
     @State private var offsetText: String
+    @State private var soundText: String        // 曲のファイル (mc の sound)
+    @State private var backgroundText: String   // 背景ファイル (mc の meta.background)
+    @State private var photoItem: PhotosPickerItem? = nil
 
     init(state: EditorState) {
         self._state = ObservedObject(wrappedValue: state)
         // 開いた最初のフレームから値が入っているように、ここで決める
         self._offsetText = State(initialValue: String(state.chart.offsetMs))
+        // mc に名前が書いていないときは、読み込んだファイルの名前を出す
+        let sound = state.chart.soundFile
+        self._soundText = State(initialValue: sound.isEmpty ? state.oggFileName : sound)
+        let bg = state.chart.metaString(["background"])
+        self._backgroundText = State(initialValue: bg.isEmpty ? state.bgFileName : bg)
     }
 
     var body: some View {
@@ -533,8 +546,13 @@ private struct InformationWindowContent: View {
                     labeled("Creator") { SideWideField(text: metaBinding(["creator"])) }
                 }
                 Group {
-                    labeled("曲のファイル") { readOnly(soundFileName) }
-                    labeled("背景ファイル") { readOnly(backgroundFileName) }
+                    labeled("曲のファイル") { SideWideField(text: $soundText, isFileName: true) }
+                    labeled("背景ファイル") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            SideWideField(text: $backgroundText, isFileName: true)
+                            photoButton
+                        }
+                    }
                     labeled("オフセット (ms)") {
                         HStack(spacing: 8) {
                             SideWideField(text: $offsetText, keyboard: .numbersAndPunctuation)
@@ -560,15 +578,54 @@ private struct InformationWindowContent: View {
                 state.setOffset(v)
             }
         }
+        // ファイル名は、打った文字をそのまま mc に書く (空にもできる。空のときは、読み込んだファイルの名前が使われる)
+        .onChange(of: soundText) { text in
+            if text == state.chart.soundFile { return }
+            if text.isEmpty && state.chart.soundEntries.isEmpty { return }   // 無いものを、空の名前で作らない
+            state.chart.soundFile = text
+            state.metaChanged()
+        }
+        .onChange(of: backgroundText) { text in
+            if text == state.chart.metaString(["background"]) { return }
+            state.chart.setMetaString(["background"], text)
+            state.metaChanged()
+        }
+        // 写真を選んだら、背景に入れ替える。変換 (HEIC → JPEG など) は重いので、別スレッドで行う
+        .onChange(of: photoItem) { item in
+            guard let item = item else { return }
+            Task {
+                let raw = try? await item.loadTransferable(type: Data.self)
+                var jpeg: Data? = nil
+                if let raw = raw {
+                    jpeg = await Task.detached(priority: .userInitiated) {
+                        EditorState.backgroundJPEG(fromPhoto: raw)
+                    }.value
+                }
+                let result = jpeg
+                await MainActor.run {
+                    photoItem = nil
+                    if let jpeg = result {
+                        if let name = state.applyBackground(jpeg: jpeg) { backgroundText = name }
+                    } else {
+                        state.showToast("写真を読み込めませんでした")
+                    }
+                }
+            }
+        }
     }
 
-    private var soundFileName: String {
-        state.chart.soundFile.isEmpty ? state.oggFileName : state.chart.soundFile
-    }
-
-    private var backgroundFileName: String {
-        let n = state.chart.metaString(["background"])
-        return n.isEmpty ? state.bgFileName : n
+    /// 背景ファイルの下の「写真から読み込む」(ファイルアプリではなく、写真アプリから選ぶ)
+    private var photoButton: some View {
+        PhotosPicker(selection: $photoItem, matching: .images) {
+            Text("写真から読み込む")
+                .font(PanelFont.label(22))
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 44)
+                .overlay(Rectangle().stroke(Color.white, lineWidth: 2))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(SidePressStyle())
     }
 
     private var audioInfo: String {
@@ -593,18 +650,6 @@ private struct InformationWindowContent: View {
             content()
         }
         .padding(.bottom, 13)
-    }
-
-    private func readOnly(_ text: String) -> some View {
-        Text(text.isEmpty ? "-" : text)
-            .font(PanelFont.label(22))
-            .foregroundColor(Color.white.opacity(0.6))
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .padding(.horizontal, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 44)
-            .overlay(Rectangle().stroke(Color.white.opacity(0.5), lineWidth: 2))
     }
 
     private func metaBinding(_ path: [String]) -> Binding<String> {

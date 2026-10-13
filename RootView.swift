@@ -34,8 +34,15 @@ struct RootView: View {
         return nil
     }
 
+    /// 「ファイルを選択…」(拡張子で振り分け) と「mczを展開して読み込む…」で、同じ fileImporter を使い分ける
+    private enum ImportMode {
+        case files, mcz
+    }
+
     @State private var editor: EditorState? = nil
     @State private var showImporter = false
+    @State private var importMode: ImportMode = .files
+    @State private var pendingMCZ: MCZUnpacked? = nil   // 譜面が複数入っていた mcz。どれを開くか選んでもらうまで置いておく
 
     @State private var mcURL: URL? = nil
     @State private var mcScoped = false       // mcURL のアクセス権を開いたままにしているか
@@ -68,6 +75,16 @@ struct RootView: View {
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             handle(result)
         }
+        // mcz に譜面 (.mc) が複数入っていたとき、どれを開くか選ぶ
+        .sheet(item: $pendingMCZ) { packed in
+            MCZChartPicker(folderName: packed.folder.lastPathComponent, charts: packed.charts) { chart in
+                pendingMCZ = nil
+                loadFromMCZ(packed, chartName: chart.name)
+            } onCancel: {
+                pendingMCZ = nil
+                message = "展開しました (Documents/MalodySlideEditor/\(packed.folder.lastPathComponent)/)。譜面は選ばれていません"
+            }
+        }
     }
 
     private var importView: some View {
@@ -78,10 +95,24 @@ struct RootView: View {
                 .foregroundColor(.secondary)
 
             Button {
+                importMode = .files
                 showImporter = true
             } label: {
                 Label("ファイルを選択…", systemImage: "folder")
                     .font(.title3.bold())
+                    .frame(width: 280, height: 50)
+            }
+            .buttonStyle(.bordered)
+
+            // mcz を展開して、中の mc・音源・背景画像をまとめて読み込む
+            Button {
+                importMode = .mcz
+                showImporter = true
+            } label: {
+                Label("mczを展開して読み込む…", systemImage: "archivebox")
+                    .font(.title3.bold())
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
                     .frame(width: 280, height: 50)
             }
             .buttonStyle(.bordered)
@@ -137,7 +168,11 @@ struct RootView: View {
             message = "ファイルを開けませんでした: \(e.localizedDescription)"
         case .success(let urls):
             if urls.isEmpty { return }
-            importFiles(urls)
+            if importMode == .mcz {
+                importMCZ(from: urls)
+            } else {
+                importFiles(urls)
+            }
         }
     }
 
@@ -157,6 +192,7 @@ struct RootView: View {
         var mcs: [URL] = []
         var audios: [URL] = []
         var images: [URL] = []
+        var mczs: [URL] = []
         var skipped: [String] = []
         var notes: [String] = []
 
@@ -169,10 +205,18 @@ struct RootView: View {
             case .image?:
                 images.append(url)
             case .mcz?:
-                notes.append("\(url.lastPathComponent): mcz は読み込めません。展開した mc / 音源 / 画像を選んでください")
+                mczs.append(url)
             case nil:
                 skipped.append(url.lastPathComponent)
             }
+        }
+        // mcz だけを選んだときは、「mczを展開して読み込む…」と同じ (展開して、中の mc / 音源 / 背景を読み込む)
+        if !mczs.isEmpty && mcs.isEmpty && audios.isEmpty && images.isEmpty {
+            importMCZ(from: mczs)
+            return
+        }
+        if !mczs.isEmpty {
+            notes.append("mcz は mc などと同時には読めないので無視しました。「mczを展開して読み込む…」から、mcz だけ選んでください")
         }
         if !skipped.isEmpty {
             notes.append("種類を判別できなかったので無視しました: " + skipped.joined(separator: ", "))
@@ -225,6 +269,112 @@ struct RootView: View {
         message = notes.joined(separator: "\n")
     }
 
+    // MARK: - mcz を展開して読み込む
+
+    /// 選んだ mcz を展開して (アプリ内 Documents/MalodySlideEditor/<mcz名>/ に書き出す)、中の mc・音源・背景画像を読み込む。
+    /// mc が 1 つならそのまま、複数なら選ぶ画面を出す。
+    private func importMCZ(from urls: [URL]) {
+        let mczs = urls.filter { Self.kind(of: $0) == .mcz }
+        guard let url = mczs.first else {
+            message = "mcz ファイルを選んでください"
+            return
+        }
+        var note = ""
+        if mczs.count > 1 {
+            note = "mcz が \(mczs.count) 個選ばれたので、最初の「\(url.lastPathComponent)」だけ使います"
+        }
+        let name = url.lastPathComponent
+        busy = true
+        message = ""
+        Task { @MainActor in
+            do {
+                // 読み込みと展開は重いことがあるので、画面を止めないよう別スレッドで行う
+                let packed = try await Task.detached(priority: .userInitiated) { () throws -> MCZUnpacked in
+                    let ok = url.startAccessingSecurityScopedResource()
+                    defer { if ok { url.stopAccessingSecurityScopedResource() } }
+                    let data = try Data(contentsOf: url)
+                    return try MCZImporter.unpack(data: data, mczName: name)
+                }.value
+                busy = false
+                if packed.charts.isEmpty {
+                    message = "「\(name)」の中に .mc が見つかりませんでした"
+                } else if packed.charts.count == 1 {
+                    loadFromMCZ(packed, chartName: packed.charts[0].name, extraNote: note)
+                } else {
+                    message = note
+                    pendingMCZ = packed
+                }
+            } catch {
+                busy = false
+                message = "「\(name)」を展開できませんでした: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// 展開したフォルダの中から、選んだ mc と、その音源・背景画像を読み込む。
+    /// mc は展開先のフォルダのものを開く (オートセーブもそこへ書き戻す)。前に選んでいた音源・背景は外す。
+    private func loadFromMCZ(_ packed: MCZUnpacked, chartName: String, extraNote: String = "") {
+        let mcFile = packed.folder.appendingPathComponent(chartName)
+        guard let data = try? Data(contentsOf: mcFile) else {
+            message = "\(chartName) を読み込めませんでした"
+            return
+        }
+        let media = pickMedia(chartData: data, among: packed.fileNames)
+
+        if mcScoped, let old = mcURL {
+            old.stopAccessingSecurityScopedResource()   // 前に選んでいた mc のアクセス権を閉じる
+        }
+        mcURL = mcFile
+        mcScoped = false                                // アプリ内のファイルなので、アクセス権は要らない
+        mcData = data
+        mcName = chartName
+        oggData = nil
+        oggName = ""
+        bgData = nil
+        bgName = ""
+
+        var notes: [String] = []
+        if !extraNote.isEmpty { notes.append(extraNote) }
+        if let a = media.audio {
+            if let d = try? Data(contentsOf: packed.folder.appendingPathComponent(a)) {
+                oggData = d
+                oggName = a
+            } else {
+                notes.append("\(a) を読み込めませんでした")
+            }
+        } else {
+            notes.append("mcz の中に音源が見つかりませんでした (無音で開きます)")
+        }
+        if let b = media.image {
+            if let d = try? Data(contentsOf: packed.folder.appendingPathComponent(b)) {
+                bgData = d
+                bgName = b
+            } else {
+                notes.append("\(b) を読み込めませんでした")
+            }
+        }
+        notes.append("展開先: Documents/MalodySlideEditor/\(packed.folder.lastPathComponent)/")
+        message = notes.joined(separator: "\n")
+    }
+
+    /// 展開したファイルから、この mc の音源と背景画像を決める。
+    /// mc に書いてある名前 (音源 = 曲のファイル / 背景 = meta.background) と同じ名前のファイルを優先し、
+    /// 無ければ、拡張子で最初に見つかった音源 / 画像にする。
+    private func pickMedia(chartData: Data, among names: [String]) -> (audio: String?, image: String?) {
+        var wantAudio = ""
+        var wantImage = ""
+        if let c = try? ChartData.parse(chartData) {
+            wantAudio = c.soundFile
+            wantImage = c.metaString(["background"])
+        }
+        func find(_ want: String, _ wanted: FileKind) -> String? {
+            let w = (want as NSString).lastPathComponent.lowercased()
+            if !w.isEmpty, let m = names.first(where: { $0.lowercased() == w }) { return m }
+            return names.first(where: { Self.kind(of: URL(fileURLWithPath: $0)) == wanted })
+        }
+        return (find(wantAudio, .audio), find(wantImage, .image))
+    }
+
     private func openEditor() {
         guard let url = mcURL else { return }
         // 最初に選んだ時点の mcData は、編集前の古い内容。Quit で戻ってきたあとにそれで開き直すと、
@@ -253,7 +403,12 @@ struct RootView: View {
                     oggData: oggData, oggFileName: oggName,
                     bgData: bgData, bgFileName: bgName
                 )
-                st.onClose = {
+                st.onClose = { [weak st] in
+                    // 写真から入れ替えた背景は、閉じたあとに開き直しても残す
+                    if let st = st {
+                        bgData = st.bgData
+                        bgName = st.bgFileName
+                    }
                     editor = nil
                 }
                 if !note.isEmpty { st.showToast(note) }
@@ -264,5 +419,43 @@ struct RootView: View {
                 message = "mc を解析できませんでした。JSON形式の .mc を選んでください。"
             }
         }
+    }
+}
+
+/// mcz に譜面 (.mc) が複数入っていたときに、どれを開くか選ぶ画面 (難易度ごとの mc など)
+private struct MCZChartPicker: View {
+    let folderName: String
+    let charts: [MCZUnpacked.ChartFile]
+    let onPick: (MCZUnpacked.ChartFile) -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List(charts) { chart in
+                Button {
+                    onPick(chart)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(chart.name)
+                            .font(.headline)
+                        if !chart.label.isEmpty {
+                            Text(chart.label)
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+            }
+            .navigationTitle("開く譜面を選ぶ (\(folderName))")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("キャンセル", action: onCancel)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
     }
 }

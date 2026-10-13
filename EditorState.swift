@@ -220,12 +220,13 @@ final class EditorState: ObservableObject {
     let mcName: String
     let oggData: Data?
     let oggFileName: String
-    let bgData: Data?
-    let bgFileName: String
+    // 背景画像は、Information の「写真から読み込む」で入れ替えられる (入れ替えると、画面の背景も mcz 書き出しの中身も新しいものになる)
+    @Published private(set) var bgData: Data?
+    @Published private(set) var bgFileName: String
     var onClose: (() -> Void)?
 
     // MARK: 背景画像 (最初に読み込んだ画像を、暗くして画面全体に透かして敷く。本家と同じ)
-    let bgImage: UIImage?
+    @Published private(set) var bgImage: UIImage?
     @Published var bgDim: Double = 0.7 {            // 画像の上に重ねる黒の濃さ (SETTING で 0〜95%)
         didSet { UserDefaults.standard.set(bgDim, forKey: "editor.bgDim") }
     }
@@ -822,6 +823,84 @@ final class EditorState: ObservableObject {
             }
         } catch {
             saveStatus = "保存失敗"
+        }
+    }
+
+    // MARK: - 背景画像を写真から入れ替える (Information → 背景ファイル → 写真から読み込む)
+
+    /// 写真アプリから選んだ画像を、背景に使える形 (JPEG) にする。重いので、呼ぶ側は別スレッドで呼んでよい。
+    /// - すでに JPEG で、向きも正しいものは、元のデータをそのまま使う (再圧縮で画質を落とさない)
+    /// - HEIC / PNG などは JPEG (画質 0.9) に変換する。向き (EXIF) は、画像そのものに反映して正しい向きにする
+    static func backgroundJPEG(fromPhoto data: Data) -> Data? {
+        guard let img = UIImage(data: data) else { return nil }
+        let isJPEG = data.count > 3 && data[data.startIndex] == 0xFF
+            && data[data.startIndex + 1] == 0xD8 && data[data.startIndex + 2] == 0xFF
+        if isJPEG && img.imageOrientation == .up { return data }
+        let upright: UIImage
+        if img.imageOrientation == .up {
+            upright = img
+        } else {
+            let format = UIGraphicsImageRendererFormat.default()
+            format.scale = img.scale
+            format.opaque = true
+            upright = UIGraphicsImageRenderer(size: img.size, format: format).image { _ in
+                img.draw(in: CGRect(origin: .zero, size: img.size))
+            }
+        }
+        return upright.jpegData(compressionQuality: 0.9)
+    }
+
+    /// 背景画像を、JPEG のデータに入れ替える。すでに読み込んでいる背景は置き換える。
+    /// - 背景ファイル名 (mc の meta.background) は、いま書いてある名前を引き継ぐ。拡張子が jpg / jpeg でなければ .jpg に直す (中身が JPEG なので)。名前が空なら bg.jpg
+    /// - Quit しても消えないように、画像ファイルとしても残す (`persistBackground`)
+    /// - 戻り値: 新しい背景ファイル名 (入れ替えられなければ nil)
+    @discardableResult
+    func applyBackground(jpeg: Data) -> String? {
+        guard let img = Self.makeBackground(jpeg) else {
+            showToast("画像を読み込めませんでした")
+            return nil
+        }
+        var name = chart.metaString(["background"]).trimmingCharacters(in: .whitespaces)
+        if name.isEmpty { name = bgFileName.trimmingCharacters(in: .whitespaces) }
+        let ext = (name as NSString).pathExtension.lowercased()
+        if name.isEmpty {
+            name = "bg.jpg"
+        } else if ext != "jpg" && ext != "jpeg" {
+            name = (name as NSString).deletingPathExtension + ".jpg"
+        }
+        bgData = jpeg
+        bgImage = img
+        bgFileName = name
+        chart.setMetaString(["background"], name)
+        metaChanged()
+        let saved = persistBackground(jpeg, name: name)
+        showToast(saved ? "背景を写真に入れ替えました (\(name))" : "背景を入れ替えました (\(name))。画像ファイルは保存できませんでした")
+        return name
+    }
+
+    /// 入れ替えた背景を、画像ファイルとしても書き出す。
+    ///  ・mc がアプリ内のフォルダにある (mcz を展開したときなど) → mc と同じフォルダへ (次に開くとき、名前が合えば自動で読み込まれる)
+    ///  ・それ以外 (Files アプリの mc など) → Documents/MalodySlideEditor/<mc名>/ へ (他の譜面の画像と名前がぶつからないように、フォルダを分ける)
+    private func persistBackground(_ data: Data, name: String) -> Bool {
+        let leaf = (name as NSString).lastPathComponent
+        guard !leaf.isEmpty, leaf != ".", leaf != ".." else { return false }
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let appRoot = docs.appendingPathComponent("MalodySlideEditor", isDirectory: true)
+        let mcDir = mcURL.deletingLastPathComponent()
+        let dir: URL
+        if mcDir.resolvingSymlinksInPath().path.hasPrefix(appRoot.resolvingSymlinksInPath().path + "/") {
+            dir = mcDir
+        } else {
+            let base = (mcName as NSString).deletingPathExtension
+            dir = appRoot.appendingPathComponent(base.isEmpty ? "chart" : base, isDirectory: true)
+        }
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try data.write(to: dir.appendingPathComponent(leaf), options: .atomic)
+            return true
+        } catch {
+            return false
         }
     }
 
