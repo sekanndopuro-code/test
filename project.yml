@@ -1,0 +1,100 @@
+# MalodySlideEditor の XcodeGen 設定ファイルです。
+# GitHub Actions が `xcodegen generate` でこのファイルから MalodySlideEditor.xcodeproj と
+# Generated/Info.plist を作り、xcodebuild でビルドします (Mac が無くても ipa が作れる)。
+#
+# - Package.swift は Swift Playgrounds で開く用です。この project.yml とは独立していて、
+#   お互いに影響しません (xcodebuild には -project を明示しているので Package.swift は読まれません)。
+# - Vendor/CRubberBand は、リポジトリには置かず、Actions が Rubber Band v4.0.0 を取ってきて作ります。
+#   (.github/workflows/build-ipa.yml の「Rubber Band を取り込む」)
+#   なので、Playgrounds で開いたときは Rubber Band なし (自前のフェーズボコーダー) になります。
+
+name: MalodySlideEditor
+
+schemes:
+  # xcodebuild archive -scheme MalodySlideEditor で使う共有スキーム。
+  # この版の XcodeGen はスキームを自動では作らないので、明示しておく。
+  MalodySlideEditor:
+    build:
+      targets:
+        MalodySlideEditor: all
+    archive:
+      config: Release
+
+targets:
+  MalodySlideEditor:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+
+    sources:
+      # リポジトリ直下の Swift ファイルだけを取り込む。
+      # (Package.swift は Playgrounds 用なので除外。Vendor/ README.md なども対象外)
+      - path: .
+        includes:
+          - "*.swift"
+        excludes:
+          - "Package.swift"
+      # Rubber Band 本体。1 ファイルにまとめたビルド用ファイルだけをコンパイルする。
+      # (中で ../src/... を相対 include しているので、Vendor/CRubberBand の配置は変えないこと)
+      - path: Vendor/CRubberBand/single/RubberBandSingle.cpp
+
+    dependencies:
+      # Rubber Band (vDSP FFT) が使う。
+      - sdk: Accelerate.framework
+
+    # Info.plist はここから生成する。
+    # CFBundleIdentifier / CFBundleExecutable / CFBundlePackageType などは XcodeGen が自動で入れる。
+    # CFBundleSupportedPlatforms / MinimumOSVersion / UIDeviceFamily は、ビルド時に Xcode が
+    # 下の deploymentTarget と TARGETED_DEVICE_FAMILY から入れる。
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDevelopmentRegion: en
+        CFBundleName: MalodySlideEditor
+        CFBundleDisplayName: MalodySlideEditor
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSRequiresIPhoneOS: true
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationLandscapeLeft
+        "UISupportedInterfaceOrientations~ipad":
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationLandscapeLeft
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.malody.slideeditor
+        PRODUCT_NAME: MalodySlideEditor
+        TARGETED_DEVICE_FAMILY: "1,2"     # 1 = iPhone, 2 = iPad
+        SWIFT_VERSION: "5.0"
+
+        # --- Rubber Band (C++) をこのターゲットに入れるための設定 ---
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        CLANG_CXX_LIBRARY: libc++
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - NDEBUG
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/Vendor/CRubberBand"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lc++"
+
+        # Swift から `import CRubberBand` できるようにする (Vendor/CRubberBand/include/module.modulemap)。
+        # Swift Package Manager が内部でやっているのと同じ指定 (-I と -fmodule-map-file の両方)。
+        SWIFT_INCLUDE_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/Vendor/CRubberBand/include"
+        OTHER_SWIFT_FLAGS:
+          - "$(inherited)"
+          - "-Xcc"
+          - "-fmodule-map-file=$(SRCROOT)/Vendor/CRubberBand/include/module.modulemap"
+        # 従来方式 (implicit modules) に固定して、モジュール解決の挙動を安定させる。
+        SWIFT_ENABLE_EXPLICIT_MODULES: "NO"
