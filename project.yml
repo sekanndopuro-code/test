@@ -37,6 +37,10 @@ targets:
       # Rubber Band 本体。1 ファイルにまとめたビルド用ファイルだけをコンパイルする。
       # (中で ../src/... を相対 include しているので、Vendor/CRubberBand の配置は変えないこと)
       - path: Vendor/CRubberBand/single/RubberBandSingle.cpp
+      # アプリアイコン。リポジトリ直下の AppIcon-1024.png (1024px・透明なし) から、
+      # Actions が Assets.xcassets/AppIcon.appiconset を作る (.github/workflows/build-ipa.yml の「アプリアイコンを用意する」)。
+      # (iPad から階層フォルダをアップロードするのは大変なので、PNG は 1 枚だけをルートに置く方式にしている)
+      - path: Assets.xcassets
 
     dependencies:
       # Rubber Band (vDSP FFT) が使う。
@@ -67,12 +71,39 @@ targets:
           - UIInterfaceOrientationLandscapeRight
           - UIInterfaceOrientationLandscapeLeft
 
+        # --- .mc / .mcz を「このアプリで開く」候補に出すための登録 ---
+        # (Malody 本家など他のアプリを奪わないよう、LSHandlerRank は Alternate にしてある)
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Malody 譜面
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - local.malody.slideeditor.mc
+              - local.malody.slideeditor.mcz
+        # .mc / .mcz は Malody 側の形式なので「自分のもの」ではなく Imported として宣言する。
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: local.malody.slideeditor.mc
+            UTTypeDescription: Malody 譜面 (.mc)
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - mc
+          - UTTypeIdentifier: local.malody.slideeditor.mcz
+            UTTypeDescription: Malody 譜面パッケージ (.mcz)
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - mcz
+
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: local.malody.slideeditor
         PRODUCT_NAME: MalodySlideEditor
         TARGETED_DEVICE_FAMILY: "1,2"     # 1 = iPhone, 2 = iPad
         SWIFT_VERSION: "5.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 
         # --- Rubber Band (C++) をこのターゲットに入れるための設定 ---
         CLANG_CXX_LANGUAGE_STANDARD: c++17
