@@ -395,19 +395,22 @@ struct RootView: View {
         Task { @MainActor in
             do {
                 let chart = try ChartData.parse(data)
-                var audio: AudioController? = nil
+                // 曲は、ここで 1 回だけ PCM に展開する (SongPCM)。エディタの再生・テストプレイ・曲の長さは、これを共有する。
+                // 重い処理なので、メインスレッドを止めないよう別スレッドで行う (その間は busy の表示)
+                var song: SongPCM? = nil
                 var note = ""
                 if let od = oggData {
-                    let a = AudioController()
+                    let name = oggName
                     do {
-                        try await a.load(data: od, fileName: oggName)
-                        audio = a
+                        song = try await Task.detached(priority: .userInitiated) {
+                            try SongPCM.decode(data: od, fileName: name)
+                        }.value
                     } catch {
                         note = "音源を読み込めませんでした(無音で開きます): \(error.localizedDescription)"
                     }
                 }
                 let st = EditorState(
-                    chart: chart, mcURL: url, mcName: mcName, audio: audio,
+                    chart: chart, mcURL: url, mcName: mcName, song: song,
                     oggData: oggData, oggFileName: oggName,
                     bgData: bgData, bgFileName: bgName
                 )

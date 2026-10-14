@@ -7,6 +7,9 @@
 # - Vendor/CRubberBand は、リポジトリには置かず、Actions が Rubber Band v4.0.0 を取ってきて作ります。
 #   (.github/workflows/build-ipa.yml の「Rubber Band を取り込む」)
 #   なので、Playgrounds で開いたときは Rubber Band なし (自前のフェーズボコーダー) になります。
+# - stb_vorbis (ogg Vorbis を読む C の公開ライブラリ) は、リポジトリ直下の stb_vorbis.c をそのまま置いてあります。
+#   StbVorbisBridge.c / StbVorbisBridge.h が Swift との橋渡しで、下の SWIFT_OBJC_BRIDGING_HEADER と
+#   HAVE_STB_VORBIS (Swift の #if) で有効になります。Playgrounds (Package.swift) では C は入らず、従来の自前 ogg デコーダーで読みます。
 
 name: MalodySlideEditor
 
@@ -34,6 +37,11 @@ targets:
           - "*.swift"
         excludes:
           - "Package.swift"
+      # stb_vorbis の橋渡し (C)。中で stb_vorbis.c を #include するので、stb_vorbis.c 自体はここに書かない
+      # (書くと同じ関数が 2 回できてリンクに失敗する)。-w は、stb_vorbis.c が出す古い書き方の警告を消すだけ。
+      - path: StbVorbisBridge.c
+        compilerFlags:
+          - "-w"
       # Rubber Band 本体。1 ファイルにまとめたビルド用ファイルだけをコンパイルする。
       # (中で ../src/... を相対 include しているので、Vendor/CRubberBand の配置は変えないこと)
       - path: Vendor/CRubberBand/single/RubberBandSingle.cpp
@@ -129,3 +137,9 @@ targets:
           - "-fmodule-map-file=$(SRCROOT)/Vendor/CRubberBand/include/module.modulemap"
         # 従来方式 (implicit modules) に固定して、モジュール解決の挙動を安定させる。
         SWIFT_ENABLE_EXPLICIT_MODULES: "NO"
+
+        # --- stb_vorbis (C) を Swift から使うための設定 ---
+        # ブリッジングヘッダー: Swift から msd_vorbis_decode() が見えるようになる (StbVorbisBridge.h)。
+        SWIFT_OBJC_BRIDGING_HEADER: StbVorbisBridge.h
+        # Swift 側の #if HAVE_STB_VORBIS を有効にする (Playgrounds ではこれが無いので、従来の自前 ogg デコーダーになる)。
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) HAVE_STB_VORBIS"

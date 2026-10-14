@@ -215,7 +215,7 @@ final class EditorState: ObservableObject {
     }
 
     // MARK: ファイル
-    let audio: AudioController?
+    let song: SongPCM?                  // 開くときに 1 回だけ展開した曲 (エディタの再生・テストプレイ・曲の長さが、これを共有する)
     let mcURL: URL
     let mcName: String
     let oggData: Data?
@@ -249,21 +249,17 @@ final class EditorState: ObservableObject {
 
     // MARK: 再生クロック
     // 画面の時計は2通り。どちらも「そのフレームが画面に出る時刻 (frameHost)」で時刻を決める。
-    //  ・エンジン方式 (速度1.0 / 0.25 / 0.1・音源あり): テストプレイと同じ GameAudio が「実際に鳴っているサンプル位置」から時計を作る。
+    //  ・エンジン方式 (音源あり。全部の速度): テストプレイと同じ GameAudio が「実際に鳴っているサンプル位置」から時計を作る。
     //    曲と画面が同じ時計なので、そもそもズレない。キー音もこの時計から予約する。
-    //  ・従来方式 (0.75倍/0.5倍・エンジンが使えないとき): AVAudioPlayer + 壁時計の推測航法。
-    //    曲の位置(ノイズあり)は均してから、画面の時計をなめらかに寄せる (時計を飛ばさない)。
-    private var startWall: Double = 0       // 従来方式: 画面の時計が動き出す時刻
+    //  ・壁時計 (音源なし・エンジンを作れなかったとき): 動き出した時刻からの経過時間だけで進める (曲が無いので、合わせる相手がいない)。
+    //    以前は、エンジンが使えないときの予備として AVAudioPlayer の方式があったが、曲を SongPCM に展開するようにしたので無くした。
+    private var startWall: Double = 0       // 壁時計: 画面の時計が動き出す時刻
     private var startSec: Double = 0
     private var rateNow: Double = 1
-    private var engineAudio: GameAudio?     // サンプル位置の時計を持つ曲の再生 (速度1.0と0.5倍未満で使う)
+    private var engineAudio: GameAudio?     // サンプル位置の時計を持つ曲の再生 (音源があれば全部の速度で使う)
     private var useEngine = false           // 今の再生がエンジン方式か
     private var frameLink: FrameLink?       // 再生中だけ動く (画面に出る時刻を取る)
     private var frameHost = 0.0             // 今フレームが画面に出る時刻 (CACurrentMediaTime 軸)
-    private var corr = 0.0                  // 従来方式: 画面の時計への補正 (なめらかに動く)
-    private var corrTarget = 0.0            // 従来方式: 「曲の実位置 − 推測航法の時計」を均した値。キー音の予約にも使う
-    private var corrValid = false
-    private var lastCorrWall = 0.0
     private var saveWork: DispatchWorkItem?
     private var toastWork: DispatchWorkItem?
     var seekWasPlaying = false
@@ -311,7 +307,7 @@ final class EditorState: ObservableObject {
     private var undoStack: [Snapshot] = []
     private var redoStack: [Snapshot] = []
 
-    init(chart: ChartData, mcURL: URL, mcName: String, audio: AudioController?,
+    init(chart: ChartData, mcURL: URL, mcName: String, song: SongPCM?,
          oggData: Data?, oggFileName: String, bgData: Data?, bgFileName: String) {
         var c = chart
         c.times.sort { $0.beat < $1.beat }
@@ -319,7 +315,7 @@ final class EditorState: ObservableObject {
         self.timeMap = TimeMap(c.times)
         self.mcURL = mcURL
         self.mcName = mcName
-        self.audio = audio
+        self.song = song
         self.oggData = oggData
         self.oggFileName = oggFileName
         self.bgData = bgData
@@ -367,21 +363,18 @@ final class EditorState: ObservableObject {
         pluginDialog?.finish(nil)       // 待っているプラグインがあれば、解放する
     }
 
-    /// 速度1.0で使う、サンプル位置の時計つきの再生 (テストプレイと同じ GameAudio)。
-    /// 作れなかったとき (oggが特殊など) は nil のままにして、従来方式で再生する
+    /// サンプル位置の時計つきの再生 (テストプレイと同じ GameAudio)。曲は開くときに展開済みの SongPCM を読むだけで、
+    /// ここでファイルを書いたり、デコードし直したりはしない。
+    /// 作れなかったとき (オーディオエンジンが起動できないなど) は nil のままにして、音なし (壁時計) で動かす
     private func prepareEngineAudio() {
-        guard engineAudio == nil, let od = oggData else { return }
-        let ext0 = (oggFileName as NSString).pathExtension
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("editorplay", isDirectory: true)
+        guard engineAudio == nil, let s = song else { return }
         do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let url = dir.appendingPathComponent("audio.\(ext0.isEmpty ? "ogg" : ext0)")
-            try od.write(to: url, options: .atomic)
-            let g = try GameAudio(url: url, cache: true)    // 曲を背景で先に展開しておく (再生ボタンの待ち時間を縮める)
+            let g = try GameAudio(song: s)
             g.setVolume(Float(musicVolume))
             engineAudio = g
         } catch {
             engineAudio = nil
+            showToast("オーディオエンジンを起動できなかったので、音なしで動かします")
         }
     }
 
@@ -420,7 +413,7 @@ final class EditorState: ObservableObject {
     var maxBeat: Double { max(1, timeMap.beat(atSec: totalSec)) }
 
     func recomputeTotal() {
-        let audioSec = (audio?.duration ?? 0) + Double(chart.offsetMs) / 1000.0
+        let audioSec = (song?.duration ?? 0) + Double(chart.offsetMs) / 1000.0
         // 壊れた値 (何億拍も先にある seg など) が1つあるだけで、曲の長さが何万分にもなってしまう。
         // → 「曲の長さ + 60秒」(曲が無いときは3時間) より遠い点(マイナス側も)は、長さの計算から除く。
         //   データそのものは書き換えない (保存時もそのまま)。
@@ -480,7 +473,7 @@ final class EditorState: ObservableObject {
         if useEngine, let a = engineAudio {
             return max(startSec, a.chartTime(atUptime: h))      // 動き出す前 (先読みの50ms) は開始位置で止める
         }
-        return startSec + max(0, h - startWall) * rateNow + corr
+        return startSec + max(0, h - startWall) * rateNow
     }
 
     func currentBeat() -> Double {
@@ -507,39 +500,11 @@ final class EditorState: ObservableObject {
         frameHost = link.targetTimestamp            // 「この更新が画面に出る時刻」で描く (描画にかかった時間の揺れが出ない)
         if useEngine {
             engineAudio?.refreshAnchor()            // 実際に鳴っているサンプル位置で時計を合わせ直す
-        } else {
-            updateLegacyClock(now: now)
         }
         scheduleKeySounds(now: now)
         if currentSec() > totalSec + 0.5 {
             DispatchQueue.main.async { [weak self] in self?.pause() }   // リンクのコールバックの中で止めない (pause は何度呼ばれても安全)
         }
-    }
-
-    /// 従来方式 (AVAudioPlayer) の時計合わせ。
-    /// p.currentTime は細かく揺れる値なので、そのまま信じて時計を飛ばすと「ワープ」になる。
-    /// → 差を均して(corrTarget)、画面の時計(corr)は最大10%の速度差でなめらかに寄せる。
-    ///   0.3秒を超える大きな飛び (割り込みからの復帰など) だけは、1回だけ合わせ直す
-    private func updateLegacyClock(now: Double) {
-        guard let p = audio?.player, p.isPlaying, now > startWall + 0.25 else { return }
-        let audioPos = p.currentTime
-        guard audioPos > 0.05, audioPos < p.duration - 0.2 else { return }
-        let off = Double(chart.offsetMs) / 1000.0
-        let predicted = startSec + (now - startWall) * rateNow     // 補正前の時計
-        let meas = (audioPos + off) - predicted
-        if !corrValid {
-            corrTarget = meas
-            corrValid = true
-        } else if abs(meas - corrTarget) > 0.3 {
-            corrTarget = meas
-            corr = meas
-        } else {
-            corrTarget += (meas - corrTarget) * 0.03
-        }
-        let dt = lastCorrWall > 0 ? min(max(now - lastCorrWall, 0), 0.1) : 0
-        lastCorrWall = now
-        let step = 0.1 * dt
-        corr += max(-step, min(step, corrTarget - corr))
     }
 
     private func startFrameLink() {
@@ -567,31 +532,20 @@ final class EditorState: ObservableObject {
         KeySound.shared.prepare()           // 止めていたキー音ノードを先に起こしておく (時計を始めた後に起こすと開始が引っ掛かる)
         // 先に曲の下ごしらえと再生予約をして、画面の時計はその後で始める
         // (逆順だと、下ごしらえに掛かった分だけ曲が譜面より遅れて始まる)
-        var actualRate = rate
-        if usesEngine(rate: rate), let a = engineAudio {
+        if let a = engineAudio {
             useEngine = true
             a.setStretchSize(sharpStretch ? 512 : 1024)
-            a.setRate(rate)                                   // 1.0 未満のときは、その速度に伸ばした音を流す (1.0 は従来と同じ)
+            a.setRate(rate)                                   // 1.0 未満のときは、その速度に伸ばした音を流す (1.0 は曲をそのまま)
             a.begin(chartTime: sec, offsetTotal: offSec)      // 以降の時計は、鳴っているサンプル位置から作られる
             let stretchTag = rate < 1.0 ? "・伸ばした音(\(a.stretchEngine))" : ""
-            let cacheTag = a.hasCache ? (a.lastBeginCached ? "・曲は展開済み" : "・曲は未展開") : ""
-            playInfo = String(format: "再生開始の下ごしらえ %.0f ms (%@%@%@)", a.lastBeginMs, a.lastBeginWarm ? "先読み済み" : "先読みなし", cacheTag, stretchTag)
+            playInfo = String(format: "再生開始の下ごしらえ %.0f ms (%@%@)", a.lastBeginMs, a.lastBeginWarm ? "先読み済み" : "先読みなし", stretchTag)
         } else {
-            useEngine = false
-            if rate < 0.5 && audio != nil {
-                actualRate = 0.5                              // AVAudioPlayer は 0.5 倍より遅くできない
-                showToast("この音源は 0.5倍より遅くできないため、0.5倍で再生します")
-            }
-            audio?.start(audioSec: sec - offSec, rate: actualRate, lead: lead)
-            playInfo = "従来方式で再生 (エンジンを作れなかったときの予備)"
+            useEngine = false                                 // 音源なし (または音声エンジンを作れなかった): 壁時計だけで進める
+            playInfo = ""
         }
         startSec = sec
         startWall = CACurrentMediaTime() + lead
-        rateNow = actualRate
-        corr = 0
-        corrTarget = 0
-        corrValid = false
-        lastCorrWall = 0
+        rateNow = rate
         keyDone = sec - 0.000001            // 開始位置ちょうどのノーツも鳴らす
         frameHost = CACurrentMediaTime()
         isPlaying = true
@@ -613,8 +567,6 @@ final class EditorState: ObservableObject {
                 }
             }
             a.halt()
-        } else {
-            audio?.stop()
         }
         KeySound.shared.cancelScheduled()
         isPlaying = false
@@ -654,15 +606,11 @@ final class EditorState: ObservableObject {
                 showToast("ノーツがないのでテストできません")
                 return
             }
+            // 曲は開くときに展開済みの SongPCM を、そのまま共有する (ファイルを書き直したり、デコードし直したりしない)
             var game: GameAudio? = nil
-            if let od = oggData {
-                let ext0 = (oggFileName as NSString).pathExtension
-                let dir = FileManager.default.temporaryDirectory.appendingPathComponent("testplay", isDirectory: true)
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                let url = dir.appendingPathComponent("audio.\(ext0.isEmpty ? "ogg" : ext0)")
-                try od.write(to: url, options: .atomic)
+            if let s = song {
                 do {
-                    game = try GameAudio(url: url)
+                    game = try GameAudio(song: s)
                     game?.setVolume(Float(musicVolume))
                 } catch {
                     showToast("音源を読めなかったので無音でテストします")
@@ -716,12 +664,6 @@ final class EditorState: ObservableObject {
         if snapDen != v {
             showToast("分割を 1/\(snapDen) にしました (入力できるのは 1/2〜1/1024)")
         }
-    }
-
-    /// この速度の再生にエンジン方式 (GameAudio) を使うか。
-    /// 全部の速度でエンジン方式 (1.0 未満は、伸ばした音を自前で作って流す)。従来方式 (AVAudioPlayer) は、エンジンを作れなかったときの予備
-    private func usesEngine(rate: Double) -> Bool {
-        engineAudio != nil
     }
 
     // MARK: - Undo / Redo
@@ -951,31 +893,26 @@ final class EditorState: ObservableObject {
     // MARK: - 音量 / キー音
 
     /// 停止中、位置や譜面の変更が少し止まったら、曲の再生位置を先に用意しておく (再生ボタンを押した瞬間の下ごしらえを省くため)。
-    /// エンジン方式 (速度1.0) は別スレッドで用意するので軽く、0.1秒で動く。従来方式は 0.25 秒
+    /// 曲は展開済みのメモリを読むだけなので、普通の速度ではほとんど要らない。伸ばした音 (0.75倍など) は作るのに時間が掛かるので、これが効く。
+    /// 別スレッドで用意するので軽く、0.04秒で動く
     private func scheduleWarm() {
         warmWork?.cancel()
-        guard audio != nil || engineAudio != nil else { return }
+        guard engineAudio != nil else { return }
         let rate = playSpeed
-        let engineMode = usesEngine(rate: rate)
         let w = DispatchWorkItem { [weak self] in
             guard let self = self, !self.isPlaying else { return }
             if self.keyDirty { self.rebuildKeyTimes() }      // 譜面を触った後のキー音の表は、止まっている間に作っておく (再生開始のフレームで作ると引っ掛かる)
             let sec = max(0, self.timeMap.sec(atBeat: self.viewBeat))
             let offSec = Double(self.chart.offsetMs) / 1000.0
-            if engineMode {
-                self.engineAudio?.setStretchSize(self.sharpStretch ? 512 : 1024)
-                self.engineAudio?.setRate(rate)
-                self.engineAudio?.warm(chartTime: sec, offsetTotal: offSec)
-            } else {
-                self.audio?.warm(audioSec: sec - offSec)
-            }
+            self.engineAudio?.setStretchSize(self.sharpStretch ? 512 : 1024)
+            self.engineAudio?.setRate(rate)
+            self.engineAudio?.warm(chartTime: sec, offsetTotal: offSec)
         }
         warmWork = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + (engineMode ? 0.04 : 0.25), execute: w)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: w)
     }
 
     func applyVolumes() {
-        audio?.volume = Float(musicVolume)
         engineAudio?.setVolume(Float(musicVolume))
         KeySound.shared.volume = Float(noteVolume)
     }
@@ -1010,7 +947,7 @@ final class EditorState: ObservableObject {
         if let a = eng {
             horizon = a.chartTime(atUptime: now + Self.keyLookahead + a.outputLatency)
         } else {
-            horizon = startSec + (now + Self.keyLookahead - startWall) * rate + corrTarget
+            horizon = startSec + (now + Self.keyLookahead - startWall) * rate
         }
         if horizon <= keyDone { return }
         if noteVolume <= 0.001 {            // 消音中も予約位置だけは進める (戻した時に溜まった分が一気に鳴らないように)
@@ -1036,7 +973,7 @@ final class EditorState: ObservableObject {
             if let a = eng {
                 host = a.uptime(atChartTime: t) - a.outputLatency
             } else {
-                host = startWall + (t - corrTarget - startSec) / rate
+                host = startWall + (t - startSec) / rate
             }
             if host > now - 0.08 {                  // 大きく遅れてしまった分は捨てる
                 KeySound.shared.play(atTime: host)

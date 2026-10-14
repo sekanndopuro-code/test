@@ -15,7 +15,8 @@
 | ZipWriter.swift | mcz(zip) 書き出し |
 | ZipReader.swift | mcz(zip) 読み込み。無圧縮 (stored) と deflate に対応 (`ZipReader`)。deflate の展開は Apple の Compression (`COMPRESSION_ZLIB` = zip と同じ raw deflate)。ZIP64 / パスワード付きは非対応 |
 | MCZImporter.swift | mcz を展開して `Documents/MalodySlideEditor/<mcz名>/` へ全部書き出す (`MCZImporter.unpack`)。譜面を選ぶ画面に出す version / creator もここで読む |
-| AudioController.swift | 音源。AVAudioPlayer → ダメなら WebKit でデコード。曲の音量 `volume` |
+| AudioController.swift | **曲を開くときに 1 回だけ PCM に展開する `SongPCM`** (ogg は ipa では stb_vorbis、Playgrounds では自前デコーダー。ogg 以外は AVAudioFile)。エディタの再生・テストプレイ・曲の長さが、この同じ PCM を共有する。`SongPCMSource` (PCM を `PCMSource` として読む薄い入れ物) と、オーディオセッションの起こし方 `AudioSessionSetup` もここ。以前あった AVAudioPlayer と WebKit (WKWebView) でのデコードは無くした |
+| stb_vorbis.c / StbVorbisBridge.c / StbVorbisBridge.h | **ogg Vorbis を読む C のライブラリ (stb_vorbis v1.22。公開ドメイン / MIT) と、Swift への橋渡し**。`stb_vorbis.c` は nothings/stb のコミット `2c980bb59875b0d32144a71867fbdebb2f77cd20` をそのまま置いてあり、書き換えていない。`StbVorbisBridge.c` の `msd_vorbis_decode()` が ogg を丸ごと Float の左右に展開する。**ipa のビルドだけで使う** (`project.yml` の `SWIFT_OBJC_BRIDGING_HEADER` と `HAVE_STB_VORBIS`)。Playgrounds (`Package.swift`) では除外してあり、Swift 側は `#if HAVE_STB_VORBIS` で従来の自前 ogg デコーダーに切り替わる |
 | KeySound.swift | ノーツ音(キー音)。鈴くらいの高さの短い音をコードで合成して鳴らす |
 | EditorState.swift | 状態・再生クロック・Undo・オートセーブ・エクスポート |
 | EditorState+Tools.swift | ノーツ配置/削除/範囲コピー/反転/Slide<->Wipe/BPM/effect/seg編集 / **Grid align の吸着** (`snapNote` = 置くとき、`applyCenteredMove` = 動かすとき) |
@@ -31,7 +32,7 @@
 | MoreMenuIcons.swift | More メニューのアイコン (`MoreMenuIcon`)。本家の画面収録から起こした輪郭 (`MoreMenuIconData`) と、自作の Time range (正方形 + 上矢印) |
 | RootView.swift | 起動時のファイル選択。**まとめて選んだファイルを拡張子で mc / 音源 / 背景画像に自動で振り分ける** + **mcz の展開読み込み** (下の「起動画面のファイル選択」) |
 | TestPlay.swift | テストプレイ。MalodySlideTestplayer の判定・音声・描画をそのまま組み込み (Note→PlayNote に改名) |
-| PCMCache.swift | 曲全体を背景スレッドで先に PCM へ展開しておく `CachedPCMSource` (再生ボタンの待ち時間を縮める。エディタの再生だけで使う) |
+| PCMCache.swift | **使わなくなった** (中身は空)。曲を開くときに全部展開する `SongPCM` になったので、背景の先読み展開は要らない。GitHub 上で削除してよい |
 | RubberBandPCMSource.swift | **Rubber Band 版の時間伸縮** (0.75 / 0.5 / 0.25 / 0.1 倍の音)。`CRubberBand` (C++) があるビルド = GitHub Actions のときだけ有効。Swift Playgrounds では中身が空になり、`TimeStretch.swift` の自前版で動く。組み込み方は `RubberBand導入手順.md` |
 | Effects.swift | effect (scroll / jump) から「表示位置 P(t)」を決める `EffectMap` (テストプレイの見た目だけが変わる。判定は変わらない) |
 | PluginPanel.swift | **Adv. メニュー** (`AdvPanel`: プラグイン一覧・読み込みボタン・出力欄) と、プラグインが出すダイアログ (`PluginDialogLayer`) |
@@ -314,14 +315,13 @@ BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.inform
 
 ## 再生ボタンの反応速度
 - 再生ボタンを押してから動き出すまでの余裕は `EditorState.playLead` (現在 0.05 秒)。短いほど反応が速いが、短すぎると曲の頭出しがずれる
-- 再生開始では「曲の下ごしらえ(`prepareToPlay`)→ 鳴らす時刻の予約 → 画面の時計を開始」の順にする。順序を逆にすると、下ごしらえに掛かった分だけ曲が譜面より遅れて始まる
-- 停止中、表示位置が 0.25 秒止まると `AudioController.warm` が次の再生位置を先に用意する。位置が合っていれば再生ボタンの瞬間の下ごしらえを省く
+- 再生開始では「曲の下ごしらえ(`GameAudio.begin`)→ 鳴らす時刻の予約 → 画面の時計を開始」の順にする。順序を逆にすると、下ごしらえに掛かった分だけ曲が譜面より遅れて始まる
+- 停止中、表示位置が 0.04 秒止まると `GameAudio.warm` が次の再生位置を先に用意する。位置が合っていれば再生ボタンの瞬間の下ごしらえを省く (曲は展開済みのメモリを読むだけなので、普通の速度ではほとんど効果が要らない。伸ばした音で効く)
 
 ## 再生/停止の遅延対策 と 曲の長さの異常 (修正メモ)
 - **停止の遅れ**: `KeySound.cancelScheduled` が、停止のたびに 8 ノード全部へ `stop()`+`play()` (計16回の同期呼び出し) をしていた。
   今は「まだ鳴っていない予約を持つノード」だけを `stop()` し、再生状態への復帰は次に鳴らす時 (`ensureRunning`) に回す
-- **曲の停止**: `AudioController.stop` は、鳴っている最中は `pause()` (後片付けが無く速い・準備状態も保たれる)、開始予約中だけ `stop()` (確実に取り消す)
-- **再生が鳴らない**: `AVAudioPlayer.play(atTime:)` が false を返したとき (オーディオセッションが割り込みで止まっていた等) は、セッションを起こし直して1回だけやり直す
+- (以前ここにあった AVAudioPlayer の停止 / 再生やり直しの対策は、AVAudioPlayer の経路ごと無くした。曲の再生は `GameAudio` (AVAudioEngine) だけで、割り込み・イヤホンの抜き差しのあとは `GameAudio.begin` がエンジンを起こし直す)
 - **ボタン**: 再生/停止ボタンは「指が触れた瞬間」に切り替わる (`PlayToggleButton`)。従来の「離した時」に戻す方法はそのファイルのコメント参照
 - **再生ボタンの形と位置**: 本家と同じ正六角形 (左右が尖る。頂点から頂点まで 100pt、高さ 86.6pt、白い縁 2.8pt、中は不透明なグレー)。中心は画面の左端から 205pt (`SeekPanel.hexCenterX` = 60pt)、縦は画面の真ん中。左の頂点が現在位置の白い線にとどくよう、線を 11pt だけ伸ばしている。**押せる範囲は従来どおりの縦長の長方形** (幅 102pt = `SeekPanel.totalWidth` − 2、高さ = 画面の約1/5。本家の六角形だと小さくて、シークバーを誤って触って現在位置がずれるため、わざと大きくしてある)。六角形の絵はタッチを受けず、透明な長方形が受ける。`SeekPanel` (EditorView.swift) が、シークバー(66pt) + 時刻表示(38pt) + 再生ボタンを重ねて作る。
   ボタンの当たり判定の外 (上側・下側) のシークバーを触ってドラッグすると曲の位置を動かせる。その間だけボタンは透明になる (`SeekView` の `seeking` → `PlayToggleButton` の `dimmed`)。
@@ -336,32 +336,33 @@ BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.inform
 ## 再生クロック (曲・レーン・キー音を同じ時計で動かす)
 再生中の画面は、CADisplayLink (`EditorState.onFrame`) が1フレームに1回、「そのフレームが画面に出る時刻 `frameHost`」を取り、
 `currentSec()` はその時刻から譜面時刻を返す。レーン・縦タイムライン・シークバー・時刻表示は同じフレームなら必ず同じ値になる。
-(以前は Canvas ごとに `CACurrentMediaTime()` を読み、`AVAudioPlayer.currentTime` との差が60msを超えるたびに時計を丸ごと飛ばしていた → レーンのワープ)
+(以前は Canvas ごとに `CACurrentMediaTime()` を読み、`AVAudioPlayer.currentTime` との差が60msを超えるたびに時計を丸ごと飛ばしていた → レーンのワープ。今は AVAudioPlayer を使っていない)
 
-- **エンジン方式** (速度 1.0 / 0.25 / 0.1 で音源あり): テストプレイと同じ `GameAudio` (TestPlay.swift) を使う。
+- **エンジン方式** (音源あり。全部の速度): テストプレイと同じ `GameAudio` (TestPlay.swift) を使う。
   `lastRenderTime` から得た「実際に鳴っているサンプル位置」で毎フレーム時計を合わせ直す。出力遅延も込みで「聞こえる位置」を譜面時刻にする。
   キー音は `GameAudio.uptime(atChartTime:)` − `outputLatency` の時刻に予約する (曲のサンプルと同じタイミングで聞こえる)
-- **従来方式** (0.75倍 / 0.5倍、またはエンジンが音源を開けなかったとき): `AVAudioPlayer` + 壁時計の推測航法。
-  `currentTime` との差は均して (`corrTarget`)、画面の時計 (`corr`) は最大10%の速度差でなめらかに寄せる。時計を飛ばすのは0.3秒を超える差のときだけ
+- **壁時計** (音源なしで開いたとき・オーディオエンジンを起動できなかったとき): 動き出した時刻からの経過時間だけで進める (曲が無いので、合わせる相手がいない)。以前あった「AVAudioPlayer + 推測航法」の従来方式は、曲を `SongPCM` に展開するようにして無くした
 - 速度の切り替え・ポーズ・シークで毎回 `play()` が時計を作り直すので、ズレは蓄積しない
 - **再生ボタンの反応 (エンジン方式)**: 停止中、表示位置が0.1秒止まると `GameAudio.warm` が、次の再生位置のシーク・デコード・最初のバッファ投入を別スレッドで済ませておく。
   再生ボタンでは `begin` が「用意済みの位置と20ms以内で合っているか」を見て、合っていれば再生の予約だけで始める (合っていなければ従来どおりその場でシーク)。
   SETTING の下に「再生開始の下ごしらえ ○ ms (先読み済み / 先読みなし)」を出している (不要なら `SideWindow.swift` の `SettingWindowContent.playInfoText` を削除)。
-  位置を動かして0.1秒以内に再生を押したときは「先読みなし」になり、少し待たされる
-- **曲の先読み展開 (再生ボタンの待ち時間対策)**: 「区間を置き終わる → 区間の始めまで戻る → すぐ再生」のように、位置を動かしてすぐ再生を押すと、`warm` の先読みが間に合わず、再生開始に「シーク + 最初の buffer 作り」(ogg の自前デコーダーでは、目標位置の手前のページ頭からデコードし直す) の分だけ待たされる。
-  そこで、エディタの `GameAudio` は曲全体を背景スレッドで先に PCM へ展開しておく (`GameAudio(url:cache: true)` → `CachedPCMSource` / PCMCache.swift)。
-  - 展開済みの区間は memcpy だけで読めるので、先読みなしで再生を押しても、シークと最初の buffer 作りがほぼ一瞬で済む。未展開の区間は従来どおり (遅いだけで動作は同じ)
-  - 背景の展開は、いま見ている位置 (次に再生する位置、`GameAudio.warm` が教える) の近くから先に進め、終わったら曲の頭まで戻って埋める。再生中は止める。優先度は低い (utility)
-  - 使うメモリは 曲の長さ × 約 21MB/分 (44.1kHz ステレオ)。上限 200MB (約 9 分) を超える分は展開しない (`CachedPCMSource.init` の `memoryLimitMB`)
-  - 展開は、曲の長さと端末の速さによって、開いてから数十秒〜数分かかる。SETTING の下の「再生開始の下ごしらえ ○ ms (先読みなし・**曲は展開済み** / 曲は未展開)」で、その位置が済んでいるか分かる。「未展開」で待たされるのは、まだ背景の展開がそこまで届いていないとき
-  - 0.75 倍などの伸ばした音 (`StretchedPCMSource`) も、元の曲を読む部分がこの展開済みの曲になるので速くなる (伸ばす計算そのものは従来どおり)
+  位置を動かして0.04秒以内に再生を押したときは「先読みなし」になるが、曲は展開済みのメモリなので、その場のシークでも待ちはほとんど無い (伸ばした音のときは少し待たされる)
+- **曲の展開 (SongPCM。再生ボタンの待ち時間対策と、曲を開く時間の短縮)**: 曲は、エディタを開くときに **1 回だけ** Float の左右 PCM に展開する (`SongPCM.decode` / AudioController.swift。`RootView.openEditor` が別スレッドで呼ぶ)。
+  エディタの再生 (`GameAudio(song:)`)・テストプレイ (`startTestPlay`)・曲の長さ (`recomputeTotal`) は、その同じ PCM を読むだけ。以前のように、曲を開くたびに WKWebView で WAV へ変換したり、`GameAudio` で自前デコーダーによりもう一度全部展開したり、テストプレイのたびにファイルを書き直してまたデコードしたりしない。
+  - ogg は、ipa では **stb_vorbis** で展開する (PC での測定は 185 秒の曲で約 0.3 秒。iPad での実測は SETTING の「音源読込」の行に出る。展開した結果は、libvorbis と float の誤差 (約 2e-7) の範囲で一致することを PC で確認済み)。stb_vorbis が読めない ogg (Opus など) は、自前の ogg デコーダー → AVAudioFile の順に試す。ogg 以外 (mp3 / wav / m4a) は AVAudioFile
+  - Playgrounds (Package.swift) では C が入らないので、ogg は自前の Swift デコーダーで展開する。最適化なしのビルドなので、曲を開くときに数十秒待たされる (ipa では起きない)
+  - 展開済みの PCM はメモリを読むだけなので、シーク・最初の buffer 作りは `memcpy` だけで一瞬。`GameAudio.warm` の先読みが間に合わなくても、再生ボタンで待たされない
+  - 使うメモリは 曲の長さ × 約 21MB/分 (44.1kHz ステレオ。モノラルの曲は半分)。上限は 20 分 (`SongPCM.maxFrames`)。超える曲は読み込まず、音なしで開く
+  - 0.75 倍などの伸ばした音 (`RubberBandPCMSource` / `StretchedPCMSource`) も、元の曲を読む部分がこの展開済みの曲 (`SongPCMSource`) になる (伸ばす計算そのものは従来どおり)
+  - SETTING の「音源読込」の行に、どの方法で何 ms で展開したかが出る (「stb_vorbis で展開 (44100 Hz・2ch・350 ms)」など)
+  - `GameAudio` の先読み・世代管理 (`warm` / `generation` / `idleQueued`) は、まだ残している。`AVAudioPlayerNode` に buffer を積む作りが同じなのと、伸ばした音 (Rubber Band) は作るのに時間が掛かるため。これらを無くすには、曲とキー音を 1 つのレンダーコールバックでミックスする作りに替える必要がある (音ズレに直結するので、まだやっていない)
 - 譜面を触ったあとのキー音の表 (`keyTimes`) は、止まっている間の先読み (`scheduleWarm`) の中で作り直す。以前は再生開始の最初のフレームで作っていたので、ノーツが多い譜面で再生の出だしが引っ掛かっていた
 
 ## 再生速度 / 分割 (右下のボタン)
 - ⏱ (再生速度): **1.0x / 0.75x / 0.5x / 0.25x / 0.1x** から選ぶ。数値入力はない (音が合うことを優先して、一覧の値だけにしている)
 - ▤ (分割): 一覧の最後にある **入力…** で 1/2〜1/1024 を入力できる ("48" でも "1/48" でも可)。mc の `test.divide` にも保存される
   - 分割が細かいときは、レーンの横線は画面に収まる細かさまでしか描かない (吸着は入力した分割のまま)
-- 再生は全部の速度でエンジン方式 (`GameAudio`)。AVAudioPlayer (従来方式) は、エンジンを作れなかったときの予備だけ (`EditorState.usesEngine`)
+- 再生は全部の速度でエンジン方式 (`GameAudio`)。エンジンを作れなかったときは、音なしの壁時計で進む
   - 1.0 倍: 曲をそのまま流す
   - 1.0 倍未満 (0.75 / 0.5 / 0.25 / 0.1): **自前の時間伸縮** (`StretchedPCMSource` / TimeStretch.swift) で伸ばした音を流す。音程は変えない
     - 以前の 0.5〜0.75 倍は AVAudioPlayer で鳴らしていたが、音が大きくズレたため、同じ方式にそろえた

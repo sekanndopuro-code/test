@@ -629,7 +629,7 @@ private struct InformationWindowContent: View {
     }
 
     private var audioInfo: String {
-        if let a = state.audio {
+        if let a = state.song {
             return "音源読込: \(a.info) / 長さ \(state.timeString(a.duration))"
         }
         return "音源なし (無音で編集中)"

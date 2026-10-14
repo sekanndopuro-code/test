@@ -1320,7 +1320,12 @@ final class OggPacketReader {
     }
 }
 
-// MARK: - PCMソース(oggは自前デコーダー、それ以外はAVAudioFile)
+// MARK: - PCMソース
+// 曲は、開くときに 1 回だけ SongPCM (AudioController.swift) へ展開して、再生はそれを SongPCMSource 経由で読む。
+// OggPCMSource (自前の ogg デコーダー) と FilePCMSource (AVAudioFile) は、その「展開」の中で使う予備:
+//   ・OggPCMSource : ipa 以外 (Swift Playgrounds) の ogg / stb_vorbis が読めなかった ogg
+//   ・FilePCMSource : ogg 以外 (mp3 / wav / m4a など)
+// あとは、伸ばした音 (RubberBandPCMSource / StretchedPCMSource) も PCMSource の約束で作ってある。
 
 protocol PCMSource: AnyObject {
     var sampleRate: Double { get }
@@ -1468,8 +1473,7 @@ final class FilePCMSource: PCMSource {
 final class GameAudio: @unchecked Sendable {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
-    private let source: PCMSource
-    private let cache: CachedPCMSource?       // 曲を背景で先に PCM へ展開するとき (エディタ用)。nil なら従来どおり
+    private let source: PCMSource             // 展開済みの曲 (SongPCMSource)。メモリを読むだけなので、シークも最初の buffer 作りも一瞬
     private let format: AVAudioFormat
     private let sr: Double
     
@@ -1513,8 +1517,6 @@ final class GameAudio: @unchecked Sendable {
     private var warmGroup: DispatchGroup?    // warm() の「シーク + 最初のバッファ投入」が終わるまでを待つための印 (メインスレッドでのみ触る)
     private(set) var lastBeginMs = 0.0       // 直近の begin() に掛かった時間 (診断用)
     private(set) var lastBeginWarm = false   // 直近の begin() が先読み済みだったか (診断用)
-    private(set) var lastBeginCached = false // 直近の begin() の開始位置が、展開済み (PCMCache.swift) だったか (診断用)
-    var hasCache: Bool { cache != nil }
     
     // 再生速度 (エディタの 0.5倍未満の再生用)。遅いときは、伸ばした音を自前で作って (StretchedPCMSource) 流す。
     // 流れる音は常に「ふつうの速度の PCM」なので、player → mixer の直結のまま。速度 1.0 と同じ時計・同じ補正の仕組みで動く。
@@ -1525,30 +1527,15 @@ final class GameAudio: @unchecked Sendable {
     private(set) var rate = 1.0              // 再生速度 (0.1...1.0)
     private var activeSource: PCMSource { stretched ?? source }   // 今のデコード元 (decodeQueue 上でだけ使う)
     
-    /// cache: true のとき、曲全体を背景スレッドで先に PCM へ展開する (PCMCache.swift)。
-    /// 位置を動かしてすぐ再生しても、シークと最初の buffer 作りが一瞬で済む。エディタ用 (テストプレイは false のまま)
-    init(url: URL, cache useCache: Bool = false) throws {
-        let isOgg = url.pathExtension.lowercased() == "ogg"
-        let make: () throws -> PCMSource = {
-            if isOgg { return try OggPCMSource(url: url) }
-            return try FilePCMSource(url: url)
-        }
-        let base = try make()
-        let src: PCMSource
-        var cached: CachedPCMSource? = nil
-        if useCache {
-            let c = CachedPCMSource(live: base, makeFiller: make)    // 背景スレッドは別のソース (make でもう1つ作る) を使う
-            cached = c
-            src = c
-        } else {
-            src = base
-        }
+    /// song: 展開済みの曲 (AudioController.swift の SongPCM)。エディタの再生もテストプレイも、同じものを共有する (読むだけ)。
+    /// デコードはここでは行わない (SongPCM を作るときに 1 回だけ済んでいる)
+    init(song: SongPCM) throws {
+        let src = SongPCMSource(song)
         let rate = src.sampleRate
         guard let f = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 2, interleaved: false) else {
             throw AudioLoadError(text: "音声フォーマットを作れません")
         }
         source = src
-        cache = cached
         sr = rate
         format = f
         
@@ -1561,7 +1548,6 @@ final class GameAudio: @unchecked Sendable {
         engine.connect(player, to: engine.mainMixerNode, format: f)
         engine.prepare()
         try engine.start()
-        cached?.startFilling()                              // ここまでで作れたときだけ、背景の展開を始める
     }
     
     private func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
@@ -1596,8 +1582,6 @@ final class GameAudio: @unchecked Sendable {
             lastBeginWarm = false
         }
         warmGroup = nil
-        lastBeginCached = cache?.isCached(frame: baseFrame) ?? false
-        cache?.setPaused(true)                              // 再生中は、背景の展開を止める (halt で再開する)
         let startHost = uptime() + 0.05                     // この時刻に譜面時刻 tc になる
         // フレームの丸め誤差も含めて補正(サンプル位置と譜面時刻を厳密に対応づける)
         audioStartHost = startHost + (Double(baseFrame) / sr - m0) / rate
@@ -1622,7 +1606,6 @@ final class GameAudio: @unchecked Sendable {
         let lat = totalLatency()
         let m0 = tc - (off - lat * rate)
         let want: Int64 = m0 >= 0 ? Int64((m0 * sr).rounded()) : 0
-        cache?.setFocus(frame: want)                     // 背景の展開は、次に再生する位置の近くから先にやる
         if want == warmFrame { return }                  // すでに用意済み
         let g = bumpGeneration()                         // これまでのデコード・用意を無効にする (待たない)
         warmFrame = want
@@ -1728,7 +1711,6 @@ final class GameAudio: @unchecked Sendable {
     
     func halt() {
         running = false
-        cache?.setPaused(false)                         // 止まったので、背景の展開を再開する
         warmFrame = -1
         warmGroup = nil
         hasAnchor = false
@@ -1738,7 +1720,6 @@ final class GameAudio: @unchecked Sendable {
     
     func shutdown() {
         halt()
-        cache?.stop()
         engine.stop()
     }
     

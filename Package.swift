@@ -35,7 +35,15 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "AppModule",
-            path: "."
+            path: ".",
+            // stb_vorbis の C ファイルは、ipa (project.yml) のビルドだけで使う。
+            // Playgrounds の Swift ターゲットには C を混ぜられないので、ここで除外する
+            // (Swift 側は #if HAVE_STB_VORBIS で囲んであり、Playgrounds では従来の自前 ogg デコーダーで読む)
+            exclude: [
+                "stb_vorbis.c",
+                "StbVorbisBridge.c",
+                "StbVorbisBridge.h"
+            ]
         )
     ]
 )

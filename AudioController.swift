@@ -1,6 +1,5 @@
 import Foundation
 import AVFoundation
-import WebKit
 
 /// オーディオセッションの起こし方を1か所にまとめたもの。
 /// 出力バッファを 5ms に絞る設定も、ここで必ず一緒に行う (どの経路が先にセッションを起こしても同じ状態になる)。
@@ -15,207 +14,205 @@ enum AudioSessionSetup {
     }
 }
 
-/// 音源の読込と再生。
-/// 1) AVAudioPlayer でそのまま開けるか試す (iOS/iPadOS 18.4 以降は ogg が開ける可能性あり)
-/// 2) 開けなければ WKWebView(WebKit) の decodeAudioData で WAV に変換してから再生
-final class AudioController {
-    private(set) var player: AVAudioPlayer?
-    private(set) var info: String = ""
-    private var warmedSec: Double? = nil      // warm() で用意済みの再生位置
-    private var pendingStart: Double = 0      // 直近の play(atTime:) で予約した開始時刻 (player.deviceCurrentTime の時間軸)
+// MARK: - 曲を 1 回だけ PCM に展開して、全員で共有する (SongPCM)
+//
+// 以前は、曲を開くたびに「AVAudioPlayer で開く → 開けなければ WKWebView で WAV に変換」を行い、
+// そのうえ再生用の GameAudio が自前の ogg デコーダーでもう一度全部展開し、テストプレイを始めるたびに
+// ファイルを書き直してまた展開していた。
+// 今は、曲を開くときに 1 回だけ Float の左右 PCM へ展開して (SongPCM)、エディタの再生・テストプレイ・曲の長さの計算が
+// すべてこの同じ PCM を読む。展開し直す処理も、ファイルの書き直しも無い。
+//
+//  ・ipa (project.yml でビルドした版): ogg は stb_vorbis (StbVorbisBridge.c) で展開する。(PC での測定: 185 秒の曲で約 0.3 秒。iPad での実測は SETTING の「音源読込」の行に出る)
+//  ・Swift Playgrounds (Package.swift) の版: C は入らないので、従来の自前 ogg デコーダー (TestPlay.swift の OggPCMSource) で展開する。
+//    最適化なしのビルドなので、曲を開くときに数十秒待たされる (ipa では起きない)
+//  ・ogg 以外 (mp3 / wav / m4a など) は、どちらの版でも AVAudioFile で展開する
+//
+// 展開した PCM は読むだけで書き換えない。そのため、複数のスレッド・複数の GameAudio から同時に読んでよい。
 
-    var duration: Double { player?.duration ?? 0 }
-    var hasAudio: Bool { player != nil }
+final class SongPCM: @unchecked Sendable {
+    /// 展開できる長さの上限 (フレーム数)。48kHz ステレオで 20 分 = 約 460MB。これを超える曲は読み込まない
+    static let maxFrames = 48_000 * 60 * 20
 
-    /// 曲の音量 0...1 (SETTING の「曲の音量」)。再生中でも即反映される
-    var volume: Float = 1.0 {
-        didSet { player?.volume = min(max(volume, 0), 1) }
+    let sampleRate: Double
+    let frames: Int
+    let left: UnsafeMutablePointer<Float>
+    let right: UnsafeMutablePointer<Float>      // モノラルの曲では left と同じ場所を指す (メモリを倍にしない)
+    let info: String                            // どう読み込んだか (SETTING の音源表示用)
+    private let rightIsLeft: Bool
+
+    var duration: Double { Double(frames) / sampleRate }
+
+    /// malloc で確保した左右の波形の持ち主になる (deinit で free する)。right が nil ならモノラル
+    init(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>?,
+         frames: Int, sampleRate: Double, info: String) {
+        self.left = left
+        self.right = right ?? left
+        self.rightIsLeft = (right == nil)
+        self.frames = frames
+        self.sampleRate = sampleRate
+        self.info = info
     }
 
-    @MainActor
-    func load(data: Data, fileName: String) async throws {
-        AudioSessionSetup.activate()
+    deinit {
+        free(left)
+        if !rightIsLeft { free(right) }
+    }
 
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("audio", isDirectory: true)
+    // MARK: 展開
+
+    /// 音源ファイルの中身を、最初から最後まで PCM に展開する。重いので、メインスレッドでは呼ばない
+    /// (RootView は Task.detached から呼ぶ)。
+    static func decode(data: Data, fileName: String) throws -> SongPCM {
+        let t0 = ProcessInfo.processInfo.systemUptime
+        let isOgg = data.count >= 4 && data.starts(with: [0x4F, 0x67, 0x67, 0x53])      // "OggS"
+        var firstError: Error? = nil
+
+        #if HAVE_STB_VORBIS
+        if isOgg {
+            do {
+                let s = try decodeWithStbVorbis(data, t0: t0)
+                return s
+            } catch {
+                firstError = error          // stb_vorbis が読めない ogg (Opus など) は、下の方法も試す
+            }
+        }
+        #endif
+
+        do {
+            return try decodeWithFileSources(data, fileName: fileName, isOgg: isOgg, t0: t0)
+        } catch {
+            throw firstError ?? error
+        }
+    }
+
+    #if HAVE_STB_VORBIS
+    private static func decodeWithStbVorbis(_ data: Data, t0: Double) throws -> SongPCM {
+        guard data.count > 0, data.count < Int(Int32.max) else {
+            throw AudioLoadError(text: "oggのサイズが不正です")
+        }
+        var l: UnsafeMutablePointer<Float>? = nil
+        var r: UnsafeMutablePointer<Float>? = nil
+        var frames: Int32 = 0
+        var rate: Int32 = 0
+        var channels: Int32 = 0
+        let length = Int32(data.count)
+        let code: Int32 = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Int32 in
+            guard let p = raw.bindMemory(to: UInt8.self).baseAddress else { return -1 }
+            return msd_vorbis_decode(p, length, &l, &r, &frames, &rate, &channels, Int32(SongPCM.maxFrames))
+        }
+        guard code == 0, let left = l, frames > 0, rate > 0 else {
+            if let l = l { free(l) }
+            if let r = r { free(r) }
+            switch code {
+            case -2: throw AudioLoadError(text: "曲が長すぎます (20分まで)")
+            case -3: throw AudioLoadError(text: "曲を展開するメモリが足りません")
+            default: throw AudioLoadError(text: "stb_vorbis で読めませんでした (エラー \(code))")
+            }
+        }
+        let ms = (ProcessInfo.processInfo.systemUptime - t0) * 1000
+        let info = String(format: "stb_vorbis で展開 (%d Hz・%dch・%.0f ms)", rate, channels, ms)
+        return SongPCM(left: left, right: r, frames: Int(frames), sampleRate: Double(rate), info: info)
+    }
+    #endif
+
+    /// 従来の読み方 (ファイルを経由する): ogg は自前の Swift デコーダー、それ以外は AVAudioFile。
+    /// ipa では ogg 以外の曲か、stb_vorbis が読めなかった曲のときだけ通る
+    private static func decodeWithFileSources(_ data: Data, fileName: String, isOgg: Bool, t0: Double) throws -> SongPCM {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("songdecode", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let ext0 = (fileName as NSString).pathExtension
-        let ext = ext0.isEmpty ? "ogg" : ext0
-        let src = dir.appendingPathComponent("source.\(ext)")
-        try data.write(to: src)
+        let ext0 = (fileName as NSString).pathExtension.lowercased()
+        let ext = ext0.isEmpty ? (isOgg ? "ogg" : "dat") : ext0
+        let url = dir.appendingPathComponent("source.\(ext)")
+        try data.write(to: url, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: url) }
 
-        if let p = try? AVAudioPlayer(contentsOf: src) {
-            adopt(p, how: "ネイティブ再生")
-            return
-        }
-        let wavURL = dir.appendingPathComponent("decoded.wav")
-        let decoder = WebAudioDecoder()
-        try await decoder.decode(data: data, dest: wavURL)
-        let p = try AVAudioPlayer(contentsOf: wavURL)
-        adopt(p, how: "WebKitでデコード(モノラルWAV)")
-    }
-
-    private func adopt(_ p: AVAudioPlayer, how: String) {
-        p.enableRate = true          // prepareToPlay より前に必要
-        p.volume = min(max(volume, 0), 1)
-        p.prepareToPlay()
-        player = p
-        info = how
-    }
-
-    /// 停止中に「次に再生を始める位置」を先に用意しておく (再生ボタンを押した瞬間の下ごしらえを省くため)。
-    /// audioSec は start と同じ意味 (負なら曲頭から)
-    func warm(audioSec: Double) {
-        guard let p = player, !p.isPlaying, audioSec < p.duration else { return }
-        p.currentTime = max(0, audioSec)
-        p.prepareToPlay()
-        warmedSec = audioSec
-    }
-
-    /// audioSec: 音源内の再生開始位置(秒)。負の場合は音源の頭出しを遅らせる。
-    /// 重い下ごしらえはこの関数の前半で終わらせ、「鳴らす時刻」は最後に決める。
-    /// → 呼び出し側は、この関数から戻った後の時刻を基準に画面の時計を始めること
-    func start(audioSec: Double, rate: Double, lead: Double) {
-        guard let p = player else { return }
-        let ready = !p.isPlaying && (warmedSec.map { abs($0 - audioSec) < 0.0005 } ?? false)
-        warmedSec = nil
-        // 鳴っている最中のときだけ止める。止まっている(pause 済みの)プレイヤーは準備状態を保ったまま位置だけ動かす
-        if !ready && p.isPlaying { p.stop() }
-        p.rate = Float(rate)
-        let r = max(0.25, rate)
-        var delay = lead
-        if audioSec >= 0 {
-            if audioSec >= p.duration { return }
-            if !ready {
-                p.currentTime = audioSec
-                p.prepareToPlay()
+        var firstError: Error? = nil
+        if isOgg {
+            do {
+                let src = try OggPCMSource(url: url)
+                return try drain(src, label: "自前のoggデコーダー", t0: t0)
+            } catch {
+                firstError = error
             }
-        } else {
-            if !ready {
-                p.currentTime = 0
-                p.prepareToPlay()
-            }
-            delay += (-audioSec) / r
         }
-        let at = p.deviceCurrentTime + delay
-        pendingStart = at
-        if !p.play(atTime: at) {
-            // 再生を始められなかった (他アプリの音・通知・イヤホンの抜き差し等でオーディオセッションが止まっていた)
-            // → セッションを起こし直して1回だけやり直す。「押したのに鳴らない」を防ぐ
-            AudioSessionSetup.activate()
-            p.prepareToPlay()
-            let at2 = p.deviceCurrentTime + delay
-            pendingStart = at2
-            _ = p.play(atTime: at2)
+        do {
+            let src = try FilePCMSource(url: url)
+            return try drain(src, label: "AVAudioFile", t0: t0)
+        } catch {
+            throw firstError ?? error
         }
     }
 
-    func stop() {
-        warmedSec = nil
-        guard let p = player else { return }
-        if p.deviceCurrentTime < pendingStart + 0.01 {
-            // まだ鳴り始めていない予約があるかもしれない → 確実に取り消すため stop
-            p.stop()
-        } else {
-            // 鳴っている最中は pause。stop() のような後片付けをしない分だけ止まるのが速く、
-            // 準備状態も保たれるので、次の再生ボタンも速い
-            p.pause()
+    /// PCMSource を最後まで読んで、1 つの SongPCM にする (長さがわからないので、足りなくなったら増やしながら)
+    private static func drain(_ src: PCMSource, label: String, t0: Double) throws -> SongPCM {
+        let sr = src.sampleRate
+        guard sr > 0 else { throw AudioLoadError(text: "音源のサンプルレートが不正です") }
+        let chunk = 16384
+        var cap = max(Int(sr) * 60, chunk * 4)
+        let unit = MemoryLayout<Float>.size
+        guard var lp = malloc(cap * unit)?.assumingMemoryBound(to: Float.self) else {
+            throw AudioLoadError(text: "曲を展開するメモリが足りません")
         }
+        guard var rp = malloc(cap * unit)?.assumingMemoryBound(to: Float.self) else {
+            free(lp)
+            throw AudioLoadError(text: "曲を展開するメモリが足りません")
+        }
+        src.seek(to: 0)
+        var n = 0
+        while true {
+            if cap - n < chunk {
+                let ncap = cap + cap / 2 + chunk
+                guard let nl = realloc(lp, ncap * unit)?.assumingMemoryBound(to: Float.self) else {
+                    free(lp); free(rp)
+                    throw AudioLoadError(text: "曲を展開するメモリが足りません")
+                }
+                lp = nl
+                guard let nr = realloc(rp, ncap * unit)?.assumingMemoryBound(to: Float.self) else {
+                    free(lp); free(rp)
+                    throw AudioLoadError(text: "曲を展開するメモリが足りません")
+                }
+                rp = nr
+                cap = ncap
+            }
+            let got = src.read(into: lp + n, rp + n, frames: chunk)
+            if got <= 0 { break }
+            n += got
+            if n > maxFrames {
+                free(lp); free(rp)
+                throw AudioLoadError(text: "曲が長すぎます (20分まで)")
+            }
+        }
+        if n <= 0 {
+            free(lp); free(rp)
+            throw AudioLoadError(text: "音源にデータがありません")
+        }
+        let ms = (ProcessInfo.processInfo.systemUptime - t0) * 1000
+        let info = String(format: "%@で展開 (%ld Hz・%.0f ms)", label, Int(sr), ms)
+        return SongPCM(left: lp, right: rp, frames: n, sampleRate: sr, info: info)
     }
 }
 
-enum AudioDecodeError: Error, LocalizedError {
-    case failed(String)
-    var errorDescription: String? {
-        switch self {
-        case .failed(let s): return s
-        }
-    }
-}
+/// SongPCM を PCMSource として読むだけの薄い入れ物 (メモリのコピーだけ。デコードもシークの探し直しも無い)。
+/// GameAudio ごとに 1 つ持つ (位置 pos は持ち主ごと。PCM 本体は共有)。decodeQueue 上でだけ触る。
+final class SongPCMSource: PCMSource {
+    let song: SongPCM
+    private var pos = 0
 
-/// 画面に出さない WKWebView で Web Audio の decodeAudioData を使い、WAV にして返す
-@MainActor
-final class WebAudioDecoder: NSObject, WKNavigationDelegate {
-    private var web: WKWebView?
-    private var cont: CheckedContinuation<Void, Error>?
+    init(_ song: SongPCM) { self.song = song }
 
-    func decode(data: Data, dest: URL) async throws {
-        let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1), configuration: WKWebViewConfiguration())
-        wv.navigationDelegate = self
-        web = wv
-        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-            self.cont = c
-            wv.loadHTMLString("<html><body></body></html>", baseURL: URL(string: "https://localhost/"))
-        }
-        let result = try await wv.callAsyncJavaScript(
-            Self.script,
-            arguments: ["b64": data.base64EncodedString()],
-            in: nil,
-            contentWorld: .page
-        )
-        wv.navigationDelegate = nil
-        web = nil
-        guard let s = result as? String else {
-            throw AudioDecodeError.failed("デコード結果が不正です")
-        }
-        if s.hasPrefix("ERR:") {
-            throw AudioDecodeError.failed("この端末のWebKitではoggをデコードできませんでした (\(s))")
-        }
-        guard let wav = Data(base64Encoded: s) else {
-            throw AudioDecodeError.failed("WAVデータの復元に失敗しました")
-        }
-        try wav.write(to: dest)
+    var sampleRate: Double { song.sampleRate }
+
+    func seek(to frame: Int64) {
+        pos = Int(max(0, min(frame, Int64(song.frames))))
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        cont?.resume()
-        cont = nil
+    func read(into l: UnsafeMutablePointer<Float>, _ r: UnsafeMutablePointer<Float>, frames: Int) -> Int {
+        let n = min(frames, song.frames - pos)
+        if n <= 0 { return 0 }
+        let bytes = n * MemoryLayout<Float>.size
+        memcpy(l, song.left + pos, bytes)
+        memcpy(r, song.right + pos, bytes)
+        pos += n
+        return n
     }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        cont?.resume(throwing: error)
-        cont = nil
-    }
-
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        cont?.resume(throwing: error)
-        cont = nil
-    }
-
-    static let script = """
-    try {
-      const bin = atob(b64);
-      const u8 = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-      const AC = window.AudioContext || window.webkitAudioContext;
-      const ctx = new AC();
-      const buf = await new Promise((res, rej) => { ctx.decodeAudioData(u8.buffer, res, rej); });
-      const n = buf.length, sr = buf.sampleRate, nch = buf.numberOfChannels;
-      const chs = [];
-      for (let c = 0; c < nch; c++) chs.push(buf.getChannelData(c));
-      const out = new ArrayBuffer(44 + n * 2);
-      const dv = new DataView(out);
-      const w4 = (o, s) => { for (let i = 0; i < 4; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
-      w4(0, 'RIFF'); dv.setUint32(4, 36 + n * 2, true); w4(8, 'WAVE'); w4(12, 'fmt ');
-      dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
-      dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true);
-      dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
-      w4(36, 'data'); dv.setUint32(40, n * 2, true);
-      for (let i = 0; i < n; i++) {
-        let s = 0;
-        for (let c = 0; c < nch; c++) s += chs[c][i];
-        s /= nch;
-        s = s < -1 ? -1 : (s > 1 ? 1 : s);
-        dv.setInt16(44 + i * 2, s < 0 ? s * 32768 : s * 32767, true);
-      }
-      const u = new Uint8Array(out);
-      const parts = [];
-      const CH = 3 * 8192;
-      for (let i = 0; i < u.length; i += CH) {
-        parts.push(btoa(String.fromCharCode.apply(null, u.subarray(i, i + CH))));
-      }
-      return parts.join('');
-    } catch (e) {
-      return 'ERR:' + e;
-    }
-    """
 }
