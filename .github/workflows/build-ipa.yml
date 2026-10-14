@@ -1,10 +1,13 @@
 # MalodySlideEditor を GitHub の Mac で自動ビルドして、SideStore 用の ipa を作る設定ファイルです。
-# このファイルは、リポジトリの  .github/workflows/build-ipa.yml  という場所に置きます。
+# 場所: リポジトリの  .github/workflows/build-ipa.yml
 #
 # 動くタイミング:
 #   1) main ブランチに変更を保存(Commit)したとき  2) Actions タブの「Run workflow」ボタンを押したとき
 # 結果:
 #   リポジトリの Releases に「latest」が作られ、その中に MalodySlideEditor.ipa が入ります。
+#
+# ビルドの流れ: Rubber Band を取得 → アイコン用意 → XcodeGen で .xcodeproj を作る → xcodebuild archive → ipa にまとめる
+# アプリの設定 (Info.plist・アイコン・文書タイプなど) は、すべてリポジトリ直下の project.yml に書いてあります。
 
 name: ipaを作る
 
@@ -42,128 +45,57 @@ jobs:
           cp /tmp/rb/rubberband/rubberband-c.h "$D/include/rubberband-c.h"
           printf 'module CRubberBand {\n    header "rubberband-c.h"\n    export *\n}\n' > "$D/include/module.modulemap"
 
-      # Playgrounds 用の Package.swift は残さず、Actions のビルド中だけ C++ ターゲットを加える。
-      - name: ビルド用の Package.swift に差し替える
+      # リポジトリ直下の AppIcon-1024.png から、アイコン用のアセットカタログを作る。
+      - name: アプリアイコンを用意する
         run: |
-          cat > Package.swift <<'EOF'
-          // swift-tools-version: 5.8
-          import PackageDescription
-          import AppleProductTypes
+          set -e
+          test -f AppIcon-1024.png || { echo "error: AppIcon-1024.png がリポジトリ直下にありません"; exit 1; }
+          D=Assets.xcassets/AppIcon.appiconset
+          mkdir -p "$D"
+          cp AppIcon-1024.png "$D/AppIcon-1024.png"
+          printf '{\n  "info" : {\n    "author" : "xcode",\n    "version" : 1\n  }\n}\n' > Assets.xcassets/Contents.json
+          printf '{\n  "images" : [\n    {\n      "filename" : "AppIcon-1024.png",\n      "idiom" : "universal",\n      "platform" : "ios",\n      "size" : "1024x1024"\n    }\n  ],\n  "info" : {\n    "author" : "xcode",\n    "version" : 1\n  }\n}\n' > "$D/Contents.json"
+          python3 -c "import json; json.load(open('$D/Contents.json')); print('Contents.json OK')"
 
-          let package = Package(
-              name: "MalodySlideEditor",
-              platforms: [
-                  .iOS("16.0")
-              ],
-              products: [
-                  .iOSApplication(
-                      name: "MalodySlideEditor",
-                      targets: ["AppModule"],
-                      bundleIdentifier: "local.malody.slideeditor",
-                      teamIdentifier: "",
-                      displayVersion: "1.0",
-                      bundleVersion: "1",
-                      appIcon: .placeholder(icon: .map),
-                      accentColor: .presetColor(.cyan),
-                      supportedDeviceFamilies: [
-                          .pad,
-                          .phone
-                      ],
-                      supportedInterfaceOrientations: [
-                          .landscapeRight,
-                          .landscapeLeft
-                      ]
-                  )
-              ],
-              targets: [
-                  .executableTarget(
-                      name: "AppModule",
-                      dependencies: ["CRubberBand"],
-                      path: ".",
-                      exclude: ["Vendor"]
-                  ),
-                  .target(
-                      name: "CRubberBand",
-                      path: "Vendor/CRubberBand",
-                      sources: ["single/RubberBandSingle.cpp"],
-                      publicHeadersPath: "include",
-                      cxxSettings: [
-                          .headerSearchPath("."),
-                          .define("NDEBUG")
-                      ],
-                      linkerSettings: [
-                          .linkedFramework("Accelerate")
-                      ]
-                  )
-              ],
-              cxxLanguageStandard: .cxx17
-          )
-          EOF
+      - name: XcodeGen で Xcode プロジェクトを作る
+        run: |
+          set -e
+          brew install xcodegen
+          xcodegen --version
+          xcodegen generate
+          ls -la MalodySlideEditor.xcodeproj Generated
 
+      # Package.swift (Playgrounds 用) は読まれないよう、-project を明示している。
       - name: ビルド (署名なし)
         run: |
           set -o pipefail
-          xcodebuild build \
+          xcodebuild archive \
+            -project MalodySlideEditor.xcodeproj \
             -scheme MalodySlideEditor \
-            -destination 'generic/platform=iOS' \
             -configuration Release \
-            -derivedDataPath build \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/MalodySlideEditor.xcarchive \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             2>&1 | tee build.log
 
-      # xcodebuild は Swift Playgrounds 形式のパッケージから「実行ファイル」までしか作ってくれず、
-      # .app (アプリの入れ物) は作ってくれない。なので、.app は自分で組み立てる。
-      - name: 実行ファイルから .app を組み立てて ipa にまとめる
+      # archive の中に、アイコン入りの本物の .app ができている。それを Payload に入れて zip するだけ。
+      - name: .app を ipa にまとめる
         run: |
-          BIN=build/Build/Products/Release-iphoneos/MalodySlideEditor
-          if [ ! -f "$BIN" ]; then
-            echo "error: 実行ファイルが見つかりません: $BIN"
-            find build/Build/Products -maxdepth 3 || true
+          APP=build/MalodySlideEditor.xcarchive/Products/Applications/MalodySlideEditor.app
+          if [ ! -d "$APP" ]; then
+            echo "error: .app が見つかりません: $APP" | tee -a build.log
+            find build -maxdepth 4 | tee -a build.log || true
             exit 1
           fi
-          file "$BIN"
           rm -rf Payload MalodySlideEditor.ipa
-          mkdir -p Payload/MalodySlideEditor.app
-          cp "$BIN" Payload/MalodySlideEditor.app/MalodySlideEditor
-          chmod +x Payload/MalodySlideEditor.app/MalodySlideEditor
-          cat > Payload/MalodySlideEditor.app/Info.plist <<'PLISTEOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleDevelopmentRegion</key><string>en</string>
-            <key>CFBundleExecutable</key><string>MalodySlideEditor</string>
-            <key>CFBundleIdentifier</key><string>local.malody.slideeditor</string>
-            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-            <key>CFBundleName</key><string>MalodySlideEditor</string>
-            <key>CFBundleDisplayName</key><string>MalodySlideEditor</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>1.0</string>
-            <key>CFBundleVersion</key><string>1</string>
-            <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
-            <key>MinimumOSVersion</key><string>16.0</string>
-            <key>LSRequiresIPhoneOS</key><true/>
-            <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
-            <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
-            <key>UILaunchScreen</key><dict/>
-            <key>UIFileSharingEnabled</key><true/>
-            <key>LSSupportsOpeningDocumentsInPlace</key><true/>
-            <key>UISupportedInterfaceOrientations</key>
-            <array>
-              <string>UIInterfaceOrientationLandscapeRight</string>
-              <string>UIInterfaceOrientationLandscapeLeft</string>
-            </array>
-            <key>UISupportedInterfaceOrientations~ipad</key>
-            <array>
-              <string>UIInterfaceOrientationLandscapeRight</string>
-              <string>UIInterfaceOrientationLandscapeLeft</string>
-            </array>
-          </dict>
-          </plist>
-          PLISTEOF
+          mkdir Payload
+          cp -R "$APP" Payload/
+          echo "=== .app の中身 (Assets.car があればアイコン入り) ==="
+          ls Payload/MalodySlideEditor.app
           plutil -lint Payload/MalodySlideEditor.app/Info.plist
+          plutil -p Payload/MalodySlideEditor.app/Info.plist | grep -E "CFBundleIcon|CFBundleDocumentTypes|UTImportedTypeDeclarations|MinimumOSVersion" || true
           zip -qry MalodySlideEditor.ipa Payload
           ls -lh MalodySlideEditor.ipa
 
