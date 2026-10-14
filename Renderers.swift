@@ -78,7 +78,12 @@ enum LaneRenderer {
         drawBPM(&c, g, state)
         drawEffects(&c, g, state)
         drawRange(&c, g, state)
-        drawNotes(&c, g, state.chart.notes, selected: state.selectedIDs)
+        // 全ノーツを毎フレーム調べるのをやめて、いま画面に掛かっているノーツだけを (元の並びのまま) 描く。
+        // (描き方は同じ。画面の外のノーツは、もともと何も描かれていなかった)
+        let allNotes = state.chart.notes
+        let visible = state.visibleNoteIndices(g)
+        drawNotes(&c, g, visible.count == allNotes.count ? allNotes : visible.map { allNotes[$0] },
+                  selected: state.selectedIDs)
         drawOrder(&c, g, state)
         drawSprites(&c, g, state)
         drawSlideModify(&c, g, state)
@@ -211,11 +216,13 @@ enum LaneRenderer {
     /// 「順番に選択」で選んだスライドに、色 (1番目 = 赤 / 以降 = 水色) と、始点の番号を重ねる
     static func drawOrder(_ c: inout GraphicsContext, _ g: LaneGeo, _ state: EditorState) {
         guard state.editing, !state.orderIDs.isEmpty else { return }
-        var rank: [UUID: Int] = [:]
+        var rank: [NoteID: Int] = [:]
         for (k, id) in state.orderIDs.enumerated() { rank[id] = k }
         let lo = g.beatOf(g.H) - 0.05
         let hi = g.beatOf(0) + 0.05
-        for n in state.chart.notes {
+        let allNotes = state.chart.notes
+        for ni in state.visibleNoteIndices(g) {
+            let n = allNotes[ni]
             guard n.isSlide, let k = rank[n.id] else { continue }
             let fill = k == 0 ? Color(red: 1.0, green: 0.24, blue: 0.24) : Color(red: 0.35, green: 0.78, blue: 1.0)
             let hw = CGFloat(n.w) / 255.0 * g.trackW / 2.0
@@ -315,7 +322,8 @@ enum LaneRenderer {
     /// 掴んでいる点 (ドラッグ中) は白い太い輪にする
     static func drawSlideModify(_ c: inout GraphicsContext, _ g: LaneGeo, _ state: EditorState) {
         guard state.tool == .slideModify, let id = state.modifySlideID,
-              let n = state.chart.notes.first(where: { $0.id == id }) else { return }
+              let ni = state.indexOfNote(id: id) else { return }
+        let n = state.chart.notes[ni]
         for j in n.segs.indices {
             let grabbed = (j == state.modifySegIndex)
             if !grabbed && !drawSegRings { continue }
@@ -334,7 +342,7 @@ enum LaneRenderer {
     /// 作成中のスライド: まだ譜面に入っていない始点を描き、「いちばん最後に置いた点」に目印 (シアンの輪) をつける
     static func drawSlideDraft(_ c: inout GraphicsContext, _ g: LaneGeo, _ state: EditorState) {
         guard let d = state.slideDraft, let last = state.slideDraftLastPoint() else { return }
-        if !state.chart.notes.contains(where: { $0.id == d.noteID }) {
+        if state.indexOfNote(id: d.noteID) == nil {
             var c2 = c
             c2.opacity = 0.8
             drawNotes(&c2, g, [Note(beat: d.beat, x: d.x, w: d.w)])
@@ -364,7 +372,7 @@ enum LaneRenderer {
     /// Slide modify で選択中のスライドの seg に、動かせる目印のシアンの輪を付けるか。本家には無いので、false にすると輪は出ない (掴んでいる点の白い輪だけ残る)
     static let drawSegRings = true
 
-    static func drawNotes(_ c: inout GraphicsContext, _ g: LaneGeo, _ notes: [Note], selected: Set<UUID> = []) {
+    static func drawNotes(_ c: inout GraphicsContext, _ g: LaneGeo, _ notes: [Note], selected: Set<NoteID> = []) {
         let lo = g.beatOf(g.H) - 0.05
         let hi = g.beatOf(0) + 0.05
         // 画面に出る点 (スライドの始点と seg)。リボンを全部描いてから最後に重ねる (本家と同じく、点はいつもリボンの手前に見える)

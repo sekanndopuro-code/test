@@ -40,9 +40,41 @@ struct Beat: Comparable, Hashable {
     }
     var label: String { "\(m):\(n)/\(d)" }
 
+    /// 保存用の [整数部, 分子, 分母] (json と同じ値。配列を作らずに取り出す)
+    var jsonTriple: (Int, Int, Int) {
+        if n < 0 {
+            let t = Beat.ticks(numerator, den: d)
+            return (t.m, t.n, t.d)
+        }
+        return (m, n, d)
+    }
+
+    var jsonValue: JSONValue {
+        let t = jsonTriple
+        return .array([.int(t.0), .int(t.1), .int(t.2)])
+    }
+
+    /// mc に書く形 [整数部,分子,分母] を、そのまま out へ足す
+    func write(into out: inout [UInt8]) {
+        let t = jsonTriple
+        out.append(0x5B)
+        JSONValue.writeInt(t.0, into: &out)
+        out.append(0x2C)
+        JSONValue.writeInt(t.1, into: &out)
+        out.append(0x2C)
+        JSONValue.writeInt(t.2, into: &out)
+        out.append(0x5D)
+    }
+
     init?(json: Any?) {
         guard let arr = json as? [NSNumber], arr.count >= 3 else { return nil }
         self.init(arr[0].intValue, arr[1].intValue, arr[2].intValue)
+    }
+
+    /// JSONValue から読む。要素が全部数で、3 個以上あるときだけ (以前の `[NSNumber]` と同じ条件)
+    init?(json: JSONValue?) {
+        guard let arr = json?.arrayOfInts, arr.count >= 3 else { return nil }
+        self.init(arr[0], arr[1], arr[2])
     }
 
     /// t/den 拍 (負数も floor で正しく分解)

@@ -47,7 +47,7 @@ struct SlideDraft {
     var beat: Beat
     var x: Int
     var w: Int
-    let noteID = UUID()
+    let noteID: NoteID = NoteIDGen.next()
 }
 
 /// 配置前のプレビュー表示用
@@ -89,7 +89,11 @@ final class EditorState: ObservableObject {
     // MARK: 譜面データ
     @Published var chart: ChartData
     private(set) var timeMap: TimeMap
-    private(set) var totalSec: Double = 1
+    /// 曲の長さ (秒)。譜面・BPM・曲が変わったあとの最初の読み出しで、まとめて計算し直す (編集のたびには計算しない)
+    var totalSec: Double {
+        if totalDirty { computeTotal() }
+        return totalCache
+    }
 
     // MARK: 表示・操作の状態
     @Published var viewBeat: Double = 0 {
@@ -119,15 +123,15 @@ final class EditorState: ObservableObject {
             if oldValue == .plugin && tool != .plugin { stopInteractivePlugin() }
             if oldValue == .slideModify || tool == .slideModify { modifySegIndex = nil }
             if tool == .slideModify, selectedIDs.count == 1, let id = selectedIDs.first,
-               chart.notes.contains(where: { $0.id == id && $0.isSlide }) {
+               let ni = indexOfNote(id: id), chart.notes[ni].isSlide {
                 modifySlideID = id
             }
         }
     }
     @Published var slideDraft: SlideDraft? = nil     // 作成中のスライド (nil = 作成中でない)
-    @Published var selectedIDs: Set<UUID> = []       // 選択中のノーツ (赤く表示)
-    @Published var orderIDs: [UUID] = []             // 「順番に選択」(Order) で選んだスライド。タップした順。結合系プラグインがこの順番を使う
-    @Published var modifySlideID: UUID? = nil        // Slide modify で編集中のスライド (選ぶと selectedIDs もそのスライドだけになる)
+    @Published var selectedIDs: Set<NoteID> = []     // 選択中のノーツ (赤く表示)
+    @Published var orderIDs: [NoteID] = []           // 「順番に選択」(Order) で選んだスライド。タップした順。結合系プラグインがこの順番を使う
+    @Published var modifySlideID: NoteID? = nil      // Slide modify で編集中のスライド (選ぶと selectedIDs もそのスライドだけになる)
     @Published var modifySegIndex: Int? = nil        // Slide modify で掴んでいる点 (seg)。ドラッグ中だけ入る (白い輪で目印を出す)
     @Published var popup: EditPopup = .none
     @Published var gridLines = 16
@@ -269,7 +273,11 @@ final class EditorState: ObservableObject {
     private var keyDirty = true              // 譜面を触ったら true → 次の tick で作り直す
     private var keyDone = -1.0               // この譜面時刻までのキー音は予約済み
     private var warmWork: DispatchWorkItem?
-    private(set) var ignoredBeatCount = 0    // 異常に遠い位置にあるため、曲の長さの計算から除いた点(ノーツ/seg)の数
+    /// 異常に遠い位置にあるため、曲の長さの計算から除いた点(ノーツ/seg)の数
+    var ignoredBeatCount: Int {
+        if totalDirty { computeTotal() }
+        return ignoredCache
+    }
     private static let keyLookahead = 0.25   // 何秒先まで予約するか (描画が重くてフレームが遅れても、予約は間に合う)
     /// 再生ボタンを押してから、譜面と曲が動き出すまでの余裕 (秒)。短いほど反応が速いが、短すぎると曲の頭出しがずれる
     private static let playLead = 0.05
@@ -278,7 +286,7 @@ final class EditorState: ObservableObject {
     var holdWork: DispatchWorkItem? = nil // 長押しで選択解除のタイマー (指を離す / 動かす / ピンチで取り消す)
     var dragMode: LaneDragMode = .idle
     var dragMoved = false                 // 10pt 以上動かしたか (一度動いたら true のまま)
-    var dragTouchedID: UUID? = nil        // 最初に触れたノーツ
+    var dragTouchedID: NoteID? = nil      // 最初に触れたノーツ
     var dragToggleOnTap = false           // 動かさず離したとき、そのノーツの選択を外すか
     var moveTargets: [(index: Int, orig: Note)] = []   // 移動対象と、移動前の状態
     var moveAnchorBeat: Beat = .zero      // 最初に触れたノーツの移動前の拍 (グリッドに吸着させる基準)
@@ -289,7 +297,7 @@ final class EditorState: ObservableObject {
     var moveLastDX = 0
 
     // Slide modify: seg (点) をドラッグで動かしている間の状態 (指を離すまでが Undo 1回分)
-    var segDragNoteID: UUID? = nil
+    var segDragNoteID: NoteID? = nil
     var segDragIndex = 0
     var segDragOrig: Seg? = nil           // 動かす前の seg (元の位置に戻して離したら Undo を積まない)
     var segDragGrab: CGSize = .zero       // 触れた位置から、点の中心までのずれ
@@ -412,7 +420,18 @@ final class EditorState: ObservableObject {
 
     var maxBeat: Double { max(1, timeMap.beat(atSec: totalSec)) }
 
+    /// 曲の長さを「古い」印にするだけ (O(1))。実際の計算は、totalSec / ignoredBeatCount を次に読むときに 1 回だけ行う
     func recomputeTotal() {
+        totalDirty = true
+        densityDirty = true          // シークバーのノーツ密度は、次に描くときに作り直す
+    }
+
+    private var totalCache = 1.0
+    private var ignoredCache = 0
+    private var totalDirty = true
+
+    private func computeTotal() {
+        totalDirty = false
         let audioSec = (song?.duration ?? 0) + Double(chart.offsetMs) / 1000.0
         // 壊れた値 (何億拍も先にある seg など) が1つあるだけで、曲の長さが何万分にもなってしまう。
         // → 「曲の長さ + 60秒」(曲が無いときは3時間) より遠い点(マイナス側も)は、長さの計算から除く。
@@ -438,10 +457,9 @@ final class EditorState: ObservableObject {
                 }
             }
         }
-        ignoredBeatCount = ignored
+        ignoredCache = ignored
         let noteSec = timeMap.sec(atBeat: last) + 2.0
-        totalSec = max(audioSec, noteSec, 1.0)
-        densityDirty = true          // シークバーのノーツ密度は、次に描くときに作り直す
+        totalCache = max(audioSec, noteSec, 1.0)
     }
 
     // MARK: シークバーのノーツ密度 (本家と同じ 120 本のヒストグラム。計算は SeekDensity.swift)
@@ -601,7 +619,7 @@ final class EditorState: ObservableObject {
         if isPlaying { pause() }
         popup = .none
         do {
-            let played = try MalodyChart.load(try chart.serialized())
+            let played = try MalodyChart.make(from: chart)      // 譜面を JSON にして読み直さず、メモリ上の譜面から直接作る
             if played.notes.isEmpty {
                 showToast("ノーツがないのでテストできません")
                 return
@@ -719,18 +737,69 @@ final class EditorState: ObservableObject {
 
     /// 削除・Undo などで消えたノーツを、選択から外す
     func pruneSelection() {
-        if let id = modifySlideID, !chart.notes.contains(where: { $0.id == id }) { modifySlideID = nil }
+        if let id = modifySlideID, indexOfNote(id: id) == nil { modifySlideID = nil }
         if let j = modifySegIndex {
             if let i = modifySlideIndex, j < chart.notes[i].segs.count {} else { modifySegIndex = nil }
         }
         if selectedIDs.isEmpty && orderIDs.isEmpty { return }
-        let alive = Set(chart.notes.map { $0.id })
-        let kept = selectedIDs.intersection(alive)
-        if kept != selectedIDs { selectedIDs = kept }
-        if !orderIDs.isEmpty {
-            let keptOrder = orderIDs.filter { alive.contains($0) }      // 消えたスライドは順番から外す (番号は詰まる)
-            if keptOrder.count != orderIDs.count { orderIDs = keptOrder }
+        // 全ノーツの ID から Set を作る (以前のやり方) のではなく、選択中の ID が全部残っているかを 1 回なぞって調べる。
+        // 全部残っていれば (ふつうはこちら) 何も作らず、早めに終わる
+        if !selectedIDs.isEmpty, let alive = aliveSubset(of: selectedIDs) { selectedIDs = alive }
+        if !orderIDs.isEmpty, let alive = aliveSubset(of: Set(orderIDs)) {
+            orderIDs = orderIDs.filter { alive.contains($0) }      // 消えたスライドは順番から外す (番号は詰まる)
         }
+    }
+
+    /// ids のうち、いま譜面に残っているものだけの集合。全部残っていれば nil
+    private func aliveSubset(of ids: Set<NoteID>) -> Set<NoteID>? {
+        var found = Set<NoteID>()
+        found.reserveCapacity(ids.count)
+        for n in chart.notes where ids.contains(n.id) {
+            found.insert(n.id)
+            if found.count == ids.count { return nil }
+        }
+        return found
+    }
+
+    // MARK: - ノーツの索引 (NoteIndex.swift)
+    // chart.notes が書き換わると notesRevision が増える。索引は、その番号が変わったときだけ作り直す (中身は探すときに作る)
+
+    private var noteIndexCache = NoteIndex()
+    private var noteIndexRevision = -1
+    private var memoID: NoteID = 0          // 最後に調べた ID と、その位置 (同じ ID を何度も調べる操作を O(1) にする)
+    private var memoPos = -1
+
+    private var currentNoteIndex: NoteIndex {
+        let rev = chart.notesRevision
+        if rev != noteIndexRevision {
+            noteIndexCache = NoteIndex()
+            noteIndexRevision = rev
+        }
+        return noteIndexCache
+    }
+
+    /// ノーツ ID → chart.notes の添字 (無ければ nil)。`firstIndex(where: { $0.id == id })` の代わり
+    func indexOfNote(id: NoteID) -> Int? {
+        let ns = chart.notes
+        if memoPos >= 0, memoPos < ns.count, memoID == id, ns[memoPos].id == id { return memoPos }
+        guard let p = currentNoteIndex.position(ofID: id, in: ns) else { return nil }
+        memoID = id
+        memoPos = p
+        return p
+    }
+
+    /// 拍の範囲 [lo, hi] に掛かるノーツの添字 (小さい順)。スライドは seg も含めた範囲で判定する
+    func notesOverlapping(lo: Double, hi: Double) -> [Int] {
+        currentNoteIndex.indices(lo: lo, hi: hi, in: chart.notes)
+    }
+
+    /// いま画面に見えているノーツ (の添字)。ノーツの描画・順番の表示が使う。
+    /// 描く側が「はみ出し 24pt まで描く」ので、範囲は少し広めに取る (広い分は描く側が画面外として省く)
+    func visibleNoteIndices(_ g: LaneGeo) -> [Int] {
+        let ppb = g.ppb
+        guard ppb.isFinite, ppb > 0 else { return Array(chart.notes.indices) }
+        let margin = 0.05 + 40.0 / ppb
+        return notesOverlapping(lo: g.beatOf(g.H) - margin, hi: g.beatOf(0) + margin)
     }
 
     func metaChanged() {
@@ -744,27 +813,59 @@ final class EditorState: ObservableObject {
     func scheduleSave() {
         saveStatus = "未保存…"
         saveWork?.cancel()
-        let w = DispatchWorkItem { [weak self] in self?.saveNow() }
+        let w = DispatchWorkItem { [weak self] in self?.saveInBackground() }
         saveWork = w
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: w)
     }
 
+    // 保存は、譜面のコピー (ChartData は値なのでコピーは一瞬) を、別のスレッドで JSON にしてファイルへ書く。
+    // 以前はメインスレッドでやっていたので、大きな譜面では、保存の瞬間に画面が止まっていた。
+    private static let saveQueue = DispatchQueue(label: "malody.save", qos: .utility)
+    private var saveGeneration = 0      // 保存を始めるたびに増やす。古い保存の結果で、新しい表示を上書きしないための目印
+
+    /// 譜面を別のスレッドで保存する (自動保存が使う)。画面は止まらない
+    func saveInBackground() {
+        saveWork?.cancel()
+        saveGeneration += 1
+        let gen = saveGeneration
+        let snapshot = chart
+        let name = mcName
+        let url = mcURL
+        EditorState.saveQueue.async { [weak self] in
+            let status = EditorState.writeChart(snapshot, name: name, url: url)
+            DispatchQueue.main.async {
+                guard let self = self, self.saveGeneration == gen else { return }
+                self.saveStatus = status
+            }
+        }
+    }
+
+    /// 譜面を保存して、書き終わるまで待つ (Quit・書き出し・アプリが裏へ回るとき用。途中の自動保存があれば、その後ろに並ぶ)
     func saveNow() {
         saveWork?.cancel()
+        saveGeneration += 1
+        let snapshot = chart
+        let name = mcName
+        let url = mcURL
+        saveStatus = EditorState.saveQueue.sync { EditorState.writeChart(snapshot, name: name, url: url) }
+    }
+
+    /// 実際の書き込み。どのスレッドからでも呼べる。戻り値は、画面に出す保存の状態
+    private static func writeChart(_ chart: ChartData, name: String, url: URL) -> String {
         do {
             let data = try chart.serialized()
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             let dir = docs.appendingPathComponent("MalodySlideEditor", isDirectory: true)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try? data.write(to: dir.appendingPathComponent(mcName))
+            try? data.write(to: dir.appendingPathComponent(name))
             do {
-                try data.write(to: mcURL)
-                saveStatus = "保存済み"
+                try data.write(to: url)
+                return "保存済み"
             } catch {
-                saveStatus = "元ファイルに書込不可(アプリ内に保存)"
+                return "元ファイルに書込不可(アプリ内に保存)"
             }
         } catch {
-            saveStatus = "保存失敗"
+            return "保存失敗"
         }
     }
 

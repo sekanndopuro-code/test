@@ -670,9 +670,13 @@ extension EditorState {
 
     func addNote(_ n: Note) {
         if n.beat.value < 0 { return }
-        for e in chart.notes {
-            if e.beat == n.beat && e.x == n.x && e.w == n.w && e.type == n.type && e.segs.isEmpty && n.segs.isEmpty {
-                return
+        // 同じ位置・同じ幅・同じ種類のタップがもうあれば置かない。全ノーツを調べず、同じ拍にあるものだけを調べる
+        // (スライドは対象外。タップ / ウィップは、始点の拍だけの範囲を持つので、同じ拍で探すと見つかる)
+        if n.segs.isEmpty {
+            let v = n.beat.value
+            for i in notesOverlapping(lo: v - 1e-9, hi: v + 1e-9) {
+                let e = chart.notes[i]
+                if e.beat == n.beat && e.x == n.x && e.w == n.w && e.type == n.type && e.segs.isEmpty { return }
             }
         }
         pushUndo()
@@ -681,7 +685,16 @@ extension EditorState {
     }
 
     func hitNote(at p: CGPoint, g: LaneGeo) -> Int? {
-        for i in chart.notes.indices.reversed() where noteHit(chart.notes[i], at: p, g: g) {
+        let ppb = g.ppb
+        guard ppb.isFinite, ppb > 0 else {
+            for i in chart.notes.indices.reversed() where noteHit(chart.notes[i], at: p, g: g) { return i }
+            return nil
+        }
+        // 触れた高さの前後 (棒の持ち上げ・当たり判定の幅・点の半径を足した分) に掛かるノーツだけを調べる。
+        // 重なっているときは、後ろにあるもの (上に描かれているもの) を優先する (以前と同じ)
+        let b = g.beatOf(p.y)
+        let m = (32.0 + Double(LaneRenderer.barLift)) / ppb
+        for i in notesOverlapping(lo: b - m, hi: b + m).reversed() where noteHit(chart.notes[i], at: p, g: g) {
             return i
         }
         return nil
@@ -742,7 +755,7 @@ extension EditorState {
 
     /// Time range: 始点〜終点の拍 (両端を含む) にあるノーツを選択状態にする (ノーツの先頭の拍で判定)
     func selectNotes(lo: Beat, hi: Beat) {
-        var ids = Set<UUID>()
+        var ids = Set<NoteID>()
         for n in chart.notes where n.beat >= lo && n.beat <= hi {
             ids.insert(n.id)
         }
@@ -789,11 +802,11 @@ extension EditorState {
         }
         let base = snapBeat(currentBeat())
         pushUndo()
-        var pasted = Set<UUID>()
+        var pasted = Set<NoteID>()
         for n in clip {
             var m = n
             m.beat = base + n.beat
-            m.id = UUID()          // 元のノーツと同じ id にならないように付け直す
+            m.id = NoteIDGen.next()          // 元のノーツと同じ id にならないように付け直す
             pasted.insert(m.id)
             chart.notes.append(m)
         }
@@ -900,7 +913,7 @@ extension EditorState {
     /// 作成中のスライドが、譜面に入っている位置 (最初の seg を置く前は nil)
     private func slideDraftIndex() -> Int? {
         guard let d = slideDraft else { return nil }
-        return chart.notes.firstIndex(where: { $0.id == d.noteID })
+        return indexOfNote(id: d.noteID)
     }
 
     /// 作成中のスライドの始点 (絶対位置) と幅。作成中でなければ nil
@@ -970,10 +983,10 @@ extension EditorState {
     /// 編集中のスライドの、譜面上のインデックス (無ければ nil)
     var modifySlideIndex: Int? {
         guard let id = modifySlideID else { return nil }
-        return chart.notes.firstIndex(where: { $0.id == id })
+        return indexOfNote(id: id)
     }
 
-    func selectModifySlide(_ id: UUID) {
+    func selectModifySlide(_ id: NoteID) {
         modifySlideID = id
         modifySegIndex = nil
         selectedIDs = [id]
@@ -1059,7 +1072,7 @@ extension EditorState {
     /// 縦 (時間) は、SETTING の allowSegVerticalMove がオンのときだけ動かす。オフのときは掴んだ時の拍のまま、横だけ動く
     private func dragSeg(current: CGPoint, g: LaneGeo) {
         guard let id = segDragNoteID,
-              let i = chart.notes.firstIndex(where: { $0.id == id }),
+              let i = indexOfNote(id: id),
               segDragIndex < chart.notes[i].segs.count else {
             dragMode = .ignore                          // 対象が入れ替わっていたら (別の指で Undo された等) 中止する
             return
@@ -1103,7 +1116,7 @@ extension EditorState {
         segDragUndoPushed = false
         if !pushed { return }
         if let id = id, let o = orig,
-           let i = chart.notes.firstIndex(where: { $0.id == id }),
+           let i = indexOfNote(id: id),
            segDragIndex < chart.notes[i].segs.count {
             let s = chart.notes[i].segs[segDragIndex]
             if s.beat == o.beat && s.x == o.x {

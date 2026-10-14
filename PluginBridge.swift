@@ -63,9 +63,9 @@ final class PluginBridge {
     // メインスレッドだけで触る
     private var undoPushed = false
     private var dirty = false
-    private var indexMap: [UUID: Int] = [:]
-    private var sortedCache: [UUID]? = nil
-    private var pendingSlides = Set<UUID>()      // AddNote(2048) で作った、まだ seg を持たないスライド
+    private var indexMap: [NoteID: Int] = [:]
+    private var sortedCache: [NoteID]? = nil
+    private var pendingSlides = Set<NoteID>()      // AddNote(2048) で作った、まだ seg を持たないスライド
 
     // 複数のスレッドから触る
     private let lock = NSLock()
@@ -328,7 +328,7 @@ final class PluginBridge {
     // MARK: - ノーツの探索
 
     private func noteIndex(_ st: EditorState, _ idText: String) -> Int? {
-        guard let u = UUID(uuidString: idText) else { return nil }
+        guard let u = Int(idText) else { return nil }       // プラグインへは、ノーツ ID を文字列にして渡している
         if let i = indexMap[u], i < st.chart.notes.count, st.chart.notes[i].id == u { return i }
         indexMap.removeAll(keepingCapacity: true)
         for (i, n) in st.chart.notes.enumerated() {
@@ -337,7 +337,7 @@ final class PluginBridge {
         return indexMap[u]
     }
 
-    private func sortedIDs(_ st: EditorState) -> [UUID] {
+    private func sortedIDs(_ st: EditorState) -> [NoteID] {
         if let c = sortedCache { return c }
         let ids = st.chart.notes
             .sorted { x, y in x.beat == y.beat ? x.x < y.x : x.beat < y.beat }
@@ -383,8 +383,8 @@ final class PluginBridge {
         case "ordered":
             // 「順番に選択」(Order ボタン) で選んだスライド。タップした順。消えたものは含めない
             var ids: [String] = []
-            for id in st.orderIDs where noteIndex(st, id.uuidString) != nil {
-                ids.append(id.uuidString)
+            for id in st.orderIDs where noteIndex(st, String(id)) != nil {
+                ids.append(String(id))
             }
             return json(ids)
         case "clearOrder":
@@ -394,14 +394,14 @@ final class PluginBridge {
             let ids = st.chart.notes
                 .filter { st.selectedIDs.contains($0.id) }
                 .sorted { x, y in x.beat == y.beat ? x.x < y.x : x.beat < y.beat }
-                .map { $0.id.uuidString }
+                .map { String($0.id) }
             return json(ids)
         case "noteCount":
             return json(st.chart.notes.count)
         case "noteAt":
             let ids = sortedIDs(st)
             let i = intv(a, 0)
-            if i >= 0 && i < ids.count { return json(ids[i].uuidString) }
+            if i >= 0 && i < ids.count { return json(String(ids[i])) }
             return nullJSON
         case "noteTime":
             guard let i = noteIndex(st, text(a, 0)) else { return json(0.0) }
@@ -459,7 +459,7 @@ final class PluginBridge {
             st.chart.notes.append(note)
             indexMap[note.id] = st.chart.notes.count - 1
             if t == 2048 { pendingSlides.insert(note.id) }
-            return json(note.id.uuidString)
+            return json(String(note.id))
         case "deleteNote":
             guard let i = noteIndex(st, text(a, 0)) else { return nullJSON }
             touch(st)
