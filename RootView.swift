@@ -75,6 +75,14 @@ struct RootView: View {
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             handle(result)
         }
+        // 「ファイル」アプリや共有メニューの「このアプリで開く」で渡された .mc / .mcz を読み込む。
+        // 読み込みは「ファイルを選択…」と同じ importFiles を使う (mcz だけなら展開して読み込む)。
+        // エディタを開いている最中は、編集中の譜面を守るため無視する (Quit してから開き直す)。
+        .onOpenURL { url in
+            guard editor == nil else { return }
+            importMode = .files
+            importFiles([url])
+        }
         // mcz に譜面 (.mc) が複数入っていたとき、どれを開くか選ぶ
         .sheet(item: $pendingMCZ) { packed in
             MCZChartPicker(folderName: packed.folder.lastPathComponent, charts: packed.charts) { chart in
