@@ -300,7 +300,7 @@ BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.inform
   - **Review** (自作。More の下、Quit の上。アイコンは正方形の中に小さい正方形 = `ReviewIcon`): 多重ノーツ探し (`EditorState.reviewChart`)。**同じ拍・同じ中心 x** に「tap と tap」または「tap と wipe」が重なっているところを探す (wipe と wipe、スライドの始点・seg は調べない。幅 w は見ない)。見つかったら、再生中なら止めて、いちばん早い拍へ飛ぶ (複数あっても時系列で最初の 1 か所。直さずにもう一度押すと、同じところへ飛ぶ)。META の列は開いたまま。見つからなければ、画面の上に半透明の黒い札「0 issue found」が一瞬だけ出て勝手に消える (`ReviewNoticeLayer`。Grid settings と同じ濃さ・縁・形を縮めたもの。0.08 秒で出て、0.4 秒見せて、0.22 秒で消える)
   - **Quit**: 押した瞬間に、再生を止めて・保存して・エディタを閉じてファイル選択へ戻る (`EditorState.quitEditor`)。確認ダイアログは出さない (保存してから閉じるので、編集は失われない)
   - **Back**: いつもの列 (EDIT / BPM / EFFECT / TEST / META / SETTING) に戻る
-- **SETTING**: 右ウィンドウ (`SettingWindowContent`)。項目は、これまでの SETTING と同じ (曲の音量 / ノーツサウンドの音量 / 背景画像の暗さ / 立ち上がりをはっきりさせる / beatが時系列順でないsegを置くのを許可する / slide modifyでのsegの移動で縦方向の移動を許可する / 長押しで選択解除)。文字・縁取り・選んでいる色 (`Color.panelBlue`) を他の右ウィンドウにそろえ、縦にスクロールできる。チェックボックスは白い縁取りの四角
+- **SETTING**: 右ウィンドウ (`SettingWindowContent`)。項目は、これまでの SETTING と同じ (曲の音量 / ノーツサウンドの音量 / 背景画像の暗さ / 立ち上がりをはっきりさせる / beatが時系列順でないsegを置くのを許可する / slide modifyでのsegの移動で縦方向の移動を許可する / 現在位置を分割(LFB)の線にスナップする / 長押しで選択解除)。文字・縁取り・選んでいる色 (`Color.panelBlue`) を他の右ウィンドウにそろえ、縦にスクロールできる。チェックボックスは白い縁取りの四角
 
 ## SETTING / キー音
 - 右ボタン列の META の下の **SETTING** で、BPM list / Effect list と同じ右ウィンドウが開く (閉じるのは、ウィンドウより左を触ったとき。中身は「META / SETTING」を参照)

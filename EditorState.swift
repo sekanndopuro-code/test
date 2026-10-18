@@ -218,6 +218,15 @@ final class EditorState: ObservableObject {
         didSet { UserDefaults.standard.set(allowSegVerticalMove, forKey: "editor.allowSegVerticalMove") }
     }
 
+    // 上下スクロール / シークバーで動かす「現在位置」(再生ラインの位置) を、分割 (LFB = 1/n 拍) の線にそろえるか。次回起動時も保存される。初期値はオン
+    //   オン: レーン・左の帯・シークバーを動かすと、現在位置はいつも 1/n 拍の線の上で止まる。
+    //         線から線へ動かせば、時刻表示の差が「分割 1 マスが何 ms か」(分割 1/1 なら 1 拍が何 ms か) になる
+    //   オフ: 指の動きに合わせて、線の間にも止まる (これまでと同じ)
+    //   再生を止めた位置と、Info / プラグインなどで「この拍へ飛ぶ」ときの位置は、そのまま (飛ばない)
+    @Published var snapViewToLFB = true {
+        didSet { UserDefaults.standard.set(snapViewToLFB, forKey: "editor.snapViewToLFB") }
+    }
+
     // MARK: ファイル
     let song: SongPCM?                  // 開くときに 1 回だけ展開した曲 (エディタの再生・テストプレイ・曲の長さが、これを共有する)
     let mcURL: URL
@@ -344,6 +353,7 @@ final class EditorState: ObservableObject {
             self.allowUnorderedSeg = v          // 前の版の設定「beatがマイナスのsegを置くのを許可する」の値を引き継ぐ
         }
         if let v = ud.object(forKey: "editor.allowSegVerticalMove") as? Bool { self.allowSegVerticalMove = v }
+        if let v = ud.object(forKey: "editor.snapViewToLFB") as? Bool { self.snapViewToLFB = v }
         if let v = ud.object(forKey: "editor.gridCenterAlign") as? Bool { self.gridCenterAlign = v }
         if let v = ud.object(forKey: "editor.holdDeselectSec") as? Double {
             self.holdDeselectSec = min(max(v, Self.holdRange.lowerBound), Self.holdRange.upperBound)
@@ -595,6 +605,21 @@ final class EditorState: ObservableObject {
         viewBeat = min(max(0, b), maxBeat)
     }
 
+    /// 上下スクロール / シークバーで現在位置を動かすときに使う。
+    /// SETTING の「現在位置を分割(LFB)の線にスナップする」がオンなら、いちばん近い 1/n 拍の線 (n = 分割) にそろえる。
+    /// 曲の終わりを越える線は使わず、その手前の線にする (終わりの位置は 1/n 拍の線の上とは限らないため)
+    func scrollViewBeat(_ b: Double) {
+        guard snapViewToLFB, b.isFinite else {
+            setViewBeat(b)
+            return
+        }
+        let den = Double(max(1, snapDen))
+        var s = (max(0, b) * den).rounded() / den
+        let hi = maxBeat
+        if s > hi { s = (hi * den).rounded(.down) / den }
+        setViewBeat(s)
+    }
+
     /// 曲全体バー: f = 0(曲頭) ... 1(曲末)
     func seekBegin() {
         seekWasPlaying = isPlaying
@@ -603,7 +628,7 @@ final class EditorState: ObservableObject {
 
     func seek(fraction f: Double) {
         let sec = min(max(0, f), 1) * totalSec
-        setViewBeat(timeMap.beat(atSec: sec))
+        scrollViewBeat(timeMap.beat(atSec: sec))
     }
 
     func seekEnd() {

@@ -729,7 +729,7 @@ private struct SettingWindowContent: View {
         }
     }
 
-    /// チェックボックス 4 つ
+    /// チェックボックス 5 つ
     private var checkRows: some View {
         VStack(alignment: .leading, spacing: 16) {
             checkRow(title: "立ち上がりをはっきりさせる (伸ばす窓を小さく)",
@@ -753,6 +753,12 @@ private struct SettingWindowContent: View {
             checkRow(title: "grid alignがオンの時、グリッド上に常にノーツの中心を合わせる",
                      note: "オンのとき (初期値・本家と同じ): ノーツを動かすと、動かした先でいちばん近いグリッド線に中心が吸着します。置いたときと同じ座標になるので、グリッドに乗っていないノーツを動かして、置いたノーツに重ねても中心が必ずそろいます。スライドは始点と各 seg の中心がそれぞれ吸着します。オフにすると、動かす前の位置から「グリッド1マスの整数倍」だけずらす固定変位になります。",
                      isOn: $state.gridCenterAlign)
+
+            SideDivider()
+
+            checkRow(title: "現在位置を分割(LFB)の線にスナップする",
+                     note: "オンのとき (初期値): レーン・左の帯・シークバーを動かすと、再生ラインの位置が、いつも分割 (1/n 拍) の線の上で止まります。線から線へ動かして、時刻表示の差を見れば、分割 1 マスが何 ms かが分かります (分割 1/1 なら 1 拍が何 ms か)。再生を止めた位置と、「この拍へ飛ぶ」操作の位置は、そのままです。オフにすると、指の動きに合わせて線の間にも止まります。",
+                     isOn: $state.snapViewToLFB)
         }
     }
 

@@ -149,8 +149,9 @@ struct LaneView: View {
                         scrollOrigin = state.viewBeat
                     }
                     let ppb = Double(size.height) / state.visibleBeats
-                    if let o = scrollOrigin {
-                        state.setViewBeat(o + Double(v.translation.height) / ppb)
+                    // 触れただけ (まだ動かしていない) では位置を動かさない: スナップで触れた瞬間に飛ばないように
+                    if let o = scrollOrigin, v.translation.height != 0 {
+                        state.scrollViewBeat(o + Double(v.translation.height) / ppb)
                     }
                 case .idle:
                     break
@@ -316,8 +317,8 @@ struct StripView: View {
                                 scrollBeats = state.stripScrollBeats
                             }
                             let ppb = Double(proxy.size.height) / scrollBeats
-                            if let o = origin {
-                                state.setViewBeat(o + Double(v.translation.height) / ppb)
+                            if let o = origin, v.translation.height != 0 {
+                                state.scrollViewBeat(o + Double(v.translation.height) / ppb)
                             }
                         }
                         .onEnded { _ in origin = nil }
