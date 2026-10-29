@@ -59,7 +59,8 @@ struct RootView: View {
     var body: some View {
         ZStack {
             if let st = editor {
-                EditorView(state: st)
+                // どの画面比率でも、高さ 820pt の設計画面に載せる (DesignCanvas / EditorView.swift)
+                DesignCanvas { EditorView(state: st) }
                     // 本家と同じく、画面の下端 (ホームインジケータの下) までUIを続ける
                     .ignoresSafeArea(.container, edges: [.top, .leading, .trailing, .bottom])
                     // ホームバー (画面下の白い横棒) を隠し、下端からの1回目の上スワイプではホームに戻らないようにする。

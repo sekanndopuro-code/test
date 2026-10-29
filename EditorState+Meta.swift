@@ -94,8 +94,10 @@ enum MCZSharer {
             let b = top.view.bounds
             pop.sourceView = top.view
             // META の列の 3 番目 (More) の中心
-            pop.sourceRect = CGRect(x: b.maxX - RightPanel.width / 2,
-                                    y: RightPanel.edgeInset + RightPanel.slotPitch * 2.5,
+            // 右ボタン列の寸法は設計画面 (高さ 820pt) の値なので、実際の画面の倍率をかける (DesignCanvas)
+            let s = DesignScreen.scale(forHeight: b.height)
+            pop.sourceRect = CGRect(x: b.maxX - RightPanel.width * s / 2,
+                                    y: (RightPanel.edgeInset + RightPanel.slotPitch * 2.5) * s,
                                     width: 1, height: 1)
             pop.permittedArrowDirections = [.right]
         }

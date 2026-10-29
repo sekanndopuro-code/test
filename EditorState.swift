@@ -69,6 +69,8 @@ struct LaneGeo {
 
     // 本家 (iPad Air 4) の縦線を実測した値: レーンの左端 = ビューの左端 + 25.2pt、右端 = ビューの右端 - 10.2pt (幅 837.6pt)。
     // (ビューの幅 873pt = 画面 1180 - 左の帯 145 - シークバーと時刻 104 - 右のボタン列 58)
+    // 他の画面比率では、W (ビューの幅) だけが変わる (高さ 820pt の設計画面。DesignCanvas / EditorView.swift)。
+    // 25.2 や 35.4 は、設計画面の上の寸法なので、画面比率によらず固定でよい
     var trackL: CGFloat { 25.2 }
     var trackW: CGFloat { max(10, W - 35.4) }
     var playY: CGFloat { H * 0.9134 }     // 再生ライン (シアンの横棒)。本家は画面の高さの 91.3% (iPad Air 4 で 749 / 820pt)

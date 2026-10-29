@@ -837,6 +837,42 @@ struct RightPanel: View {
     }
 }
 
+// MARK: - 画面の比率への対応 (設計画面)
+
+/// エディタの寸法 (左の帯 145pt・右ボタン列 58pt・フォント・ノーツの太さなど) は、すべて iPad Air 4 の横画面 (高さ 820pt) を基準に決めてある。
+/// そのまま別の比率の画面 (4:3 / 16:9 / 16:7 など) に出すと、高さが違う分だけ帯やボタンの比率が崩れる。
+/// そこで、画面の高さが 820pt になるように全体を拡大・縮小 (倍率 s = 画面の高さ ÷ 820) した「設計画面」の上に UI を置く。
+///   - 設計画面の高さは常に 820pt。幅は 820 × (画面の幅 ÷ 画面の高さ) pt (iPad Air 4 なら 1180pt、4:3 なら 約 1093pt、16:9 なら 約 1458pt、16:7 なら 約 1875pt)
+///   - 左の帯・シークバー・右のボタン列は、どの比率でも高さに対する大きさが同じ。余った (足りない) 横幅は、レーンが吸収する
+///   - タッチの座標も設計画面の座標で届くので、中のコードは画面の大きさを気にしなくてよい
+enum DesignScreen {
+    /// 基準にした画面の高さ (iPad Air 4 の横画面)
+    static let height: CGFloat = 820
+
+    /// 実際の画面の高さ → 設計画面との倍率
+    static func scale(forHeight h: CGFloat) -> CGFloat {
+        max(h, 1) / height
+    }
+}
+
+struct DesignCanvas<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let s = DesignScreen.scale(forHeight: geo.size.height)
+            content
+                .frame(width: geo.size.width / s, height: DesignScreen.height)
+                .scaleEffect(s, anchor: .topLeading)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+        }
+    }
+}
+
 // MARK: - 画面全体
 
 struct EditorView: View {
