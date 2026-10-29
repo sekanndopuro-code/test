@@ -17,7 +17,8 @@
 | MCZImporter.swift | mcz を展開して `Documents/MalodySlideEditor/<mcz名>/` へ全部書き出す (`MCZImporter.unpack`)。譜面を選ぶ画面に出す version / creator もここで読む |
 | AudioController.swift | **曲を開くときに 1 回だけ PCM に展開する `SongPCM`** (ogg は ipa では stb_vorbis、Playgrounds では自前デコーダー。ogg 以外は AVAudioFile)。エディタの再生・テストプレイ・曲の長さが、この同じ PCM を共有する。`SongPCMSource` (PCM を `PCMSource` として読む薄い入れ物) と、オーディオセッションの起こし方 `AudioSessionSetup` もここ。以前あった AVAudioPlayer と WebKit (WKWebView) でのデコードは無くした |
 | stb_vorbis.c / StbVorbisBridge.c / StbVorbisBridge.h | **ogg Vorbis を読む C のライブラリ (stb_vorbis v1.22。公開ドメイン / MIT) と、Swift への橋渡し**。`stb_vorbis.c` は nothings/stb のコミット `2c980bb59875b0d32144a71867fbdebb2f77cd20` をそのまま置いてあり、書き換えていない。`StbVorbisBridge.c` の `msd_vorbis_decode()` が ogg を丸ごと Float の左右に展開する。**ipa のビルドだけで使う** (`project.yml` の `SWIFT_OBJC_BRIDGING_HEADER` と `HAVE_STB_VORBIS`)。Playgrounds (`Package.swift`) では除外してあり、Swift 側は `#if HAVE_STB_VORBIS` で従来の自前 ogg デコーダーに切り替わる |
-| KeySound.swift | ノーツ音(キー音)。鈴くらいの高さの短い音をコードで合成して鳴らす |
+| KeySound.swift | ノーツ音(キー音)。`KeySoundData` の波形を読み込んで鳴らす (読めなかったときだけ、鈴くらいの高さの短い音をコードで合成して代わりに鳴らす) |
+| KeySoundData.swift | ノーツ音の波形データ (44.1kHz モノラル 16bit PCM を base64 にしたもの。約55ms) |
 | EditorState.swift | 状態・再生クロック・Undo・オートセーブ・エクスポート |
 | EditorState+Tools.swift | ノーツ配置/削除/範囲コピー/反転/Slide<->Wipe/BPM/effect/seg編集 / **Grid align の吸着** (`snapNote` = 置くとき、`applyCenteredMove` = 動かすとき) |
 | Renderers.swift | レーン・縦タイムライン・シークバーの描画 (Canvas) |
@@ -319,7 +320,9 @@ BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.inform
   - エディタ再生中: ノーツ先頭が再生ライン(シアンの横棒)に触れる瞬間。同時押し(1ms以内)は1発にまとめる
   - テストプレイ: tap / wipe / スライド始点を捌いた瞬間 (`GameCore.onHit`)
   - 再生中のキー音は「鳴る時刻を指定して先行予約」(0.25秒先まで)。フレームレートに依存せず、曲と同じ時計から予約する (下の「再生クロック」参照)
-- キー音の音色を変えたいとき: `KeySound.makeBuffer` の `base`(高さ Hz) / `partials`(減衰の時定数) / `drive`(潰し具合) / `dur`(長さ)。現在値は base=6600 / drive=100 / dur=0.02
+- キー音の音色を変えたいとき: `KeySoundData.pcm16Base64` を、同じ形式 (44.1kHz / モノラル / 16bit PCM / リトルエンディアン) の base64 に置き換える。長さは波形から自動で決まる
+  * 現在の波形は、画面収録した音 (AAC) の前後を切り、末尾の急な切れ目を 12ms のフェードにして、真のピーク -1 dBTP に音量をそろえたもの。自然な音なので、以前のコード合成音 (tanh で矩形波近くまで潰していた) より **約 10dB 小さく聞こえる**。音量が足りないときは、曲の音量を下げるか、`KeySound.softClipDrive` を 1.0〜3.0 にする (+1.5〜+6dB。音は少し硬くなる。0 = 自然な音)
+  * 波形が読めなかったときのフォールバック (従来のコード合成音) は `KeySound.makeBuffer`。`base`(高さ Hz) = 6600 / `drive`(潰し具合) = 100 / `dur`(長さ) = 0.02
 
 ## 再生ボタンの反応速度
 - 再生ボタンを押してから動き出すまでの余裕は `EditorState.playLead` (現在 0.05 秒)。短いほど反応が速いが、短すぎると曲の頭出しがずれる

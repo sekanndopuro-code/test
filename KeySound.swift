@@ -3,8 +3,9 @@ import AVFoundation
 import QuartzCore
 
 /// ノーツ音(キー音)。
-/// 高い鈴のような音(6.6kHz)を、ごく短く(20ms)潰して「チッ」と鳴らす。
-/// 音声ファイルは使わず、起動時にコードで合成する。
+/// KeySoundData.swift に埋め込んだ波形 (44.1kHz モノラル / 約55ms) を起動時に読み込んで鳴らす。
+/// 波形が読めなかったときだけ、従来の「高い鈴のような音(6.6kHz)を20msに潰した音」をコードで合成して代わりに鳴らす。
+/// 音声ファイルは使わない (Swift Playgrounds でも、.swift をコピーするだけで動くように)。
 ///
 /// - playNow()      : すぐ鳴らす (テストプレイの打鍵・SETTINGの試聴)
 /// - play(atTime:)  : CACurrentMediaTime() と同じ時間軸の時刻に鳴らす (エディタ再生中の先行予約)
@@ -20,7 +21,13 @@ final class KeySound {
     private var buffer: AVAudioPCMBuffer?
     private var configured = false
     private var pendingUntil: [Double] = []   // ノードごとの「先行予約した音が鳴り終わる時刻」(CACurrentMediaTime と同じ時間軸)
-    private static let bufferDur = 0.02       // キー音1発の長さ (秒)
+    private var bufferDur = 0.02              // キー音1発の長さ (秒)。波形を読んだときに実際の長さへ更新する
+    private static let synthDur = 0.02        // フォールバック (コード合成) の長さ (秒)
+
+    /// 波形の音量を稼ぐための軽い歪み (tanh)。0 = 使わない (自然な音。初期値)。
+    /// 本家より音が小さく感じるときだけ 1.0〜3.0 くらいに上げる (大きいほど音量は上がるが、音は歪んで硬くなる)。
+    /// 目安: 1.0 で +約1.5dB / 2.0 で +約4dB / 3.0 で +約6dB。ピークの大きさは変わらない (割れない)。
+    private static let softClipDrive: Float = 0
 
     /// 0...1 (SETTING の「ノーツサウンド」)
     var volume: Float = 0.8 {
@@ -43,8 +50,9 @@ final class KeySound {
     private func configureIfNeeded() {
         if configured { return }
         guard let fmt = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1),
-              let buf = KeySound.makeBuffer(format: fmt) else { return }
+              let buf = KeySound.makeSampleBuffer(format: fmt) ?? KeySound.makeBuffer(format: fmt) else { return }
         buffer = buf
+        bufferDur = Double(buf.frameLength) / fmt.sampleRate
         for _ in 0..<KeySound.voices {
             let n = AVAudioPlayerNode()
             engine.attach(n)
@@ -93,7 +101,7 @@ final class KeySound {
         if time > CACurrentMediaTime() + 0.002 {
             let when = AVAudioTime(hostTime: AVAudioTime.hostTime(forSeconds: time))
             n.scheduleBuffer(buf, at: when, options: [], completionHandler: nil)
-            pendingUntil[idx] = max(pendingUntil[idx], time + KeySound.bufferDur + 0.01)
+            pendingUntil[idx] = max(pendingUntil[idx], time + bufferDur + 0.01)
         } else {
             n.scheduleBuffer(buf, at: nil, options: .interrupts, completionHandler: nil)
         }
@@ -113,12 +121,38 @@ final class KeySound {
         }
     }
 
-    // MARK: - 音の合成
+    // MARK: - 音の用意
 
-    /// 鈴らしい非整数倍の部分音を3つ重ね、立ち上がりに短いノイズを足し、tanhで軽く潰す
+    /// 埋め込みの波形 (KeySoundData: 16bit PCM の base64) を読み込む。読めなければ nil (→ makeBuffer の合成音になる)
+    private static func makeSampleBuffer(format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        guard format.sampleRate == KeySoundData.sampleRate,
+              format.channelCount == 1,
+              let data = Data(base64Encoded: KeySoundData.pcm16Base64, options: .ignoreUnknownCharacters)
+        else { return nil }
+        let count = data.count / 2
+        guard count > 0,
+              let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
+              let ch = buf.floatChannelData?[0] else { return nil }
+        buf.frameLength = AVAudioFrameCount(count)
+
+        let bytes = [UInt8](data)
+        let drive = KeySound.softClipDrive
+        let peak = KeySoundData.peak
+        let norm: Float = drive > 0 ? tanh(drive) : 1
+        for i in 0..<count {
+            let lo = UInt16(bytes[2 * i])
+            let hi = UInt16(bytes[2 * i + 1]) << 8
+            var s = Float(Int16(bitPattern: lo | hi)) / 32768
+            if drive > 0 { s = tanh(drive * s / peak) / norm * peak }
+            ch[i] = s
+        }
+        return buf
+    }
+
+    /// (フォールバック) 鈴らしい非整数倍の部分音を3つ重ね、立ち上がりに短いノイズを足し、tanhで軽く潰す
     private static func makeBuffer(format: AVAudioFormat) -> AVAudioPCMBuffer? {
         let sr = format.sampleRate
-        let dur = KeySound.bufferDur         // 全長 (秒)
+        let dur = KeySound.synthDur          // 全長 (秒)
         let count = Int(sr * dur)
         guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
               let ch = buf.floatChannelData?[0] else { return nil }
