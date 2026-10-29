@@ -62,7 +62,7 @@ struct RootView: View {
                 DesignCanvas { EditorView(state: st) }
                     // 本家と同じく、画面の下端 (ホームインジケータの下) までUIを続ける。
                     // .all = キーボードの分も無視する (キーボードが出ても画面の高さが縮まず、倍率が変わらない)。
-                    // 持ち上げは KeyboardLifter.swift が行う
+                    // BPM / Effect のウィンドウは、SwiftUI の標準のキーボード回避で、キーボードの高さぶんだけ上がる
                     .ignoresSafeArea(.all, edges: [.top, .leading, .trailing, .bottom])
                     // ホームバー (画面下の白い横棒) を隠し、下端からの1回目の上スワイプではホームに戻らないようにする。
                     // (下端を触る操作 — ノーツ幅スライダーやレーン下側のドラッグ — で、うっかりホーム画面へ戻るのを防ぐ。
@@ -73,7 +73,6 @@ struct RootView: View {
                 importView
             }
         }
-        .onAppear { KeyboardLifter.shared.start() } // キーボードが出たとき、画面を縮めず持ち上げる
         // 複数選択OK。選んだものは handle → importFiles で拡張子ごとに振り分ける
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             handle(result)
