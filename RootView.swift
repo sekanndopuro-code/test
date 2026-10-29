@@ -15,6 +15,7 @@ struct RootView: View {
     private static let audioExts: Set<String> = [
         "ogg", "mp3", "wav", "m4a", "aac", "flac", "aif", "aiff", "caf"
     ]
+
     /// 背景画像として扱う拡張子 (ここに無くても、システムが「画像」と判断する拡張子は画像にする)
     private static let imageExts: Set<String> = [
         "png", "jpg", "jpeg", "webp", "heic", "heif", "gif", "bmp", "tif", "tiff"
@@ -42,17 +43,15 @@ struct RootView: View {
     @State private var editor: EditorState? = nil
     @State private var showImporter = false
     @State private var importMode: ImportMode = .files
-    @State private var pendingMCZ: MCZUnpacked? = nil   // 譜面が複数入っていた mcz。どれを開くか選んでもらうまで置いておく
-
+    @State private var pendingMCZ: MCZUnpacked? = nil // 譜面が複数入っていた mcz。どれを開くか選んでもらうまで置いておく
     @State private var mcURL: URL? = nil
-    @State private var mcScoped = false       // mcURL のアクセス権を開いたままにしているか
+    @State private var mcScoped = false // mcURL のアクセス権を開いたままにしているか
     @State private var mcData: Data? = nil
     @State private var mcName = ""
     @State private var oggData: Data? = nil
     @State private var oggName = ""
     @State private var bgData: Data? = nil
     @State private var bgName = ""
-
     @State private var busy = false
     @State private var message = ""
 
@@ -61,17 +60,20 @@ struct RootView: View {
             if let st = editor {
                 // どの画面比率でも、高さ 820pt の設計画面に載せる (DesignCanvas / EditorView.swift)
                 DesignCanvas { EditorView(state: st) }
-                    // 本家と同じく、画面の下端 (ホームインジケータの下) までUIを続ける
-                    .ignoresSafeArea(.container, edges: [.top, .leading, .trailing, .bottom])
+                    // 本家と同じく、画面の下端 (ホームインジケータの下) までUIを続ける。
+                    // .all = キーボードの分も無視する (キーボードが出ても画面の高さが縮まず、倍率が変わらない)。
+                    // 持ち上げは KeyboardLifter.swift が行う
+                    .ignoresSafeArea(.all, edges: [.top, .leading, .trailing, .bottom])
                     // ホームバー (画面下の白い横棒) を隠し、下端からの1回目の上スワイプではホームに戻らないようにする。
                     // (下端を触る操作 — ノーツ幅スライダーやレーン下側のドラッグ — で、うっかりホーム画面へ戻るのを防ぐ。
-                    //  ホームへ戻るときは、下端から2回スワイプする)
+                    // ホームへ戻るときは、下端から2回スワイプする)
                     .persistentSystemOverlays(.hidden)
                     .defersSystemGestures(on: .bottom)
             } else {
                 importView
             }
         }
+        .onAppear { KeyboardLifter.shared.start() } // キーボードが出たとき、画面を縮めず持ち上げる
         // 複数選択OK。選んだものは handle → importFiles で拡張子ごとに振り分ける
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             handle(result)
@@ -195,7 +197,7 @@ struct RootView: View {
     /// 選ばれたファイルを、拡張子で mc / 音源 / 背景画像に振り分けて読み込む。
     /// - 今回の選択に **mc が入っている** → 別の譜面に切り替えたものとして、前の音源・背景は引き継がない
     ///   (mc だけ選べば、音源・背景なしで開く。今回いっしょに選んだものだけが付く)
-    /// - mc が入っていない → いま選んでいる mc はそのままで、音源 / 背景画像だけ入れ替える (足す) 
+    /// - mc が入っていない → いま選んでいる mc はそのままで、音源 / 背景画像だけ入れ替える (足す)
     /// - 同じ種類が複数あったときは、最初の 1 つだけ使う
     private func importFiles(_ urls: [URL]) {
         var mcs: [URL] = []
@@ -219,6 +221,7 @@ struct RootView: View {
                 skipped.append(url.lastPathComponent)
             }
         }
+
         // mcz だけを選んだときは、「mczを展開して読み込む…」と同じ (展開して、中の mc / 音源 / 背景を読み込む)
         if !mczs.isEmpty && mcs.isEmpty && audios.isEmpty && images.isEmpty {
             importMCZ(from: mczs)
@@ -240,7 +243,7 @@ struct RootView: View {
             do {
                 let data = try Data(contentsOf: url)
                 if mcScoped, let old = mcURL {
-                    old.stopAccessingSecurityScopedResource()   // 前に選んでいた mc のアクセス権を閉じる
+                    old.stopAccessingSecurityScopedResource() // 前に選んでいた mc のアクセス権を閉じる
                 }
                 mcData = data
                 mcURL = url
@@ -256,7 +259,6 @@ struct RootView: View {
                 if ok { url.stopAccessingSecurityScopedResource() }
             }
         }
-
         if let url = audios.first {
             do {
                 oggData = try readOnce(url)
@@ -265,7 +267,6 @@ struct RootView: View {
                 notes.append("\(url.lastPathComponent) の読込に失敗しました: \(error.localizedDescription)")
             }
         }
-
         if let url = images.first {
             do {
                 bgData = try readOnce(url)
@@ -274,7 +275,6 @@ struct RootView: View {
                 notes.append("\(url.lastPathComponent) の読込に失敗しました: \(error.localizedDescription)")
             }
         }
-
         message = notes.joined(separator: "\n")
     }
 
@@ -331,10 +331,10 @@ struct RootView: View {
         let media = pickMedia(chartData: data, among: packed.fileNames)
 
         if mcScoped, let old = mcURL {
-            old.stopAccessingSecurityScopedResource()   // 前に選んでいた mc のアクセス権を閉じる
+            old.stopAccessingSecurityScopedResource() // 前に選んでいた mc のアクセス権を閉じる
         }
         mcURL = mcFile
-        mcScoped = false                                // アプリ内のファイルなので、アクセス権は要らない
+        mcScoped = false // アプリ内のファイルなので、アクセス権は要らない
         mcData = data
         mcName = chartName
         oggData = nil
