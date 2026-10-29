@@ -248,9 +248,13 @@ EDIT の右ボタン列、**Remove の下・Adv. の上**に **Order** (①②) 
 | **枝分かれ敷** | 選んだスライドのうち、始点がいちばん早いものが幹 (同じ beat は選んだ順の早いほう)。残りが枝 | 1番目が幹。選択中のほかのスライドが枝 (始点 beat の早い順) | 始点がいちばん早いスライドが幹 |
 
 - 各スライド内部の seg の並び (逆走・折り返し・マイナス beat) は変えない。枝分かれ敷は、枝を幹の seg の通り道の上の、その枝の終点にあたる位置から差し込む
+- **枝分かれ敷 (新しい仕様)**: 枝は、幹の上のその枝の終点にあたる位置から、枝を逆走して始点へ → 枝を順行して終点へ → 幹へ戻る、とたどる。
+  * 幹にも枝にも、**すでに枝分かれ敷を使ったスライド**を使える。幹: いま付いている枝の周回はそのまま残して、新しい枝を「幹の通り道」(beat が前の seg より先へ進む seg だけを拾った折れ線。beat が戻る周回は入れない) の正しい位置へ差し込む。枝: 枝の中の周回ごと、逆走 → 順行でたどる (枝が終点より先まで周回しているときは、いちばん遅い beat を幹との接続点にする)
+  * 装飾の始点が本体より早くてもよい。その部分は、マイナス beat (整数部がマイナス、分子は 0 以上) の seg になる
+  * **速さ**: seg が何万個もあるときは、下の `GetNoteSlideBodyAll` / `ReplaceNoteSlideBody` / `DeleteNotes` を使って、スライド1本につき1回の往復で読み書きする (以前は seg ごとに往復して、30分ほどかかることがあった)。これらが無い環境 (本物の Malody V など) では、従来どおり seg を1個ずつ読み書きする。seg は Lua の表を作らず、「整数部, 分子, 分母, x」を4つずつ並べた平らな配列で持つ
 - **バグスライド (beat の重複) は常に許す**: このエディタは beat が重複しても描画が崩れないので、境目の自動ずらし (結合順 × 1/8477 拍) も、重複 seg の自動修復 (1/9001 拍ずつ) も行わない (editor.html の「バグスライドを許す」を常に ON にしたのと同じ)。結合のたびに beat が動かず、境目が直角のまま残る
 - 「順番に選択」が1本だけで、ほかに選んだスライドも無いとき (折り返し敷・枝分かれ敷) は、何もせず、選び方を表示する。元の editor.html にあった「1本だけでバグ修復」は、重複を常に許すようにしたので無くなった
-- ロジックは editor.html の `mergeSequentialInto` / `mergeJoinInto` / `mergeBranchesInto` と補助関数を1対1で移植したもの。元の関数を (`allowDupBeat = true` で) そのまま実行した結果と、ランダムな譜面 1800 通り (順番なし / 1本 + 装飾 / 手動の3パターン) で出力が完全に一致することを確認している (`lua-engine-src/test_html_diff.js`)
+- 「終点と始点を繋げる」「折り返し敷」のロジックは editor.html の `mergeSequentialInto` / `mergeJoinInto` と補助関数を1対1で移植したもの (枝分かれ敷は、上の新しい仕様で作り直したので、editor.html の `mergeBranchesInto` とは結果が変わる)。元の関数を (`allowDupBeat = true` で) そのまま実行した結果と、ランダムな譜面 1800 通り (順番なし / 1本 + 装飾 / 手動の3パターン) で出力が完全に一致することを確認している (`lua-engine-src/test_html_diff.js`)
 
 ### 仕組み
 Swift Playgrounds のアプリには Lua 本体 (C 言語) を組み込めないため、**Lua → JavaScript の変換器と Lua 標準ライブラリを JavaScript で書き、iOS 標準の JavaScriptCore で動かしている** (`LuaEngineSource.swift`)。
@@ -266,7 +270,7 @@ Swift Playgrounds のアプリには Lua 本体 (C 言語) を組み込めない
 |---|---|
 | **実装済み (添付プラグインで使用・動作確認済み)** | `GetSelectNotes` `GetNoteTime` `GetNoteBeat` `GetNoteX` `GetNoteWidth` `GetNoteType` `GetNoteSlideBodyCount` `GetNoteSlideBodyBeat` `GetNoteSlideBodyX` `AddNote` `DeleteNote` `SetNoteBeat` `SetNoteX` `SetNoteWidth` `AddNoteSlideBody` `SetNoteSlideBodyX` `DeleteNoteSlideBody` `BeatAdd` `BeatMinus` `StartBatch` `FinishBatch` `ShowMessage` `ShowTip` |
 | **実装済み (操作型プラグイン GizaSlide で使用・動作確認済み)** | `GetClickX` `GetClickBeat` `GetClickBeatFree` `AddSprite` `RemoveModule` `FindModule` `MakeBeat` `GetNoteBeat(note, false)` (終点) |
-| **このエディタ独自 (本物の Malody V には無い)** | `GetOrderNotes` (Order ボタンで選んだ順のスライド) `ClearOrderNotes` (その順番をリセット) `AppendNoteSlideBody` (seg を並べ替えず、足した順のまま末尾に足す。beat が行ったり来たりするバグスライド用) |
+| **このエディタ独自 (本物の Malody V には無い)** | `GetOrderNotes` (Order ボタンで選んだ順のスライド) `ClearOrderNotes` (その順番をリセット) `GetNoteSlideBodyAll` (スライドの seg を全部、1回の往復で読む。戻り値は 1 始まりの平らな表で、`[整数部, 分子, 分母, x]` が seg の数だけ並び、`.Length` が seg の数) `ReplaceNoteSlideBody` (スライドの seg を、同じ形の平らな表で丸ごと置き換える。並べ替えない) `DeleteNotes` (ノーツの番号を並べた表を渡して、まとめて消す) `AppendNoteSlideBody` (seg を並べ替えず、足した順のまま末尾に足す。beat が行ったり来たりするバグスライド用) |
 | **実装済み (使い方は推測。実際のプラグインで確かめて調整)** | `GetCurrentTime` (ms) `GetSystemTime` `GetCurrentBeat` `GetCurrentDivide` `GetNoteCount` `GetNoteAt` `GetTimeCount` `GetTimeAt` `GetEffectCount` `GetEffectAt` `AddTime` `DeleteTime` `AddEffect` `DeleteEffect` `SelectNote` `SetGridLine` `SeekTo` `MakeBeat` `GetUserInput` |
 | **未対応 (呼ばれると、何もせず通過して、実行後にどれが呼ばれたかを表示)** | `GetNoteFlag` `GetNoteGroup` (どちらも 0 を返す) `SetNoteFlag` `SetNoteGroup` `WriteFilePlugin` `ReadFileSelect` `ReadBytesSelect` `ReadData` `WriteData` `WriteChartCustom` `CallShortcut` `GetUserSelect` `GetUserOption` `AddText` `AddSpriteUndo` `AddTextUndo` `RemoveSpriteUndo` |
 

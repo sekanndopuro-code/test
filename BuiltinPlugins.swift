@@ -4,6 +4,8 @@ import Foundation
 // アプリに内蔵しているプラグイン。
 //   ・quad_InOut / quad_OutIn / join_slides_fixed: 添付された Malody V 用 Lua プラグインをそのまま収録
 //   ・join_end_to_start / fold_join / branch_join: editor.html の「終点と始点を繋げる」「折り返し敷」「枝分かれ敷」を Lua にしたもの
+//     (branch_join は、新しい仕様の版 (幹・枝とも、すでに枝分かれ敷を使ったスライドでよい / 装飾の始点が本体より早くてもよい)。
+//      seg が多いときは、PluginBridge の segAll / setSegs / deleteNotes (まとめて読み書き) を使って速くしている)
 //     (Order ボタンの「順番に選択」を使う。バグスライド = beat の重複は、常に許す)
 // 追加したいプラグインは、Adv. メニューの「プラグイン(lua)を読み込む」から入れられます (.lua / .zip / 画像)。
 // ============================================================
@@ -1163,12 +1165,26 @@ end
     ・「順番に選択」(Order ボタン) でスライドを2本以上選ぶ → 始点がいちばん早いスライドが幹、残りが枝
       (同じ beat のときは、選んだ順の早いほうが幹)
     ・「順番に選択」で本体を1本選んで、LASSO などで装飾にするスライドも選ぶ → 選んだ本体が幹、装飾は始点 beat の早い順
+      (装飾の始点が本体より早くてもよい。その部分はマイナス beat の seg になる)
     ・「順番に選択」を使わず、LASSO などでスライドを2本以上選ぶ → 始点がいちばん早いスライドが幹
   境目の beat が重複しても、そのまま残す (バグスライドを許す)。
+
+  速さ (seg が何万個もあるとき):
+    ・Editor の呼び出しを seg ごとにやると、往復が多すぎて遅い (30分かかることもあった)。
+      このエディタ独自の GetNoteSlideBodyAll / ReplaceNoteSlideBody / DeleteNotes があれば、スライド1本につき1回の往復で済ませる。
+      (本物の Malody V などでは、これらが無いので、従来どおり seg を1個ずつ読み書きする)
+    ・seg ごとに Lua の表を作ると重いので、seg は「整数部, 分子, 分母, x」を4つずつ並べた平らな配列で持つ
+      (seg の k 番目 (1 始まり) は、添字 4*(k-1)+1 〜 4*(k-1)+4)。
+
+  すでに枝分かれ敷を使ったスライドも、幹にも枝にもできる。
+    ・幹: いま付いている枝の周回はそのまま残して、新しい枝を幹の通り道の正しい位置へ差し込む
+      (幹の通り道 = beat が前の seg より先へ進む seg だけを拾った折れ線。beat が戻る周回は通り道に入れない)
+    ・枝: 枝の中の周回ごと、逆走 → 順行でたどる
 ]]
 PluginName='枝分かれ敷'
 PluginMode=7
 PluginType=0
+PluginRequire='6.4.2'
 
 local SLIDE = 2048            -- GetNoteType の戻り値 (スライド)
 local MAX_BEAT_DEN = 1048576  -- beat の分母の上限 (これを超える分母は 1/1048576 拍に丸める)
@@ -1185,28 +1201,50 @@ local function gcd(a, b)
   return a
 end
 
-local function capBeat(m, n, d)
+-- beat (m + n/d) を約分して、buf[o+1], buf[o+2], buf[o+3] に書き込む。
+-- 分母が上限を超えるときは 1/1048576 拍に丸める
+local function capBeatInto(buf, o, m, n, d)
   if d <= 0 then d = 1 end
   if d <= MAX_BEAT_DEN then
-    if n == 0 then return { m, 0, 1 } end
+    if n == 0 then
+      buf[o + 1] = m
+      buf[o + 2] = 0
+      buf[o + 3] = 1
+      return
+    end
     local g = gcd(n, d)
-    return { m, n / g, d / g }
+    buf[o + 1] = m
+    buf[o + 2] = n / g
+    buf[o + 3] = d / g
+    return
   end
   local newNum = math.floor(n / d * MAX_BEAT_DEN + 0.5)
   if newNum >= MAX_BEAT_DEN then
     m = m + 1
     newNum = 0
   end
-  if newNum == 0 then return { m, 0, 1 } end
+  if newNum == 0 then
+    buf[o + 1] = m
+    buf[o + 2] = 0
+    buf[o + 3] = 1
+    return
+  end
   local g = gcd(newNum, MAX_BEAT_DEN)
-  return { m, newNum / g, MAX_BEAT_DEN / g }
+  buf[o + 1] = m
+  buf[o + 2] = newNum / g
+  buf[o + 3] = MAX_BEAT_DEN / g
 end
 
-local function copyBeat(b) return { b[1], b[2], b[3] } end
+local function capBeat(m, n, d)
+  local t = {}
+  capBeatInto(t, 0, m, n, d)
+  return t
+end
 
 local function beatPoint(b) return b[1] + b[2] / b[3] end
 
--- b1 - b2 (結果が負になるときは 0)
+-- b1 - b2 (結果が負になってもよい。整数部がマイナス、分子は 0 以上の「マイナス beat」の形で返す)
+-- 装飾の始点が本体より早いとき、相対 beat はマイナスになる。0 に丸めると枝の形が変わってしまう
 local function beatDiff(b1, b2)
   local m1, n1, d1 = b1[1], b1[2], b1[3]
   local m2, n2, d2 = b2[1], b2[2], b2[3]
@@ -1214,7 +1252,6 @@ local function beatDiff(b1, b2)
   local num2 = (m2 * d2 + n2) * d1
   local den = d1 * d2
   local diff = num1 - num2
-  if diff < 0 then diff = 0 end
   local n = diff % den
   local m = (diff - n) / den
   return capBeat(m, n, den)
@@ -1231,15 +1268,20 @@ local function beatAdd(b1, b2)
   return capBeat(m, n, den)
 end
 
+-- (m1 n1/d1) + (m2 n2/d2) を buf[o+1..o+3] に書き込む。beatAdd と同じ計算 (seg の点ごとに表を作らないための版)
+local function beatAddInto(buf, o, m1, n1, d1, m2, n2, d2)
+  local den = d1 * d2
+  local num = n1 * d2 + n2 * d1
+  local n = num % den
+  local m = m1 + m2 + (num - n) / den
+  capBeatInto(buf, o, m, n, den)
+end
+
 -- ---- エディタとのやりとり ----
 local function readBeat(t)
   local d = t.denom
   if d == nil or d < 1 then d = 1 end
   return { t.beat or 0, t.numor or 0, d }
-end
-
-local function toBeatTable(b)
-  return { beat = b[1], numor = b[2], denom = b[3] }
 end
 
 -- Editor の「ノーツの配列」(.Length と 0 始まりの添字) を、Lua の普通の配列にする
@@ -1253,6 +1295,11 @@ local function toList(arr)
   return list
 end
 
+-- このエディタ独自の「まとめて読み書きする」API があるか (無い環境では、seg を1個ずつ読み書きする)
+local HAS_BULK_READ = Editor.GetNoteSlideBodyAll ~= nil
+local HAS_BULK_WRITE = Editor.ReplaceNoteSlideBody ~= nil
+local HAS_BULK_DELETE = Editor.DeleteNotes ~= nil
+
 -- 「順番に選択」(Order ボタン) でタップした順のノーツ。この機能が無い環境では空
 local function orderNotes()
   if Editor.GetOrderNotes == nil then return {} end
@@ -1263,8 +1310,30 @@ local function clearOrder()
   if Editor.ClearOrderNotes ~= nil then Editor:ClearOrderNotes() end
 end
 
+-- スライド1本の seg を全部読む。戻り値は (平らな配列, seg の数)。
+-- 平らな配列は「整数部, 分子, 分母, x」を seg の数だけ並べたもの
+local function readSegs(note)
+  if HAS_BULK_READ then
+    -- 1回の往復で受け取る (seg を1個ずつ読むと、何万個もあるとき遅い)
+    local flat = Editor:GetNoteSlideBodyAll(note)
+    return flat, flat.Length
+  end
+  local flat = {}
+  local o = 0
+  local segCount = Editor:GetNoteSlideBodyCount(note)
+  for k = 0, segCount - 1 do
+    local b = readBeat(Editor:GetNoteSlideBodyBeat(note, k))
+    flat[o + 1] = b[1]
+    flat[o + 2] = b[2]
+    flat[o + 3] = b[3]
+    flat[o + 4] = Editor:GetNoteSlideBodyX(note, k)
+    o = o + 4
+  end
+  return flat, segCount
+end
+
 -- ノーツの一覧から、スライドだけを読み出す。同じノーツは1回だけ。
--- 始点・x・seg の beat と x は、すべて数値にして持つ。order = 一覧の中での位置
+-- 始点・x は数値にして持つ。seg は平らな配列 (flat) と seg の数 (cnt)。order = 一覧の中での位置
 local function readSlides(notes)
   local list = {}
   local seen = {}
@@ -1273,19 +1342,15 @@ local function readSlides(notes)
     if not seen[note] then
       seen[note] = true
       if Editor:GetNoteType(note) == SLIDE then
-        local segs = {}
-        local segCount = Editor:GetNoteSlideBodyCount(note)
-        for k = 0, segCount - 1 do
-          segs[#segs + 1] = {
-            beat = readBeat(Editor:GetNoteSlideBodyBeat(note, k)),
-            x = Editor:GetNoteSlideBodyX(note, k)
-          }
-        end
+        local startBeat = readBeat(Editor:GetNoteBeat(note, true))
+        local flat, cnt = readSegs(note)
         list[#list + 1] = {
           note = note,
-          beat = readBeat(Editor:GetNoteBeat(note, true)),
+          beat = startBeat,
+          point = beatPoint(startBeat),
           x = Editor:GetNoteX(note),
-          segs = segs,
+          flat = flat,
+          cnt = cnt,
           order = #list + 1
         }
       end
@@ -1297,8 +1362,7 @@ end
 -- 始点 beat の早い順に並べる (同じ beat なら、一覧での並びのまま)
 local function sortByStart(list)
   table.sort(list, function(a, b)
-    local pa, pb = beatPoint(a.beat), beatPoint(b.beat)
-    if pa ~= pb then return pa < pb end
+    if a.point ~= b.point then return a.point < b.point end
     return a.order < b.order
   end)
 end
@@ -1312,139 +1376,293 @@ local function without(list, main)
   return out
 end
 
--- 本体スライドの seg を newSeg に置き換えて、本体以外のスライドを消す。「順番に選択」はリセットする
-local function commit(main, newSeg, slides)
-  Editor:DeleteNoteSlideBody(main.note)
-  -- 並べ替えずに、足した順のまま末尾に足す (beat が行ったり来たりする seg も、そのまま残る)
-  local add = Editor.AppendNoteSlideBody ~= nil and Editor.AppendNoteSlideBody or Editor.AddNoteSlideBody
-  for i = 1, #newSeg do
-    local s = newSeg[i]
-    add(Editor, main.note, toBeatTable(s.beat))
-    Editor:SetNoteSlideBodyX(main.note, i - 1, s.x)
-  end
-  for i = 1, #slides do
-    if slides[i] ~= main then
-      Editor:DeleteNote(slides[i].note)
+-- 本体スライドの seg を out (平らな配列。seg が count 個) に置き換えて、本体以外のスライドを消す。「順番に選択」はリセットする
+local function commit(main, out, count, slides)
+  if HAS_BULK_WRITE then
+    -- 並べ替えずに、1回の往復で丸ごと置き換える (beat が行ったり来たりする seg も、そのまま残る)
+    Editor:ReplaceNoteSlideBody(main.note, out)
+  else
+    Editor:DeleteNoteSlideBody(main.note)
+    -- 並べ替えずに、足した順のまま末尾に足す (beat が行ったり来たりする seg も、そのまま残る)
+    local add = Editor.AppendNoteSlideBody ~= nil and Editor.AppendNoteSlideBody or Editor.AddNoteSlideBody
+    local o = 0
+    for i = 1, count do
+      add(Editor, main.note, { beat = out[o + 1], numor = out[o + 2], denom = out[o + 3] })
+      Editor:SetNoteSlideBodyX(main.note, i - 1, out[o + 4])
+      o = o + 4
     end
+  end
+  local doomed = {}
+  for i = 1, #slides do
+    if slides[i] ~= main then doomed[#doomed + 1] = slides[i].note end
+  end
+  if HAS_BULK_DELETE then
+    if #doomed > 0 then Editor:DeleteNotes(doomed) end
+  else
+    for i = 1, #doomed do Editor:DeleteNote(doomed[i]) end
   end
   clearOrder()
 end
 
--- 幹の相対 x を、任意の point (相対 beat) で補間して求める
-local function getRelXAt(mainPoints, target)
-  local n = #mainPoints
-  if n == 1 then return mainPoints[1].relX end
-  if target <= mainPoints[1].point then return mainPoints[1].relX end
-  if target >= mainPoints[n].point then return mainPoints[n].relX end
-  for i = 1, n - 1 do
-    local p1, p2 = mainPoints[i], mainPoints[i + 1]
-    if p1.point <= target and target <= p2.point then
-      if math.abs(p2.point - p1.point) < EPS then return p2.relX end
-      local t = (target - p1.point) / (p2.point - p1.point)
-      return p1.relX + (p2.relX - p1.relX) * t
+-- ---- 幹の通り道 ----
+
+-- 幹の「通り道(骨格)」: beat が、それまでの最大より先へ進む seg だけを拾った、時系列順の折れ線。
+-- head は point 0 / relX 0。idx = 元の seg の番号 (head は 0)。n = 点の数。
+-- すでに枝が付いている幹でも、枝の周回(beat が戻る部分)は通り道に入らない。
+-- 点ごとに表を作らず、point / relX / idx を別々の配列で持つ
+local function buildSkeleton(flat, cnt)
+  local sp, sx, si = { 0 }, { 0 }, { 0 }
+  local n = 1
+  local frontier = 0
+  local o = 0
+  for i = 1, cnt do
+    local p = flat[o + 1] + flat[o + 2] / flat[o + 3]
+    if p > frontier + EPS then
+      n = n + 1
+      sp[n] = p
+      sx[n] = flat[o + 4]
+      si[n] = i
+      frontier = p
     end
+    o = o + 4
   end
-  return mainPoints[n].relX
+  return { point = sp, relX = sx, idx = si, n = n }
 end
 
-local function mergeBranches(main, branches)
-  -- 幹 seg: 折り返し (point が逆行) より前の有効な部分だけを切り出す
-  local original = main.segs
-  local effective = {}
-  local prev = 0
-  for i = 1, #original do
-    local p = beatPoint(original[i].beat)
-    if p < prev - EPS then break end
-    effective[#effective + 1] = original[i]
-    prev = p
+-- 幹の相対 x を、任意の point (相対 beat) で補間して求める
+-- (通り道の point は先へ進む一方なので、target 以上になる最初の点を二分探索で探す)
+local function getRelXAt(sk, target)
+  local n = sk.n
+  local sp, sx = sk.point, sk.relX
+  if n == 1 then return sx[1] end
+  if target <= sp[1] then return sx[1] end
+  if target >= sp[n] then return sx[n] end
+  local lo, hi = 2, n
+  while lo < hi do
+    local mid = math.floor((lo + hi) / 2)
+    if sp[mid] >= target then hi = mid else lo = mid + 1 end
   end
+  local p1, p2 = sp[lo - 1], sp[lo]
+  if math.abs(p2 - p1) < EPS then return sx[lo] end
+  local t = (target - p1) / (p2 - p1)
+  return sx[lo - 1] + (sx[lo] - sx[lo - 1]) * t
+end
 
-  local mainPoints = { { point = 0, relX = 0 } }
-  for i = 1, #effective do
-    mainPoints[#mainPoints + 1] = { point = beatPoint(effective[i].beat), relX = effective[i].x }
-  end
-
-  local events = {}
-  local seq = 0
-  local mainLast = nil
-  local mainLastPoint = 0
-  if #effective > 0 then
-    mainLast = effective[#effective]
-    mainLastPoint = beatPoint(mainLast.beat)
-    for i = 1, #effective - 1 do
-      local s = effective[i]
-      seq = seq + 1
-      events[#events + 1] = { kind = 'main_seg', point = beatPoint(s.beat), beat = s.beat, x = s.x, seq = seq }
+-- 枝の周回を差し込む位置。「元の seg の slot 番目の直前」に入れる (segCount + 1 なら末尾)。
+--   ・幹の途中            : その point を含む区間の、次に進む seg の直前
+--                           (その手前に付いている既存の周回のあと)
+--   ・幹の終点ちょうど    : 終点の seg の直後 (終点にぶら下がっている既存の周回の前)
+--   ・幹の終点より未来    : 末尾 (既存の周回のあと)
+local function findSlot(sk, point, segCount)
+  local sp = sk.point
+  -- point + EPS 以下の、いちばん後ろの点 (二分探索。無ければ 1)
+  local k = 1
+  local lo, hi = 1, sk.n
+  local limit = point + EPS
+  while lo <= hi do
+    local mid = math.floor((lo + hi) / 2)
+    if sp[mid] <= limit then
+      k = mid
+      lo = mid + 1
+    else
+      hi = mid - 1
     end
   end
+  if k < sk.n then
+    return sk.idx[k + 1]
+  end
+  if point > sp[k] + EPS then
+    return segCount + 1
+  end
+  return sk.idx[k] + 1
+end
 
-  for _, br in ipairs(branches) do
-    local offsetX = br.x - main.x
-    local offsetBeat = beatDiff(br.beat, main.beat)
-    local lastSegBeat = { 0, 0, 1 }
-    if #br.segs > 0 then lastSegBeat = br.segs[#br.segs].beat end
-    local endRelBeat = beatAdd(offsetBeat, lastSegBeat)
-    local endRelPoint = beatPoint(endRelBeat)
-    local trunkRelX = math.floor(getRelXAt(mainPoints, endRelPoint))
-    seq = seq + 1
-    events[#events + 1] = {
-      kind = 'branch_insert', point = endRelPoint, beat = endRelBeat, x = trunkRelX,
-      segs = br.segs, offsetX = offsetX, offsetBeat = offsetBeat, seq = seq
-    }
+-- 枝 1 本ぶんの周回を作る
+local function makeLoop(main, br, sk, segCount)
+  local flat, cnt = br.flat, br.cnt
+  local offsetX = br.x - main.x
+  local offsetBeat = beatDiff(br.beat, main.beat)   -- マイナスになることもある
+
+  local lastBeat = { 0, 0, 1 }
+  local endX = 0
+  if cnt > 0 then
+    local g = (cnt - 1) * 4
+    lastBeat = { flat[g + 1], flat[g + 2], flat[g + 3] }
+    endX = flat[g + 4]
   end
 
-  -- point の昇順。同じ point なら幹の seg を先に
-  table.sort(events, function(a, b)
-    local d = a.point - b.point
-    if math.abs(d) > EPS then return d < 0 end
-    if a.kind ~= b.kind then return a.kind == 'main_seg' end
+  -- 枝の中でいちばん遅い beat。ふつうは終点と同じ。
+  -- すでに枝分かれ敷を使った枝は、終点より先まで周回していることがある。
+  -- そのときは、いちばん遅い beat を幹との接続点にして、周回が幹の「未来」にはみ出さないようにする
+  local topBeat = lastBeat
+  local topPoint = beatPoint(lastBeat)
+  local o = 0
+  for j = 1, cnt do
+    local p = flat[o + 1] + flat[o + 2] / flat[o + 3]
+    if p > topPoint + EPS then
+      topBeat = { flat[o + 1], flat[o + 2], flat[o + 3] }
+      topPoint = p
+    end
+    o = o + 4
+  end
+  if topPoint < -EPS then
+    topBeat = { 0, 0, 1 }
+    topPoint = 0
+  end
+  local stub = topPoint > beatPoint(lastBeat) + EPS
+
+  local attachBeat = beatAdd(offsetBeat, topBeat)
+  local point = beatPoint(attachBeat)
+  return {
+    br = br,
+    offsetX = offsetX,
+    offsetBeat = offsetBeat,
+    endX = offsetX + endX,
+    attachBeat = attachBeat,
+    point = point,
+    trunkX = math.floor(getRelXAt(sk, point)),
+    stub = stub,
+    slot = findSlot(sk, point, segCount)
+  }
+end
+
+-- 周回を out の o+1 以降に書き出して、書き終えた位置を返す (out は平らな配列。tmp は作業用の平らな配列)
+-- 幹の上の枝の終点へ → 枝を逆走 → 枝の始点 → 枝を順行 → 幹へ戻る
+local function emitLoop(out, o, lp, tmp)
+  local br = lp.br
+  local flat, cnt = br.flat, br.cnt
+  local ob, ox = lp.offsetBeat, lp.offsetX
+  local obm, obn, obd = ob[1], ob[2], ob[3]
+  local ab = lp.attachBeat
+  local abm, abn, abd = ab[1], ab[2], ab[3]
+  local trunkX, endX = lp.trunkX, lp.endX
+  local stub = lp.stub
+
+  out[o + 1] = abm
+  out[o + 2] = abn
+  out[o + 3] = abd
+  out[o + 4] = trunkX
+  o = o + 4
+  if stub then
+    out[o + 1] = abm
+    out[o + 2] = abn
+    out[o + 3] = abd
+    out[o + 4] = endX
+    o = o + 4
+  end
+
+  -- 枝の点は、逆走でも順行でも同じ位置なので、1回だけ計算して tmp に置く
+  local t = 0
+  local f = 0
+  for j = 1, cnt do
+    beatAddInto(tmp, t, obm, obn, obd, flat[f + 1], flat[f + 2], flat[f + 3])
+    tmp[t + 4] = ox + flat[f + 4]
+    t = t + 4
+    f = f + 4
+  end
+
+  -- 枝を逆走
+  t = (cnt - 1) * 4
+  for j = cnt, 1, -1 do
+    out[o + 1] = tmp[t + 1]
+    out[o + 2] = tmp[t + 2]
+    out[o + 3] = tmp[t + 3]
+    out[o + 4] = tmp[t + 4]
+    o = o + 4
+    t = t - 4
+  end
+
+  -- 枝の始点
+  out[o + 1] = obm
+  out[o + 2] = obn
+  out[o + 3] = obd
+  out[o + 4] = ox
+  o = o + 4
+
+  -- 枝を順行
+  t = 0
+  for j = 1, cnt do
+    out[o + 1] = tmp[t + 1]
+    out[o + 2] = tmp[t + 2]
+    out[o + 3] = tmp[t + 3]
+    out[o + 4] = tmp[t + 4]
+    o = o + 4
+    t = t + 4
+  end
+
+  if stub then
+    out[o + 1] = abm
+    out[o + 2] = abn
+    out[o + 3] = abd
+    out[o + 4] = endX
+    o = o + 4
+  end
+  out[o + 1] = abm
+  out[o + 2] = abn
+  out[o + 3] = abd
+  out[o + 4] = trunkX
+  return o + 4
+end
+
+-- 幹の seg 列に、枝の周回を差し込んだ新しい seg 列 (平らな配列) と、その seg の数を作る
+-- 元の seg は、並びも中身もそのまま (すでに付いている枝の周回も含めて) 残る
+local function buildNewSegs(main, branches)
+  local flat, segCount = main.flat, main.cnt
+  local sk = buildSkeleton(flat, segCount)
+  local trunkEnd = sk.point[sk.n]
+
+  local loops = {}
+  local needCap = false
+  for i = 1, #branches do
+    local lp = makeLoop(main, branches[i], sk, segCount)
+    lp.seq = i
+    loops[#loops + 1] = lp
+    if segCount > 0 and lp.point > trunkEnd + EPS then needCap = true end
+  end
+
+  -- 差し込み位置の順。同じ位置なら、幹の上で早いほうから
+  table.sort(loops, function(a, b)
+    if a.slot ~= b.slot then return a.slot < b.slot end
+    if math.abs(a.point - b.point) > EPS then return a.point < b.point end
     return a.seq < b.seq
   end)
 
-  local newSeg = {}
-  local currentPoint = 0
-  for _, ev in ipairs(events) do
-    if ev.kind == 'main_seg' then
-      newSeg[#newSeg + 1] = { beat = copyBeat(ev.beat), x = ev.x }
-      currentPoint = ev.point
-    else
-      -- 幹の上の枝の終点へ → 枝を逆走 → 枝の始点 → 枝を順行 → 幹へ戻る
-      newSeg[#newSeg + 1] = { beat = copyBeat(ev.beat), x = ev.x }
-      for j = #ev.segs, 1, -1 do
-        local s = ev.segs[j]
-        newSeg[#newSeg + 1] = { beat = beatAdd(ev.offsetBeat, s.beat), x = ev.offsetX + s.x }
-      end
-      newSeg[#newSeg + 1] = { beat = copyBeat(ev.offsetBeat), x = ev.offsetX }
-      for j = 1, #ev.segs do
-        local s = ev.segs[j]
-        newSeg[#newSeg + 1] = { beat = beatAdd(ev.offsetBeat, s.beat), x = ev.offsetX + s.x }
-      end
-      newSeg[#newSeg + 1] = { beat = copyBeat(ev.beat), x = ev.x }
-      currentPoint = ev.point
+  local out = {}
+  local tmp = {}
+  local o = 0
+  local f = 0
+  local li = 1
+  for i = 1, segCount + 1 do
+    while li <= #loops and loops[li].slot == i do
+      o = emitLoop(out, o, loops[li], tmp)
+      li = li + 1
+    end
+    if i <= segCount then
+      out[o + 1] = flat[f + 1]
+      out[o + 2] = flat[f + 2]
+      out[o + 3] = flat[f + 3]
+      out[o + 4] = flat[f + 4]
+      o = o + 4
+      f = f + 4
     end
   end
+  -- 枝が幹の終点より未来にあるときは、最後に元の終点で蓋をする
+  if needCap then
+    local g = (segCount - 1) * 4
+    out[o + 1] = flat[g + 1]
+    out[o + 2] = flat[g + 2]
+    out[o + 3] = flat[g + 3]
+    out[o + 4] = flat[g + 4]
+    o = o + 4
+  end
+  return out, o / 4
+end
 
-  -- 枝が幹の終点より未来にあるとき: 幹を逆走して戻す
-  if mainLast ~= nil and currentPoint > mainLastPoint then
-    for i = #events, 1, -1 do
-      local ev = events[i]
-      if ev.kind == 'main_seg' and ev.point <= currentPoint and ev.point > mainLastPoint then
-        newSeg[#newSeg + 1] = { beat = copyBeat(ev.beat), x = ev.x }
-      end
-    end
-  end
-  -- 最後に幹の終点で蓋をする
-  if mainLast ~= nil then
-    newSeg[#newSeg + 1] = { beat = copyBeat(mainLast.beat), x = mainLast.x }
-  end
-  -- 元の折り返し部分 (有効範囲の外) は、そのまま末尾へ
-  for i = #effective + 1, #original do
-    newSeg[#newSeg + 1] = { beat = copyBeat(original[i].beat), x = original[i].x }
-  end
-
+local function mergeBranches(main, branches)
+  local out, count = buildNewSegs(main, branches)
   local all = { main }
   for _, br in ipairs(branches) do all[#all + 1] = br end
-  commit(main, newSeg, all)
+  commit(main, out, count, all)
 end
 
 function Run()
@@ -1482,8 +1700,12 @@ function Run()
     return
   end
   Editor:StartBatch()
-  mergeBranches(main, branches)
+  local ok, err = pcall(mergeBranches, main, branches)
   Editor:FinishBatch()
+  if not ok then
+    Editor:ShowTip('❌ 枝分かれ結合に失敗しました: ' .. tostring(err))
+    return
+  end
   Editor:ShowTip('✅ 枝分かれ結合: ' .. (#branches + 1) .. '本を処理しました')
 end
 """##)

@@ -434,6 +434,20 @@ final class PluginBridge {
             let j = intv(a, 1)
             if j < 0 || j >= st.chart.notes[i].segs.count { return json(0) }
             return json(st.chart.notes[i].segs[j].x)
+        case "segAll":
+            // このエディタ独自: スライドの seg を全部、[整数部, 分子, 分母, x] を並べた平らな配列で返す。
+            // seg が何万個もあるとき、1個ずつ読むと往復の回数が多すぎて遅いので、1回の往復で済ませるための入口
+            guard let i = noteIndex(st, text(a, 0)) else { return nullJSON }
+            let segs = st.chart.notes[i].segs
+            var flat: [Int] = []
+            flat.reserveCapacity(segs.count * 4)
+            for g in segs {
+                flat.append(g.beat.m)
+                flat.append(g.beat.n)
+                flat.append(g.beat.d)
+                flat.append(g.x)
+            }
+            return json(flat)
         case "timeCount":
             return json(st.chart.times.count)
         case "timeAt":
@@ -521,6 +535,48 @@ final class PluginBridge {
                 st.chart.notes[i].segs.removeAll()
             }
             if wasSlide && st.chart.notes[i].segs.isEmpty { pendingSlides.insert(st.chart.notes[i].id) }
+            return nullJSON
+        case "setSegs":
+            // このエディタ独自: スライドの seg を、[整数部, 分子, 分母, x] を並べた平らな配列で丸ごと置き換える (並べ替えない)。
+            // seg が何万個もあるとき、1個ずつ足すと往復の回数が多すぎて遅いので、1回の往復で済ませるための入口。
+            // beat の丸め方・x の範囲は、appendSeg + setSegX と同じ
+            guard let i = noteIndex(st, text(a, 0)) else { return nullJSON }
+            guard let arr = arg(a, 1) as? [Any] else { return nullJSON }
+            touch(st)
+            var segs: [Seg] = []
+            segs.reserveCapacity(arr.count / 4)
+            var k = 0
+            while k + 3 < arr.count {
+                let m = (arr[k] as? NSNumber)?.doubleValue ?? 0
+                let n = (arr[k + 1] as? NSNumber)?.doubleValue ?? 0
+                let d = (arr[k + 2] as? NSNumber)?.doubleValue ?? 1
+                let xv = (arr[k + 3] as? NSNumber)?.doubleValue ?? 0
+                segs.append(Seg(beat: PluginBridge.makeBeat(m, n, d), x: clampInt(xv, -100_000, 100_000)))
+                k += 4
+            }
+            let noteID = st.chart.notes[i].id
+            st.chart.notes[i].segs = segs
+            if segs.isEmpty {
+                pendingSlides.insert(noteID)
+            } else {
+                pendingSlides.remove(noteID)
+            }
+            return nullJSON
+        case "deleteNotes":
+            // このエディタ独自: ノーツをまとめて消す。1個ずつ消すと、そのたびに全ノーツの検索表を作り直すので遅い
+            guard let list = arg(a, 0) as? [Any] else { return nullJSON }
+            var doomed = Set<NoteID>()
+            for v in list {
+                if let t = v as? String, let u = Int(t), noteIndex(st, t) != nil { doomed.insert(u) }
+            }
+            if doomed.isEmpty { return nullJSON }
+            touch(st)
+            st.chart.notes.removeAll { doomed.contains($0.id) }
+            indexMap.removeAll(keepingCapacity: true)
+            for id in doomed {
+                pendingSlides.remove(id)
+                st.selectedIDs.remove(id)
+            }
             return nullJSON
         case "select":
             guard let i = noteIndex(st, text(a, 0)) else { return nullJSON }

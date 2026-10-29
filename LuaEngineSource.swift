@@ -2456,6 +2456,16 @@ function makeEditor() {
     return beatTable(b);
   });
   def('GetNoteSlideBodyX', (n, i) => native('segX', nid(n, 1, 'GetNoteSlideBodyX'), checkInt(i, 2, 'GetNoteSlideBodyX')));
+  // このエディタ独自: スライドの seg を全部、1回の往復で読む。戻り値の表は 1 始まりの平らな配列で、
+  //   seg 1個につき 4つ ([整数部, 分子, 分母, x]) が並び、.Length が seg の数。
+  //   (GetNoteSlideBodyBeat / GetNoteSlideBodyX を seg ごとに呼ぶと、seg が何万個もあるとき往復が多すぎて遅い)
+  def('GetNoteSlideBodyAll', (n) => {
+    const flat = native('segAll', nid(n, 1, 'GetNoteSlideBodyAll')) || [];
+    const t = new LuaTable();
+    for (let i = 0; i < flat.length; i++) t.arr.push(flat[i]);
+    t.set('Length', flat.length >> 2);
+    return t;
+  });
   def('GetNoteFlag', () => 0);
   def('GetNoteGroup', () => 0);
   // 操作型プラグイン (OnClick / OnDragStart / OnDragMove) の中で、いま触れているレーン上の位置
@@ -2508,6 +2518,20 @@ function makeEditor() {
   def('AppendNoteSlideBody', (n, beat) => native('appendSeg', nid(n, 1, 'AppendNoteSlideBody'), ...beatArr(beat, 2, 'AppendNoteSlideBody')));
   def('SetNoteSlideBodyX', (n, i, x) => {
     native('setSegX', nid(n, 1, 'SetNoteSlideBodyX'), checkInt(i, 2, 'SetNoteSlideBodyX'), num(x, 3, 'SetNoteSlideBodyX'));
+  });
+  // このエディタ独自: スライドの seg を、平らな配列 ([整数部, 分子, 分母, x] を seg の数だけ並べたもの) で丸ごと置き換える。
+  //   並べ替えず、渡した順のまま入る (AppendNoteSlideBody + SetNoteSlideBodyX を seg の数だけ呼ぶのと同じ結果を、1回の往復で作る)
+  def('ReplaceNoteSlideBody', (n, flat) => {
+    const id = nid(n, 1, 'ReplaceNoteSlideBody');
+    if (!(flat instanceof LuaTable)) throw argErr(2, 'ReplaceNoteSlideBody', 'table expected, got ' + typeName(flat));
+    native('setSegs', id, flat.arr);
+  });
+  // このエディタ独自: ノーツをまとめて消す (引数は、ノーツの番号を並べた表)
+  def('DeleteNotes', (list) => {
+    if (!(list instanceof LuaTable)) throw argErr(1, 'DeleteNotes', 'table expected, got ' + typeName(list));
+    const ids = [];
+    for (let i = 0; i < list.arr.length; i++) ids.push(nid(list.arr[i], 1, 'DeleteNotes'));
+    native('deleteNotes', ids);
   });
   def('DeleteNoteSlideBody', (n, i) => {
     native('delSeg', nid(n, 1, 'DeleteNoteSlideBody'), i === undefined ? null : checkInt(i, 2, 'DeleteNoteSlideBody'));
