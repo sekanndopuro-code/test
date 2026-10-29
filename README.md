@@ -123,6 +123,8 @@
 - 拍表示は mc と同じ 0 始まり。x は中心座標(0〜255)、w は幅
 - 音源の同期: 音源位置 = 譜面時間 − offset(ms)  (editor.html と同じ)
 - オートセーブ: 編集の1.2秒後に元の .mc へ上書き + アプリ内 Documents/MalodySlideEditor/ にバックアップ
+  * **外で書き換えられたファイルは上書きしない**: 保存の直前に、mc の今の中身が「このエディタが最後に読んだ / 書いた中身」(`EditorState.baseline`) と同じか確かめる。違っていたら (Malody など別のアプリが編集して保存した) 書き込まずに止め、このエディタの内容を `<mc名>_editor_copy.mc` としてアプリ内 (Documents/MalodySlideEditor/) に残す
+  * アプリに戻ってきたとき (`didBecomeActive`) も同じ確認をする。未保存の変更が無ければ、ファイルの内容を自動で読み込み直す (Undo 履歴は空になる)。未保存の変更があるときは確認ダイアログ: 「Malody側の内容を読み込む」(エディタ側は `_editor_copy.mc` に残る) / 「このエディタの内容で上書き」(上書き前のファイルは `<mc名>_malody_copy.mc` に残る)。ダイアログの返事を待つあいだ、Quit ではエディタを閉じない
 - **Files アプリからプラグインを管理する**: Info.plist に `UIFileSharingEnabled` = YES と `LSSupportsOpeningDocumentsInPlace` = YES を入れて作った ipa なら、Files アプリの「このiPad内 > (アプリ名)」に Documents が見える。
   その中の `Plugins/` に .lua (サブフォルダに入れた .lua と画像もよい) を入れると使え、消すと一覧から消える。.zip は自動では展開されないので、アプリの「プラグイン(lua)を読み込む」から入れる。`MalodySlideEditor/` には譜面のバックアップが入る
 - mcz は `<mc名>/` フォルダ内に mc・音源・背景を無圧縮zipで格納 (書き出し)。読み込みは deflate の mcz も読める (`ZipReader`)

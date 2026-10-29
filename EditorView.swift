@@ -881,6 +881,12 @@ struct EditorView: View {
         } message: {
             Text("n を 2〜1024 の整数で (例: 48 → 1/48)")
         }
+        .alert("Malody側でファイルが変更されています", isPresented: $state.diskConflict) {
+            Button("Malody側の内容を読み込む") { state.resolveConflictLoadDisk() }
+            Button("このエディタの内容で上書き", role: .destructive) { state.resolveConflictOverwrite() }
+        } message: {
+            Text("このエディタを開いている間に、ほかのアプリ (Malody など) が譜面ファイルを書き換えました。上書きするとその編集が消えるので、保存を止めています。どちらを使っても、もう一方の内容はアプリ内に控えを残します。")
+        }
         .fullScreenCover(item: $state.testLaunch) { launch in
             TestPlayScreen(launch: launch) { state.testLaunch = nil }
         }

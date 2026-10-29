@@ -156,6 +156,9 @@ final class EditorState: ObservableObject {
     @Published var ghost: Ghost? = nil
     @Published var toast: String? = nil
     @Published var saveStatus = "保存済み"
+    /// Malody など、このエディタ以外がファイルを書き換えたことが分かったとき true。EditorView の確認ダイアログが開く
+    /// (このエディタが持っている譜面は古いので、そのまま保存すると Malody 側の編集が消える → 保存は止めている)
+    @Published var diskConflict = false
     @Published var metaOpen = false           // META を押した後の右ボタン列 (Back / Information / More / Review / Quit)。EDIT と同じく、アイコン列が入れ替わる
     @Published var reviewNoticeTick = 0       // review で重なりが見つからなかった回数。増えるたびに、画面の上に「0 issue found」が一瞬だけ出る (ReviewNotice.swift)
     @Published var sidePanel: SidePanel? = nil    // BPM / Effect / Information / SETTING の右ウィンドウ。出し入れは openSidePanel / closeSidePanel (横から滑って一瞬で出入りする)
@@ -321,6 +324,17 @@ final class EditorState: ObservableObject {
         var times: [TimePoint]
         var effects: [EffectPoint]
     }
+    /// 「このエディタが最後に読んだ / 書いた時点の、mc ファイルの中身」。
+    /// 保存の直前にファイルの今の中身とくらべて、違っていたら (= Malody などが書き換えた) 上書きしない。
+    /// 保存は別スレッドでも走るので、ロックで守る
+    private final class DiskBaseline {
+        private let lock = NSLock()
+        private var data: Data?
+        func get() -> Data? { lock.lock(); defer { lock.unlock() }; return data }
+        func set(_ d: Data?) { lock.lock(); data = d; lock.unlock() }
+    }
+    private let baseline = DiskBaseline()
+
     private var undoStack: [Snapshot] = []
     private var redoStack: [Snapshot] = []
 
@@ -342,6 +356,7 @@ final class EditorState: ObservableObject {
             self.snapDen = d
         }
         recomputeTotal()
+        baseline.set(try? Data(contentsOf: mcURL))     // 開いた時点のファイルの中身 (これと違っていたら、外で書き換えられた)
         let ud = UserDefaults.standard
         if let v = ud.object(forKey: "editor.musicVolume") as? Double { self.musicVolume = min(max(v, 0), 1) }
         if let v = ud.object(forKey: "editor.noteVolume") as? Double { self.noteVolume = min(max(v, 0), 1) }
@@ -371,6 +386,14 @@ final class EditorState: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             self?.saveNow()
+        }
+        // アプリに戻ってきたとき: 裏にいる間に Malody などが mc を書き換えていないか調べる
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.checkExternalChange()
         }
     }
 
@@ -856,11 +879,14 @@ final class EditorState: ObservableObject {
         let snapshot = chart
         let name = mcName
         let url = mcURL
+        let base = baseline
         EditorState.saveQueue.async { [weak self] in
-            let status = EditorState.writeChart(snapshot, name: name, url: url)
+            let r = EditorState.writeChart(snapshot, name: name, url: url, baseline: base)
             DispatchQueue.main.async {
-                guard let self = self, self.saveGeneration == gen else { return }
-                self.saveStatus = status
+                guard let self = self else { return }
+                if r.conflict { self.noteDiskConflict() }
+                guard self.saveGeneration == gen else { return }
+                self.saveStatus = r.status
             }
         }
     }
@@ -872,25 +898,146 @@ final class EditorState: ObservableObject {
         let snapshot = chart
         let name = mcName
         let url = mcURL
-        saveStatus = EditorState.saveQueue.sync { EditorState.writeChart(snapshot, name: name, url: url) }
+        let base = baseline
+        let r = EditorState.saveQueue.sync { EditorState.writeChart(snapshot, name: name, url: url, baseline: base) }
+        saveStatus = r.status
+        if r.conflict { noteDiskConflict() }
     }
 
-    /// 実際の書き込み。どのスレッドからでも呼べる。戻り値は、画面に出す保存の状態
-    private static func writeChart(_ chart: ChartData, name: String, url: URL) -> String {
+    /// 実際の書き込み。どのスレッドからでも呼べる。戻り値は、画面に出す保存の状態と、「外で書き換えられていたので上書きしなかった」か。
+    /// 書く前に、ファイルの今の中身が「最後に読んだ / 書いた中身 (baseline)」と同じか確かめる。
+    /// 違うとき (Malody などが書き換えた) は、元ファイルには書かない (Malody 側の編集を消さない)。
+    /// このエディタの内容は、アプリ内の別ファイル (<mc名>_editor_copy.mc) に残す
+    private static func writeChart(_ chart: ChartData, name: String, url: URL, baseline: DiskBaseline) -> (status: String, conflict: Bool) {
         do {
             let data = try chart.serialized()
-            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let dir = docs.appendingPathComponent("MalodySlideEditor", isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let dir = appFolder()
             try? data.write(to: dir.appendingPathComponent(name))
+            if let base = baseline.get(), let now = try? Data(contentsOf: url), now != base {
+                try? data.write(to: dir.appendingPathComponent(copyName(name, "editor")))
+                return ("外部で変更あり(上書きせず)", true)
+            }
             do {
                 try data.write(to: url)
-                return "保存済み"
+                baseline.set(data)
+                return ("保存済み", false)
             } catch {
-                return "元ファイルに書込不可(アプリ内に保存)"
+                return ("元ファイルに書込不可(アプリ内に保存)", false)
             }
         } catch {
-            return "保存失敗"
+            return ("保存失敗", false)
+        }
+    }
+
+    /// Documents/MalodySlideEditor/ (無ければ作る)
+    private static func appFolder() -> URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dir = docs.appendingPathComponent("MalodySlideEditor", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// 控えのファイル名。例: "03.mc" + "editor" → "03_editor_copy.mc"
+    private static func copyName(_ name: String, _ tag: String) -> String {
+        let base = (name as NSString).deletingPathExtension
+        return "\(base.isEmpty ? "chart" : base)_\(tag)_copy.mc"
+    }
+
+    // MARK: - 外部 (Malody など) がファイルを書き換えたときの処理
+
+    /// 保存したくても保存できていない変更があるか (保存の待ち / 失敗 / 外部変更で止めている)
+    private var hasUnsavedChanges: Bool { saveStatus != "保存済み" }
+
+    /// 保存を止めたことを、画面に知らせる (確認ダイアログを開く)
+    private func noteDiskConflict() {
+        if !diskConflict {
+            diskConflict = true
+            showToast("Malody側でファイルが変わっていたので、上書きしませんでした", seconds: 4)
+        }
+    }
+
+    /// アプリに戻ってきたときに呼ぶ。ファイルの中身が、最後に読んだ / 書いた中身と違っていたら:
+    ///  ・このエディタに未保存の変更が無い → Malody 側の内容を自動で読み込み直す (これで古い譜面のまま編集して上書きすることが無くなる)
+    ///  ・未保存の変更がある → どちらを使うか、確認ダイアログを出す
+    private func checkExternalChange() {
+        let url = mcURL
+        let base = baseline
+        EditorState.saveQueue.async { [weak self] in        // 保存と同じキュー: 書き込みの最中に比べない
+            guard let b = base.get(), let now = try? Data(contentsOf: url), now != b else { return }
+            DispatchQueue.main.async { self?.handleExternalChange(diskData: now) }
+        }
+    }
+
+    private func handleExternalChange(diskData: Data) {
+        if hasUnsavedChanges {
+            noteDiskConflict()
+        } else if reloadFromDisk(data: diskData) {
+            showToast("Malody側の変更を読み込み直しました", seconds: 3)
+        }
+    }
+
+    /// ファイルの内容で、譜面を丸ごと読み込み直す (Undo の履歴・選択はリセット)。読めなかったら false で、何も変えない
+    @discardableResult
+    private func reloadFromDisk(data: Data) -> Bool {
+        guard var c = try? ChartData.parse(data) else {
+            showToast("ファイルを読み込み直せませんでした")
+            return false
+        }
+        if isPlaying { pause() }
+        saveWork?.cancel()                                // 予約済みの自動保存は取り消す (読み込んだ内容を、また書き直す必要は無い)
+        saveGeneration += 1
+        c.times.sort { $0.beat < $1.beat }
+        c.notesRevision = chart.notesRevision &+ 1        // ノーツの索引 (NoteIndex) を必ず作り直させる
+        memoPos = -1
+        chart = c
+        timeMap = TimeMap(c.times)
+        if let d = c.testInt("divide"), Self.divideRange.contains(d) { snapDen = d }
+        undoStack.removeAll()
+        redoStack.removeAll()
+        undoCount = 0
+        redoCount = 0
+        selectedIDs = []
+        orderIDs = []
+        modifySlideID = nil
+        modifySegIndex = nil
+        slideDraft = nil
+        ghost = nil
+        rangeStart = nil
+        rangeEnd = nil
+        lassoPoints = []
+        keyDirty = true
+        baseline.set(data)
+        saveStatus = "保存済み"
+        diskConflict = false
+        scheduleWarm()
+        recomputeTotal()
+        return true
+    }
+
+    /// ダイアログ「Malody側の内容を読み込む」: このエディタの内容は <mc名>_editor_copy.mc に残してから、ファイルの内容を読み込む
+    func resolveConflictLoadDisk() {
+        if let mine = try? chart.serialized() {
+            try? mine.write(to: Self.appFolder().appendingPathComponent(Self.copyName(mcName, "editor")))
+        }
+        guard let d = try? Data(contentsOf: mcURL) else {
+            showToast("ファイルを読み込めませんでした")
+            return
+        }
+        if reloadFromDisk(data: d) {
+            showToast("読み込みました。エディタ側の内容は \(Self.copyName(mcName, "editor")) に残してあります", seconds: 4)
+        }
+    }
+
+    /// ダイアログ「このエディタの内容で上書き」: ファイルの今の内容を <mc名>_malody_copy.mc に残してから、このエディタの内容で上書きする
+    func resolveConflictOverwrite() {
+        diskConflict = false
+        if let d = try? Data(contentsOf: mcURL) {
+            try? d.write(to: Self.appFolder().appendingPathComponent(Self.copyName(mcName, "malody")))
+            baseline.set(d)                       // 「今のファイルの内容を承知で上書きする」
+        }
+        saveNow()
+        if saveStatus == "保存済み" {
+            showToast("上書きしました。上書き前の内容は \(Self.copyName(mcName, "malody")) に残してあります", seconds: 4)
         }
     }
 

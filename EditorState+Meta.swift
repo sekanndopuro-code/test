@@ -77,6 +77,7 @@ extension EditorState {
     func quitEditor() {
         if isPlaying { pause() }
         saveNow()
+        if diskConflict { return }     // Malody 側が書き換えていて保存を止めたとき: 確認ダイアログの返事を待つ (閉じると、このエディタの編集が消える)
         onClose?()
     }
 }
