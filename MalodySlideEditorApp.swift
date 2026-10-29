@@ -7,6 +7,8 @@ struct MalodySlideEditorApp: App {
             RootView()
                 .preferredColorScheme(.dark)
                 .statusBarHidden(true)
+                .persistentSystemOverlays(.hidden)   // ホームバーを自動で隠す
+                .defersSystemGestures(on: .bottom)   // 下端スワイプは1回目を無視(2回目でホームへ)
         }
     }
 }
