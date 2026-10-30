@@ -305,7 +305,7 @@ extension EditorState {
 
     /// 移動前の位置を基準に、指の移動量ぶんだけ動かす。
     /// 縦: 触れたノーツがスナップ(1/n拍)に乗るよう移動量を決め、選択中の全ノーツを同じ量だけ動かす (ノーツ同士の相対位置は保つ)。
-    /// 横: グリッド有効時は、SETTING の「常にノーツの中心を合わせる」がオンなら、ノーツごとに中心を最寄りのグリッド線へ吸着 (applyCenteredMove)。
+    /// 横: グリッド有効時は、SETTING の「常にノーツの中心を合わせる」がオンなら、始点の中心だけを最寄りのグリッド線へ吸着 (seg は始点との相対位置を保つ。applyCenteredMove)。
     ///     オフなら、移動量をグリッド1マス単位に丸めた固定変位。どちらも x:0...255 から (いまより) はみ出さないように止める。
     private func applyMove(start: CGPoint, current: CGPoint, g: LaneGeo) {
         // 対象のノーツが入れ替わっていたら (別の指で Undo された等) 中止する
@@ -347,30 +347,55 @@ extension EditorState {
     }
 
     /// 中心をグリッド線に合わせる移動 (gridCenterAlign がオン)。
-    /// スライドは、始点と各 seg の中心を、それぞれ最寄りのグリッド線に吸着させる (seg は始点からの相対値で持つので、新しい始点との差を入れ直す)。
+    /// グリッドに吸着させるのは **始点 (ノーツ本体) の中心だけ**。
+    /// スライドの seg は吸着させず、始点との相対位置 (seg.x) をそのまま保つ (始点が動いたぶん、seg も同じだけ平行移動する)。
     /// 拍 (縦) の移動は、これまでどおり 1/n 拍の移動量を全ノーツ共通で足す
     private func applyCenteredMove(rawX: Double, delta: Beat) {
         moveLastDelta = delta
         moveLastDX = 0
         for t in moveTargets {
             let orig = t.orig
-            let head = centeredMoveX(from: orig.x, rawX: rawX, widthUnits: orig.w)
-            var segs = orig.segs
-            for k in segs.indices {
-                let ax = centeredMoveX(from: orig.x + orig.segs[k].x, rawX: rawX, widthUnits: orig.w)
-                segs[k].x = ax - head
+            var head = centeredMoveX(from: orig.x, rawX: rawX, widthUnits: orig.w)
+            if !orig.segs.isEmpty {
+                head = keepSegsInLane(head: head, orig: orig)
             }
             let newBeat = orig.beat + delta
             let cur = chart.notes[t.index]
-            var same = (cur.beat == newBeat && cur.x == head && cur.segs.count == segs.count)
-            if same {
-                for k in segs.indices where cur.segs[k].x != segs[k].x { same = false; break }
-            }
-            if same { continue }                    // 前の指の位置と結果が同じなら、書き込まない (高密度のスライドでも軽いように)
+            if cur.beat == newBeat && cur.x == head { continue } // 前の指の位置と結果が同じなら、書き込まない (高密度のスライドでも軽いように)
             chart.notes[t.index].beat = newBeat
             chart.notes[t.index].x = head
-            if !segs.isEmpty { chart.notes[t.index].segs = segs }
+            // seg は始点からの相対値なので書き換えない (segs は動かす前のまま)
         }
+    }
+
+    /// seg の中心が、動かす前よりレーン (0...255) の外へはみ出さないように、始点の x を止める。
+    /// 止めるときも、始点はグリッド線の上に置く (範囲に収まる、いちばん近いグリッド線)。
+    /// 範囲は snapNote / centeredMoveX と同じ (幅を 1マスの整数倍に丸めたときに、端がレーンから出ない中心)。
+    /// もともと範囲の外にある seg は、いまの位置までは許す
+    private func keepSegsInLane(head: Int, orig: Note) -> Int {
+        var relMin = 0
+        var relMax = 0
+        for s in orig.segs {
+            relMin = min(relMin, s.x)
+            relMax = max(relMax, s.x)
+        }
+        let n = max(1, gridLines)
+        let cell = 255.0 / Double(n)
+        let cells = min(n, max(1, Int((Double(orig.w) / cell).rounded())))
+        let lo = Int(ceil(Double(cells) / 2.0))
+        let hi = n - lo
+        if lo > hi { return head } // レーンいっぱいの幅 (centeredMoveX がレーンの真ん中に置くケース)
+
+        let minAbs = min(gridLineX(lo), orig.x + relMin) // 点の中心として許される左端 (もともと外なら、いまの位置まで)
+        let maxAbs = max(gridLineX(hi), orig.x + relMax) // 同じく右端
+        func fits(_ h: Int) -> Bool { h + relMin >= minAbs && h + relMax <= maxAbs }
+
+        if fits(head) { return head }
+        var idx = nearestGridIndex(Double(head))
+        while idx > 0 && gridLineX(idx) + relMax > maxAbs { idx -= 1 }
+        while idx < n && gridLineX(idx) + relMin < minAbs { idx += 1 }
+        let h = gridLineX(idx)
+        return fits(h) ? h : orig.x // どのグリッド線も収まらないとき (もともとグリッド外のスライド) は動かさない
     }
 
     /// 動かす前の中心 origX (絶対座標) を、指の移動量 rawX だけ動かした位置の、いちばん近いグリッド線の x にする。
