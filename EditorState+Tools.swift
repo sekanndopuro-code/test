@@ -729,7 +729,9 @@ extension EditorState {
     func noteHit(_ n: Note, at p: CGPoint, g: LaneGeo) -> Bool {
         let y0 = g.py(n.beat.value)
         let cx = g.px(Double(n.x))
-        let hw = CGFloat(n.w) / 255.0 * g.trackW / 2.0
+        // 幅が細いノーツ (幅 8 未満) でも触れるように、当たり判定だけは最低でも幅 8 として扱う (見た目の幅は変えない)
+        let minHitW: CGFloat = 8
+        let hw = max(CGFloat(n.w), minHitW) / 255.0 * g.trackW / 2.0
         // タップ / ウィップの棒は、拍の線より barLift だけ上に描かれる (LaneRenderer.barLift)。当たり判定も棒に合わせる。
         // スライドの始点には棒が無いので、点の位置 (拍の線の上) のまま
         let yBar = n.isSlide ? y0 : y0 - LaneRenderer.barLift

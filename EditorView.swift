@@ -217,7 +217,7 @@ struct LaneView: View {
     }
 }
 
-/// レーンに合わせたノーツ幅スライダー (4〜255)
+/// レーンに合わせたノーツ幅スライダー (1〜255)
 /// 座標は LaneView と同じ (左端 = レーンビューの左端)。x = trackL + 幅/255 × trackW が、帯の右端
 struct LaneWidthSlider: View {
     @Binding var value: Int
@@ -232,7 +232,7 @@ struct LaneWidthSlider: View {
     static let barHeight: CGFloat = 18           // 帯の高さ (本家の実測 約 18pt)
     static let barBottom: CGFloat = 19           // 帯の下端から画面の下端までの距離 (本家の実測 約 19pt)
 
-    private let minValue = 4
+    private let minValue = 1
     private let maxValue = 255
 
     private func xOf(_ v: Int) -> CGFloat {
