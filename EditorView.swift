@@ -228,9 +228,13 @@ struct LaneWidthSlider: View {
     @State private var grab: CGFloat? = nil      // 帯の右端を掴んだときの、指と右端のずれ
     @GestureState private var touching = false   // 指が触れている間だけ true (取り消されても自動で false に戻る)
 
-    static let touchHeight: CGFloat = 52         // 指で触れる範囲の高さ (画面の下端から)
+    static let touchHeight: CGFloat = 60         // 指で触れる範囲の高さ (画面の下端から。下端の edgeDead も含む)
     static let barHeight: CGFloat = 18           // 帯の高さ (本家の実測 約 18pt)
     static let barBottom: CGFloat = 19           // 帯の下端から画面の下端までの距離 (本家の実測 約 19pt)
+    /// 画面の下端のこの高さ (ホームバーの所) は、スライダーを始められない。ここから横になぞり始めると、
+    /// iPad がホームバーの操作 (アプリの切り替えなど) と見なして、スライダーが動かなくなるため。
+    /// 帯のすぐ下までなので、帯そのものは全部触れる
+    static let edgeDead: CGFloat = barBottom
 
     private let minValue = 1
     private let maxValue = 255
@@ -242,47 +246,57 @@ struct LaneWidthSlider: View {
     var body: some View {
         let hx = xOf(value)
         VStack(spacing: 0) {
-            Spacer(minLength: 0)
-            HStack(spacing: 0) {
-                Color.clear.frame(width: trackL, height: Self.barHeight)
-                // 左端 → 右端 (= ノーツの幅)。本家と同じ透明な白 (背景に対して約 50% の白)
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.white.opacity(0.5))
-                    .frame(width: max(0, hx - trackL), height: Self.barHeight)
-                Spacer(minLength: 0)
-            }
-            .padding(.bottom, Self.barBottom)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .updating($touching) { _, active, _ in active = true }
-                .onChanged { v in
-                    if grab == nil {
-                        // 帯の右端の近くを掴んだら、ずれを保ったまま動かす。それ以外はタッチした位置へ移る
-                        let tx = xOf(value)
-                        grab = abs(v.startLocation.x - tx) <= 26 ? tx - v.startLocation.x : 0
-                        onBegan()
-                    }
-                    let px = v.location.x + (grab ?? 0)
-                    let u = Int(((px - trackL) / trackW * 255.0).rounded())
-                    let nv = min(maxValue, max(minValue, u))
-                    if nv != value { value = nv }
+            // 操作できる範囲: 帯と、その上の余白。ここから始めたタッチだけがスライダーを動かす
+            // (始めたあとは、指が下の edgeDead へ下がっても動かし続けられる)
+            ZStack(alignment: .bottomLeading) {
+                Color.clear
+                HStack(spacing: 0) {
+                    Color.clear.frame(width: trackL, height: Self.barHeight)
+                    // 左端 → 右端 (= ノーツの幅)。本家と同じ透明な白 (背景に対して約 50% の白)
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.white.opacity(0.5))
+                        .frame(width: max(0, hx - trackL), height: Self.barHeight)
+                    Spacer(minLength: 0)
                 }
-                .onEnded { _ in
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .updating($touching) { _, active, _ in active = true }
+                    .onChanged { v in
+                        if grab == nil {
+                            // 帯の右端の近くを掴んだら、ずれを保ったまま動かす。それ以外はタッチした位置へ移る
+                            let tx = xOf(value)
+                            grab = abs(v.startLocation.x - tx) <= 26 ? tx - v.startLocation.x : 0
+                            onBegan()
+                        }
+                        let px = v.location.x + (grab ?? 0)
+                        let u = Int(((px - trackL) / trackW * 255.0).rounded())
+                        let nv = min(maxValue, max(minValue, u))
+                        if nv != value { value = nv }
+                    }
+                    .onEnded { _ in
+                        grab = nil
+                        onEnded()
+                    }
+            )
+            .onChange(of: touching) { active in
+                // システムジェスチャーや2本目の指でタッチが取り消されると、onEnded は届かない。
+                // そのまま grab が残ると、次のタッチで onBegan が呼ばれず、選択中のノーツの幅が変わらなくなる (onEnded は何度呼んでも安全)
+                if !active {
                     grab = nil
                     onEnded()
                 }
-        )
-        .onChange(of: touching) { active in
-            // システムジェスチャーや2本目の指でタッチが取り消されると、onEnded は届かない。
-            // そのまま grab が残ると、次のタッチで onBegan が呼ばれず、選択中のノーツの幅が変わらなくなる (onEnded は何度呼んでも安全)
-            if !active {
-                grab = nil
-                onEnded()
             }
+
+            // 画面の下端 (ホームバーの所): 何も起こさず、タッチだけ受ける (下のレーンに触れたことにならない)
+            Color.clear
+                .frame(height: Self.edgeDead)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0))
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

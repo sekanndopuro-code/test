@@ -107,7 +107,7 @@
 ## 枠 (レーンの幅) からはみ出したノーツの描画 / ホームバー
 - ノーツ (リボン・点・棒) は、レーンの幅の外 (左の帯・シークバー・右のボタン列の下) まで描く。本家と同じ見え方。`LaneView` (EditorView.swift) が、描画用の Canvas だけを左右に広げ (左は画面の左端まで、右はボタン列の幅 `RightPanel.width` ぶん)、座標はこれまでのレーンのまま左へ平行移動して描く。レーンの層は `EditorView` で `zIndex(-1)` にして、左の帯・シークバー・Adv. メニュー・右ボタン列より下に置いている。**当たり判定は変わらない**: タッチを受けるのはレーンの幅と同じ大きさの透明な層だけで、描画の Canvas は `allowsHitTesting(false)`
 - テストプレイ画面 (`TestPlay.swift`) のはみ出しは、まだ手を付けていない
-- ホームバー (画面下の白い横棒): `RootView` で `persistentSystemOverlays(.hidden)` (バーを隠す) と `defersSystemGestures(on: .bottom)` (下端からの1回目の上スワイプではホームへ戻らず、2回目で戻る) を付けている。`TestPlayScreen` にも同じ設定。iPadOS の「ゲームモード」(Info.plist の `GCSupportsGameMode` / `LSSupportsGameMode`) とは別の機能で、ホームバーには関係しない
+- ホームバー (画面下の横棒): `RootView` / `MalodySlideEditorApp` で `defersSystemGestures(on: .bottom)` だけを付けている (下端からの1回目の上スワイプではホームへ戻らず、2回目で戻る)。**バーは隠さない**: 隠す (`persistentSystemOverlays(.hidden)`) と、下端に触れた瞬間に白く出て反応するため。隠さずに遅延にすると、バーは半透明のまま残り、はっきり上へ持ち上げるまで反応しない (本家 Malody と同じ)。ノーツ幅スライダーは、画面の下端 19pt (`LaneWidthSlider.edgeDead`) から始まったタッチを受けない (そこから横になぞり始めると、iPad がホームバーの操作と見なすため)。`TestPlayScreen` は、まだ `persistentSystemOverlays(.hidden)` のまま。iPadOS の「ゲームモード」(Info.plist の `GCSupportsGameMode` / `LSSupportsGameMode`) とは別の機能で、ホームバーには関係しない
 
 ## 画面の下端 / 幅スライダー
 - `RootView` で、下の安全領域 (ホームインジケータの所) も無視して、UI を画面の下端まで続けている。本家は帯・シークバー・レーン・右ボタン列がすべて下端まで途切れない。再生ライン (シアンの横棒) は画面の高さの 91.3% (`LaneGeo.playY`。本家の実測)。右ボタン列の下の2つのアイコンも、本家と同じ位置 (中心が下端から 45pt) に置く
