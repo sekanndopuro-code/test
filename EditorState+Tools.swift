@@ -14,26 +14,19 @@ extension EditorState {
     /// グリッド有効時 (本家と同じ): 幅は 1マスの整数倍 (255 が割り切れない分は四捨五入)。
     /// **ノーツの中心** を、いちばん近いグリッド線に合わせる。幅が偶数マスなら両端もグリッド線の上に来るが、
     /// 奇数マス (例: 32 Grid で 7マス) のときは、両端がマスの半分ずれる (中心がグリッド線の上、が本家の動き)。
-    /// ノーツがレーン (0...255) の外にはみ出さない範囲で、いちばん近いグリッド線を選ぶ
+    /// 制限は「**中心** が 0...255 の外に出ない」ことだけ。ノーツの端 (幅の半分) はレーンからはみ出してよい
     func snapNote(centerX: Double, widthUnits wu: Int) -> (x: Int, w: Int) {
         if gridAlign && gridLines >= 1 {
             let n = gridLines
             let cell = 255.0 / Double(n)
             let cells = min(n, max(1, Int((Double(wu) / cell).rounded())))
             let w = max(1, Int((cell * Double(cells)).rounded()))
-            // 中心にできるグリッド線は j = lo ... hi (番号は左端の線が 0)。奇数マスなら、端の線から半マス内側までしか寄れない
-            let lo = Int(ceil(Double(cells) / 2.0))
-            let hi = n - lo
-            if lo > hi {
-                return (Int((255.0 / 2.0).rounded()), w)      // レーンいっぱいの幅で、中心を線に置けないとき (線の本数が奇数) はレーンの真ん中
-            }
-            let j = max(lo, min(hi, Int((centerX / cell).rounded())))
+            // 中心にできるグリッド線は j = 0 ... n (番号は左端の線が 0)。幅は関係ない
+            let j = max(0, min(n, Int((centerX / cell).rounded())))
             return (Int((cell * Double(j)).rounded()), w)
         } else {
             let w = max(1, min(255, wu))
-            var cx = Int(centerX.rounded())
-            let half = w / 2
-            cx = max(half, min(255 - half, cx))
+            let cx = max(0, min(255, Int(centerX.rounded())))
             return (cx, w)
         }
     }
@@ -289,8 +282,8 @@ extension EditorState {
                 minX = min(minX, sx)
                 maxX = max(maxX, sx)
             }
-            left = min(left, Double(minX) - Double(n.w) / 2.0)
-            right = max(right, Double(maxX) + Double(n.w) / 2.0)
+            left = min(left, Double(minX))      // ノーツの端ではなく、中心 (始点・seg の点) で数える
+            right = max(right, Double(maxX))
         }
         moveTargets = targets
         moveAnchorBeat = anchor
@@ -370,7 +363,7 @@ extension EditorState {
 
     /// seg の中心が、動かす前よりレーン (0...255) の外へはみ出さないように、始点の x を止める。
     /// 止めるときも、始点はグリッド線の上に置く (範囲に収まる、いちばん近いグリッド線)。
-    /// 範囲は snapNote / centeredMoveX と同じ (幅を 1マスの整数倍に丸めたときに、端がレーンから出ない中心)。
+    /// 範囲は snapNote / centeredMoveX と同じ (中心が 0...255 の中。幅は関係ない)。
     /// もともと範囲の外にある seg は、いまの位置までは許す
     private func keepSegsInLane(head: Int, orig: Note) -> Int {
         var relMin = 0
@@ -380,14 +373,9 @@ extension EditorState {
             relMax = max(relMax, s.x)
         }
         let n = max(1, gridLines)
-        let cell = 255.0 / Double(n)
-        let cells = min(n, max(1, Int((Double(orig.w) / cell).rounded())))
-        let lo = Int(ceil(Double(cells) / 2.0))
-        let hi = n - lo
-        if lo > hi { return head } // レーンいっぱいの幅 (centeredMoveX がレーンの真ん中に置くケース)
 
-        let minAbs = min(gridLineX(lo), orig.x + relMin) // 点の中心として許される左端 (もともと外なら、いまの位置まで)
-        let maxAbs = max(gridLineX(hi), orig.x + relMax) // 同じく右端
+        let minAbs = min(0, orig.x + relMin)     // 点の中心として許される左端 (もともと外なら、いまの位置まで)
+        let maxAbs = max(255, orig.x + relMax)   // 同じく右端
         func fits(_ h: Int) -> Bool { h + relMin >= minAbs && h + relMax <= maxAbs }
 
         if fits(head) { return head }
@@ -400,23 +388,13 @@ extension EditorState {
 
     /// 動かす前の中心 origX (絶対座標) を、指の移動量 rawX だけ動かした位置の、いちばん近いグリッド線の x にする。
     /// ・指がまだ横へ半マス分も動いていないあいだは、動かさない (縦にだけ動かしたとき、グリッドに乗っていないノーツの x が勝手にずれないように)
-    /// ・ノーツがレーン (0...255) の外へ、いまよりはみ出す線は選ばない (幅は snapNote と同じく 1マスの整数倍に丸めて数える)。
-    ///   もともとはみ出しているノーツは、いまの位置か、内側の線までは動ける
+    /// ・**中心** がレーン (0...255) の外へ出る線は選ばない。ノーツの端 (幅の半分) のはみ出しは気にしない (幅は関係ない)
     private func centeredMoveX(from origX: Int, rawX: Double, widthUnits wu: Int) -> Int {
         let n = max(1, gridLines)
         let cell = 255.0 / Double(n)
         if abs(rawX) < cell / 2 { return origX }
-        let cells = min(n, max(1, Int((Double(wu) / cell).rounded())))
-        let lo = Int(ceil(Double(cells) / 2.0))
-        let hi = n - lo
-        if lo > hi {
-            return Int((255.0 / 2.0).rounded())       // snapNote と同じ: レーンいっぱいの幅で中心を線に置けないときは、レーンの真ん中
-        }
-        let idx0 = nearestGridIndex(Double(origX))
-        let idx = nearestGridIndex(Double(origX) + rawX)
-        let low = min(lo, idx0)
-        let high = max(hi, idx0)
-        return gridLineX(max(low, min(high, idx)))
+        let idx = nearestGridIndex(Double(origX) + rawX)    // 0 ... n に収まる
+        return gridLineX(idx)
     }
 
     private func snapDeltaX(_ raw: Double) -> Int {
