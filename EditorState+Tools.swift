@@ -1209,7 +1209,7 @@ extension EditorState {
 
     /// 同じ拍・同じ種類の effect があれば値を置き換え、無ければ追加する (scroll と jump は同じ拍に並べてよい)
     func addOrReplaceEffect(beat: Beat, kind: EffectPoint.Kind, value: Double) {
-        if beat.value < 0 || !value.isFinite { return }
+        if !value.isFinite { return }        // 拍はマイナスも可 (曲の頭より前の effect)
         pushUndo()
         if let idx = chart.effects.firstIndex(where: { $0.beat == beat && $0.kind == kind }) {
             chart.effects[idx].value = value

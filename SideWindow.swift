@@ -459,8 +459,9 @@ private struct EffectWindowContent: View {
                 }
                 HStack(spacing: 24) {
                     SideButton(title: "Add") {
-                        let text = valueText.trimmingCharacters(in: .whitespaces)
-                        if let b = Beat.parse(beatText), b.value >= 0, let v = Double(text), v.isFinite {
+                        let text = valueText.normalizedForNumberInput
+                        // 拍はマイナスも可 (曲の頭より前に置く effect)。値のマイナスは、scroll なら逆走 / jump なら奥へ戻る
+                        if let b = Beat.parse(beatText), let v = Double(text), v.isFinite {
                             state.addOrReplaceEffect(beat: b, kind: kind, value: v)
                             if let i = state.chart.effects.firstIndex(where: { $0.beat == b && $0.kind == kind }) {
                                 selected = i
