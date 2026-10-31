@@ -7,7 +7,8 @@ import Foundation
 //     (GetUserOption / ReadBytesSelect / DecodeImage / ChartInfo / ClearSelection を使う。PluginBridge / LuaEngineSource に実装)
 //   ・join_end_to_start / fold_join / branch_join: editor.html の「終点と始点を繋げる」「折り返し敷」「枝分かれ敷」を Lua にしたもの
 //     (branch_join は、新しい仕様の版 (幹・枝とも、すでに枝分かれ敷を使ったスライドでよい / 装飾の始点が本体より早くてもよい)。
-//      seg が多いときは、PluginBridge の segAll / setSegs / deleteNotes (まとめて読み書き) を使って速くしている)
+//      join_end_to_start / fold_join / branch_join は、seg が多いときも速いように、PluginBridge の segAll / setSegs / deleteNotes
+//      (まとめて読み書き) を使い、seg は平らな配列で持つ)
 //     (Order ボタンの「順番に選択」を使う。バグスライド = beat の重複は、常に許す)
 // 追加したいプラグインは、Adv. メニューの「プラグイン(lua)を読み込む」から入れられます (.lua / .zip / 画像)。
 // ============================================================
@@ -712,6 +713,12 @@ end
   前のスライドの終点 → 次のスライドの始点 を一直線に繋いで、最も早いスライド1本にまとめる (ほかのスライドは消える)。
   各スライドの中の seg の並び (逆走・折り返し・マイナス beat) には一切手を付けない。
   境目の beat が重複しても、そのまま残す (バグスライドを許す)。
+
+  速さ (seg が何万個もあるとき):
+    ・Editor の呼び出しを seg ごとにやると、往復が多すぎて遅い。
+      このエディタ独自の GetNoteSlideBodyAll / ReplaceNoteSlideBody / DeleteNotes があれば、スライド1本につき1回の往復で済ませる。
+      (本物の Malody V などでは、これらが無いので、従来どおり seg を1個ずつ読み書きする)
+    ・seg ごとに Lua の表を作ると重いので、seg は「整数部, 分子, 分母, x」を4つずつ並べた平らな配列で持つ
 ]]
 PluginName='終点と始点を繋げる'
 PluginMode=7
@@ -721,7 +728,7 @@ local SLIDE = 2048            -- GetNoteType の戻り値 (スライド)
 local MAX_BEAT_DEN = 1048576  -- beat の分母の上限 (これを超える分母は 1/1048576 拍に丸める)
 local EPS = 1e-10
 
--- ---- beat 計算 (beat は {整数部, 分子, 分母} の配列。API とやりとりするときだけ表にする) ----
+-- ---- beat 計算 (beat は {整数部, 分子, 分母}。seg は「整数部, 分子, 分母, x」を並べた平らな配列で持つ) ----
 local function gcd(a, b)
   a = math.abs(a)
   b = math.abs(b)
@@ -732,24 +739,45 @@ local function gcd(a, b)
   return a
 end
 
-local function capBeat(m, n, d)
+-- beat (m + n/d) を約分して、buf[o+1], buf[o+2], buf[o+3] に書き込む。
+-- 分母が上限を超えるときは 1/1048576 拍に丸める
+local function capBeatInto(buf, o, m, n, d)
   if d <= 0 then d = 1 end
   if d <= MAX_BEAT_DEN then
-    if n == 0 then return { m, 0, 1 } end
+    if n == 0 then
+      buf[o + 1] = m
+      buf[o + 2] = 0
+      buf[o + 3] = 1
+      return
+    end
     local g = gcd(n, d)
-    return { m, n / g, d / g }
+    buf[o + 1] = m
+    buf[o + 2] = n / g
+    buf[o + 3] = d / g
+    return
   end
   local newNum = math.floor(n / d * MAX_BEAT_DEN + 0.5)
   if newNum >= MAX_BEAT_DEN then
     m = m + 1
     newNum = 0
   end
-  if newNum == 0 then return { m, 0, 1 } end
+  if newNum == 0 then
+    buf[o + 1] = m
+    buf[o + 2] = 0
+    buf[o + 3] = 1
+    return
+  end
   local g = gcd(newNum, MAX_BEAT_DEN)
-  return { m, newNum / g, MAX_BEAT_DEN / g }
+  buf[o + 1] = m
+  buf[o + 2] = newNum / g
+  buf[o + 3] = MAX_BEAT_DEN / g
 end
 
-local function copyBeat(b) return { b[1], b[2], b[3] } end
+local function capBeat(m, n, d)
+  local t = {}
+  capBeatInto(t, 0, m, n, d)
+  return t
+end
 
 local function beatPoint(b) return b[1] + b[2] / b[3] end
 
@@ -767,15 +795,13 @@ local function beatDiff(b1, b2)
   return capBeat(m, n, den)
 end
 
--- b1 + b2 (b1 が負の相対 beat でもよい)
-local function beatAdd(b1, b2)
-  local m1, n1, d1 = b1[1], b1[2], b1[3]
-  local m2, n2, d2 = b2[1], b2[2], b2[3]
+-- (m1 n1/d1) + (m2 n2/d2) を buf[o+1..o+3] に書き込む (b1 が負の相対 beat でもよい。seg の点ごとに表を作らない)
+local function beatAddInto(buf, o, m1, n1, d1, m2, n2, d2)
   local den = d1 * d2
   local num = n1 * d2 + n2 * d1
   local n = num % den
   local m = m1 + m2 + (num - n) / den
-  return capBeat(m, n, den)
+  capBeatInto(buf, o, m, n, den)
 end
 
 -- ---- エディタとのやりとり ----
@@ -783,10 +809,6 @@ local function readBeat(t)
   local d = t.denom
   if d == nil or d < 1 then d = 1 end
   return { t.beat or 0, t.numor or 0, d }
-end
-
-local function toBeatTable(b)
-  return { beat = b[1], numor = b[2], denom = b[3] }
 end
 
 -- Editor の「ノーツの配列」(.Length と 0 始まりの添字) を、Lua の普通の配列にする
@@ -800,6 +822,11 @@ local function toList(arr)
   return list
 end
 
+-- このエディタ独自の「まとめて読み書きする」API があるか (無い環境では、seg を1個ずつ読み書きする)
+local HAS_BULK_READ = Editor.GetNoteSlideBodyAll ~= nil
+local HAS_BULK_WRITE = Editor.ReplaceNoteSlideBody ~= nil
+local HAS_BULK_DELETE = Editor.DeleteNotes ~= nil
+
 -- 「順番に選択」(Order ボタン) でタップした順のノーツ。この機能が無い環境では空
 local function orderNotes()
   if Editor.GetOrderNotes == nil then return {} end
@@ -810,8 +837,30 @@ local function clearOrder()
   if Editor.ClearOrderNotes ~= nil then Editor:ClearOrderNotes() end
 end
 
+-- スライド1本の seg を全部読む。戻り値は (平らな配列, seg の数)。
+-- 平らな配列は「整数部, 分子, 分母, x」を seg の数だけ並べたもの
+local function readSegs(note)
+  if HAS_BULK_READ then
+    -- 1回の往復で受け取る (seg を1個ずつ読むと、何万個もあるとき遅い)
+    local flat = Editor:GetNoteSlideBodyAll(note)
+    return flat, flat.Length
+  end
+  local flat = {}
+  local o = 0
+  local segCount = Editor:GetNoteSlideBodyCount(note)
+  for k = 0, segCount - 1 do
+    local b = readBeat(Editor:GetNoteSlideBodyBeat(note, k))
+    flat[o + 1] = b[1]
+    flat[o + 2] = b[2]
+    flat[o + 3] = b[3]
+    flat[o + 4] = Editor:GetNoteSlideBodyX(note, k)
+    o = o + 4
+  end
+  return flat, segCount
+end
+
 -- ノーツの一覧から、スライドだけを読み出す。同じノーツは1回だけ。
--- 始点・x・seg の beat と x は、すべて数値にして持つ。order = 一覧の中での位置
+-- 始点・x は数値にして持つ。seg は平らな配列 (flat) と seg の数 (cnt)。order = 一覧の中での位置
 local function readSlides(notes)
   local list = {}
   local seen = {}
@@ -820,19 +869,15 @@ local function readSlides(notes)
     if not seen[note] then
       seen[note] = true
       if Editor:GetNoteType(note) == SLIDE then
-        local segs = {}
-        local segCount = Editor:GetNoteSlideBodyCount(note)
-        for k = 0, segCount - 1 do
-          segs[#segs + 1] = {
-            beat = readBeat(Editor:GetNoteSlideBodyBeat(note, k)),
-            x = Editor:GetNoteSlideBodyX(note, k)
-          }
-        end
+        local startBeat = readBeat(Editor:GetNoteBeat(note, true))
+        local flat, cnt = readSegs(note)
         list[#list + 1] = {
           note = note,
-          beat = readBeat(Editor:GetNoteBeat(note, true)),
+          beat = startBeat,
+          point = beatPoint(startBeat),
           x = Editor:GetNoteX(note),
-          segs = segs,
+          flat = flat,
+          cnt = cnt,
           order = #list + 1
         }
       end
@@ -844,8 +889,7 @@ end
 -- 始点 beat の早い順に並べる (同じ beat なら、一覧での並びのまま)
 local function sortByStart(list)
   table.sort(list, function(a, b)
-    local pa, pb = beatPoint(a.beat), beatPoint(b.beat)
-    if pa ~= pb then return pa < pb end
+    if a.point ~= b.point then return a.point < b.point end
     return a.order < b.order
   end)
 end
@@ -859,41 +903,64 @@ local function without(list, main)
   return out
 end
 
--- 本体スライドの seg を newSeg に置き換えて、本体以外のスライドを消す。「順番に選択」はリセットする
-local function commit(main, newSeg, slides)
-  Editor:DeleteNoteSlideBody(main.note)
-  -- 並べ替えずに、足した順のまま末尾に足す (beat が行ったり来たりする seg も、そのまま残る)
-  local add = Editor.AppendNoteSlideBody ~= nil and Editor.AppendNoteSlideBody or Editor.AddNoteSlideBody
-  for i = 1, #newSeg do
-    local s = newSeg[i]
-    add(Editor, main.note, toBeatTable(s.beat))
-    Editor:SetNoteSlideBodyX(main.note, i - 1, s.x)
-  end
-  for i = 1, #slides do
-    if slides[i] ~= main then
-      Editor:DeleteNote(slides[i].note)
+-- 本体スライドの seg を out (平らな配列。seg が count 個) に置き換えて、本体以外のスライドを消す。「順番に選択」はリセットする
+local function commit(main, out, count, slides)
+  if HAS_BULK_WRITE then
+    -- 並べ替えずに、1回の往復で丸ごと置き換える (beat が行ったり来たりする seg も、そのまま残る)
+    Editor:ReplaceNoteSlideBody(main.note, out)
+  else
+    Editor:DeleteNoteSlideBody(main.note)
+    -- 並べ替えずに、足した順のまま末尾に足す (beat が行ったり来たりする seg も、そのまま残る)
+    local add = Editor.AppendNoteSlideBody ~= nil and Editor.AppendNoteSlideBody or Editor.AddNoteSlideBody
+    local o = 0
+    for i = 1, count do
+      add(Editor, main.note, { beat = out[o + 1], numor = out[o + 2], denom = out[o + 3] })
+      Editor:SetNoteSlideBodyX(main.note, i - 1, out[o + 4])
+      o = o + 4
     end
+  end
+  local doomed = {}
+  for i = 1, #slides do
+    if slides[i] ~= main then doomed[#doomed + 1] = slides[i].note end
+  end
+  if HAS_BULK_DELETE then
+    if #doomed > 0 then Editor:DeleteNotes(doomed) end
+  else
+    for i = 1, #doomed do Editor:DeleteNote(doomed[i]) end
   end
   clearOrder()
 end
 
 local function mergeSequential(ordered)
   local main = ordered[1]
-  local newSeg = {}
+  local out = {}
+  local o = 0
+  local count = 0
   for i = 1, #ordered do
     local slide = ordered[i]
     local offsetX = slide.x - main.x
-    local baseBeat = beatDiff(slide.beat, main.beat)
+    local base = beatDiff(slide.beat, main.beat)
+    local bm, bn, bd = base[1], base[2], base[3]
     if i > 1 then
       -- 前のスライドの終点 → このスライドの始点、を繋ぐ点
-      newSeg[#newSeg + 1] = { beat = copyBeat(baseBeat), x = offsetX }
+      out[o + 1] = bm
+      out[o + 2] = bn
+      out[o + 3] = bd
+      out[o + 4] = offsetX
+      o = o + 4
+      count = count + 1
     end
-    for j = 1, #slide.segs do
-      local s = slide.segs[j]
-      newSeg[#newSeg + 1] = { beat = beatAdd(s.beat, baseBeat), x = s.x + offsetX }
+    local flat = slide.flat
+    local f = 0
+    for j = 1, slide.cnt do
+      beatAddInto(out, o, flat[f + 1], flat[f + 2], flat[f + 3], bm, bn, bd)
+      out[o + 4] = flat[f + 4] + offsetX
+      o = o + 4
+      f = f + 4
     end
+    count = count + slide.cnt
   end
-  commit(main, newSeg, ordered)
+  commit(main, out, count, ordered)
 end
 
 function Run()
@@ -911,8 +978,12 @@ function Run()
   end
   sortByStart(slides)
   Editor:StartBatch()
-  mergeSequential(slides)
+  local ok, err = pcall(mergeSequential, slides)
   Editor:FinishBatch()
+  if not ok then
+    Editor:ShowTip('❌ 終点と始点を繋げるのに失敗しました: ' .. tostring(err))
+    return
+  end
   Editor:ShowTip('✅ 終点と始点を繋げる: ' .. #slides .. '個を時系列順に結合しました')
 end
 """##),
@@ -928,6 +999,12 @@ end
     ・「順番に選択」で本体を1本選んで、LASSO などで装飾にするスライドも選ぶ → 装飾は始点 beat の早い順に結合する
     ・「順番に選択」を使わず、LASSO などでスライドを2本以上選ぶ → 始点がいちばん早いスライドが本体、残りは始点 beat の早い順
   境目の beat が重複しても、そのまま残す (バグスライドを許す)。
+
+  速さ (seg が何万個もあるとき):
+    ・Editor の呼び出しを seg ごとにやると、往復が多すぎて遅い。
+      このエディタ独自の GetNoteSlideBodyAll / ReplaceNoteSlideBody / DeleteNotes があれば、スライド1本につき1回の往復で済ませる。
+      (本物の Malody V などでは、これらが無いので、従来どおり seg を1個ずつ読み書きする)
+    ・seg ごとに Lua の表を作ると重いので、seg は「整数部, 分子, 分母, x」を4つずつ並べた平らな配列で持つ
 ]]
 PluginName='折り返し敷'
 PluginMode=7
@@ -937,7 +1014,7 @@ local SLIDE = 2048            -- GetNoteType の戻り値 (スライド)
 local MAX_BEAT_DEN = 1048576  -- beat の分母の上限 (これを超える分母は 1/1048576 拍に丸める)
 local EPS = 1e-10
 
--- ---- beat 計算 (beat は {整数部, 分子, 分母} の配列。API とやりとりするときだけ表にする) ----
+-- ---- beat 計算 (beat は {整数部, 分子, 分母}。seg は「整数部, 分子, 分母, x」を並べた平らな配列で持つ) ----
 local function gcd(a, b)
   a = math.abs(a)
   b = math.abs(b)
@@ -948,24 +1025,45 @@ local function gcd(a, b)
   return a
 end
 
-local function capBeat(m, n, d)
+-- beat (m + n/d) を約分して、buf[o+1], buf[o+2], buf[o+3] に書き込む。
+-- 分母が上限を超えるときは 1/1048576 拍に丸める
+local function capBeatInto(buf, o, m, n, d)
   if d <= 0 then d = 1 end
   if d <= MAX_BEAT_DEN then
-    if n == 0 then return { m, 0, 1 } end
+    if n == 0 then
+      buf[o + 1] = m
+      buf[o + 2] = 0
+      buf[o + 3] = 1
+      return
+    end
     local g = gcd(n, d)
-    return { m, n / g, d / g }
+    buf[o + 1] = m
+    buf[o + 2] = n / g
+    buf[o + 3] = d / g
+    return
   end
   local newNum = math.floor(n / d * MAX_BEAT_DEN + 0.5)
   if newNum >= MAX_BEAT_DEN then
     m = m + 1
     newNum = 0
   end
-  if newNum == 0 then return { m, 0, 1 } end
+  if newNum == 0 then
+    buf[o + 1] = m
+    buf[o + 2] = 0
+    buf[o + 3] = 1
+    return
+  end
   local g = gcd(newNum, MAX_BEAT_DEN)
-  return { m, newNum / g, MAX_BEAT_DEN / g }
+  buf[o + 1] = m
+  buf[o + 2] = newNum / g
+  buf[o + 3] = MAX_BEAT_DEN / g
 end
 
-local function copyBeat(b) return { b[1], b[2], b[3] } end
+local function capBeat(m, n, d)
+  local t = {}
+  capBeatInto(t, 0, m, n, d)
+  return t
+end
 
 local function beatPoint(b) return b[1] + b[2] / b[3] end
 
@@ -983,15 +1081,13 @@ local function beatDiff(b1, b2)
   return capBeat(m, n, den)
 end
 
--- b1 + b2 (b1 が負の相対 beat でもよい)
-local function beatAdd(b1, b2)
-  local m1, n1, d1 = b1[1], b1[2], b1[3]
-  local m2, n2, d2 = b2[1], b2[2], b2[3]
+-- (m1 n1/d1) + (m2 n2/d2) を buf[o+1..o+3] に書き込む (b1 が負の相対 beat でもよい。seg の点ごとに表を作らない)
+local function beatAddInto(buf, o, m1, n1, d1, m2, n2, d2)
   local den = d1 * d2
   local num = n1 * d2 + n2 * d1
   local n = num % den
   local m = m1 + m2 + (num - n) / den
-  return capBeat(m, n, den)
+  capBeatInto(buf, o, m, n, den)
 end
 
 -- ---- エディタとのやりとり ----
@@ -999,10 +1095,6 @@ local function readBeat(t)
   local d = t.denom
   if d == nil or d < 1 then d = 1 end
   return { t.beat or 0, t.numor or 0, d }
-end
-
-local function toBeatTable(b)
-  return { beat = b[1], numor = b[2], denom = b[3] }
 end
 
 -- Editor の「ノーツの配列」(.Length と 0 始まりの添字) を、Lua の普通の配列にする
@@ -1016,6 +1108,11 @@ local function toList(arr)
   return list
 end
 
+-- このエディタ独自の「まとめて読み書きする」API があるか (無い環境では、seg を1個ずつ読み書きする)
+local HAS_BULK_READ = Editor.GetNoteSlideBodyAll ~= nil
+local HAS_BULK_WRITE = Editor.ReplaceNoteSlideBody ~= nil
+local HAS_BULK_DELETE = Editor.DeleteNotes ~= nil
+
 -- 「順番に選択」(Order ボタン) でタップした順のノーツ。この機能が無い環境では空
 local function orderNotes()
   if Editor.GetOrderNotes == nil then return {} end
@@ -1026,8 +1123,30 @@ local function clearOrder()
   if Editor.ClearOrderNotes ~= nil then Editor:ClearOrderNotes() end
 end
 
+-- スライド1本の seg を全部読む。戻り値は (平らな配列, seg の数)。
+-- 平らな配列は「整数部, 分子, 分母, x」を seg の数だけ並べたもの
+local function readSegs(note)
+  if HAS_BULK_READ then
+    -- 1回の往復で受け取る (seg を1個ずつ読むと、何万個もあるとき遅い)
+    local flat = Editor:GetNoteSlideBodyAll(note)
+    return flat, flat.Length
+  end
+  local flat = {}
+  local o = 0
+  local segCount = Editor:GetNoteSlideBodyCount(note)
+  for k = 0, segCount - 1 do
+    local b = readBeat(Editor:GetNoteSlideBodyBeat(note, k))
+    flat[o + 1] = b[1]
+    flat[o + 2] = b[2]
+    flat[o + 3] = b[3]
+    flat[o + 4] = Editor:GetNoteSlideBodyX(note, k)
+    o = o + 4
+  end
+  return flat, segCount
+end
+
 -- ノーツの一覧から、スライドだけを読み出す。同じノーツは1回だけ。
--- 始点・x・seg の beat と x は、すべて数値にして持つ。order = 一覧の中での位置
+-- 始点・x は数値にして持つ。seg は平らな配列 (flat) と seg の数 (cnt)。order = 一覧の中での位置
 local function readSlides(notes)
   local list = {}
   local seen = {}
@@ -1036,19 +1155,15 @@ local function readSlides(notes)
     if not seen[note] then
       seen[note] = true
       if Editor:GetNoteType(note) == SLIDE then
-        local segs = {}
-        local segCount = Editor:GetNoteSlideBodyCount(note)
-        for k = 0, segCount - 1 do
-          segs[#segs + 1] = {
-            beat = readBeat(Editor:GetNoteSlideBodyBeat(note, k)),
-            x = Editor:GetNoteSlideBodyX(note, k)
-          }
-        end
+        local startBeat = readBeat(Editor:GetNoteBeat(note, true))
+        local flat, cnt = readSegs(note)
         list[#list + 1] = {
           note = note,
-          beat = readBeat(Editor:GetNoteBeat(note, true)),
+          beat = startBeat,
+          point = beatPoint(startBeat),
           x = Editor:GetNoteX(note),
-          segs = segs,
+          flat = flat,
+          cnt = cnt,
           order = #list + 1
         }
       end
@@ -1060,8 +1175,7 @@ end
 -- 始点 beat の早い順に並べる (同じ beat なら、一覧での並びのまま)
 local function sortByStart(list)
   table.sort(list, function(a, b)
-    local pa, pb = beatPoint(a.beat), beatPoint(b.beat)
-    if pa ~= pb then return pa < pb end
+    if a.point ~= b.point then return a.point < b.point end
     return a.order < b.order
   end)
 end
@@ -1075,49 +1189,81 @@ local function without(list, main)
   return out
 end
 
--- 本体スライドの seg を newSeg に置き換えて、本体以外のスライドを消す。「順番に選択」はリセットする
-local function commit(main, newSeg, slides)
-  Editor:DeleteNoteSlideBody(main.note)
-  -- 並べ替えずに、足した順のまま末尾に足す (beat が行ったり来たりする seg も、そのまま残る)
-  local add = Editor.AppendNoteSlideBody ~= nil and Editor.AppendNoteSlideBody or Editor.AddNoteSlideBody
-  for i = 1, #newSeg do
-    local s = newSeg[i]
-    add(Editor, main.note, toBeatTable(s.beat))
-    Editor:SetNoteSlideBodyX(main.note, i - 1, s.x)
-  end
-  for i = 1, #slides do
-    if slides[i] ~= main then
-      Editor:DeleteNote(slides[i].note)
+-- 本体スライドの seg を out (平らな配列。seg が count 個) に置き換えて、本体以外のスライドを消す。「順番に選択」はリセットする
+local function commit(main, out, count, slides)
+  if HAS_BULK_WRITE then
+    -- 並べ替えずに、1回の往復で丸ごと置き換える (beat が行ったり来たりする seg も、そのまま残る)
+    Editor:ReplaceNoteSlideBody(main.note, out)
+  else
+    Editor:DeleteNoteSlideBody(main.note)
+    -- 並べ替えずに、足した順のまま末尾に足す (beat が行ったり来たりする seg も、そのまま残る)
+    local add = Editor.AppendNoteSlideBody ~= nil and Editor.AppendNoteSlideBody or Editor.AddNoteSlideBody
+    local o = 0
+    for i = 1, count do
+      add(Editor, main.note, { beat = out[o + 1], numor = out[o + 2], denom = out[o + 3] })
+      Editor:SetNoteSlideBodyX(main.note, i - 1, out[o + 4])
+      o = o + 4
     end
+  end
+  local doomed = {}
+  for i = 1, #slides do
+    if slides[i] ~= main then doomed[#doomed + 1] = slides[i].note end
+  end
+  if HAS_BULK_DELETE then
+    if #doomed > 0 then Editor:DeleteNotes(doomed) end
+  else
+    for i = 1, #doomed do Editor:DeleteNote(doomed[i]) end
   end
   clearOrder()
 end
 
 local function mergeJoin(targets)
   local main = targets[1]
-  local newSeg = {}
+  local out = {}
+  local o = 0
+  local count = 0
   for i = 1, #targets do
     local slide = targets[i]
     local offsetX = slide.x - main.x
-    local baseBeat = beatDiff(slide.beat, main.beat)
-    local segs = slide.segs
+    local base = beatDiff(slide.beat, main.beat)
+    local bm, bn, bd = base[1], base[2], base[3]
+    local flat, cnt = slide.flat, slide.cnt
     if (i - 1) % 2 == 0 then
+      -- 順行
       if i > 1 then
-        newSeg[#newSeg + 1] = { beat = copyBeat(baseBeat), x = offsetX }
+        out[o + 1] = bm
+        out[o + 2] = bn
+        out[o + 3] = bd
+        out[o + 4] = offsetX
+        o = o + 4
+        count = count + 1
       end
-      for j = 1, #segs do
-        local s = segs[j]
-        newSeg[#newSeg + 1] = { beat = beatAdd(s.beat, baseBeat), x = s.x + offsetX }
+      local f = 0
+      for j = 1, cnt do
+        beatAddInto(out, o, flat[f + 1], flat[f + 2], flat[f + 3], bm, bn, bd)
+        out[o + 4] = flat[f + 4] + offsetX
+        o = o + 4
+        f = f + 4
       end
     else
-      for j = #segs, 1, -1 do
-        local s = segs[j]
-        newSeg[#newSeg + 1] = { beat = beatAdd(s.beat, baseBeat), x = s.x + offsetX }
+      -- 逆走して、このスライドの始点へ戻る
+      local f = (cnt - 1) * 4
+      for j = cnt, 1, -1 do
+        beatAddInto(out, o, flat[f + 1], flat[f + 2], flat[f + 3], bm, bn, bd)
+        out[o + 4] = flat[f + 4] + offsetX
+        o = o + 4
+        f = f - 4
       end
-      newSeg[#newSeg + 1] = { beat = copyBeat(baseBeat), x = offsetX }
+      out[o + 1] = bm
+      out[o + 2] = bn
+      out[o + 3] = bd
+      out[o + 4] = offsetX
+      o = o + 4
+      count = count + 1
     end
+    count = count + cnt
   end
-  commit(main, newSeg, targets)
+  commit(main, out, count, targets)
 end
 
 function Run()
@@ -1150,8 +1296,12 @@ function Run()
     return
   end
   Editor:StartBatch()
-  mergeJoin(targets)
+  local ok, err = pcall(mergeJoin, targets)
   Editor:FinishBatch()
+  if not ok then
+    Editor:ShowTip('❌ 折り返し結合に失敗しました: ' .. tostring(err))
+    return
+  end
   Editor:ShowTip('✅ 折り返し結合: ' .. #targets .. '本を処理しました')
 end
 """##),
