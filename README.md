@@ -45,7 +45,7 @@
 | PluginBridge.swift | Lua → エディタの橋渡し。`Editor:〇〇()` の中身 (ノーツ・BPM・effect・スプライト・クリック位置) はここ |
 | LuaEngine.swift | JavaScriptCore の起動と Lua の実行 (別スレッド・停止可能) |
 | LuaEngineSource.swift | **自動生成**。Lua→JavaScript 変換器 + Lua 標準ライブラリ + `Editor` の定義 (JavaScript) を文字列で埋め込んだもの |
-| BuiltinPlugins.swift | 内蔵プラグイン 6 つ (`quad_InOut` / `quad_OutIn` / `Join Slides (Fixed)` / `終点と始点を繋げる` / `折り返し敷` / `枝分かれ敷`) |
+| BuiltinPlugins.swift | 内蔵プラグイン 9 つ (`bm_ease` / `bm_img2hold` / `bm_select` (BetterMalody 用) と `quad_InOut` / `quad_OutIn` / `Join Slides (Fixed)` / `終点と始点を繋げる` / `折り返し敷` / `枝分かれ敷`) |
 | EditorState+Plugins.swift | プラグインの実行 (`runPlugin`) / 停止 (`stopPlugin`) と、Order ボタン (「順番に選択」) のタップ処理 (`orderTap`) |
 
 ## 起動画面のファイル選択 (RootView.swift)
@@ -230,6 +230,9 @@ EDIT の右ボタン列、**Order の下・More の上**に **Adv.** (λ) があ
 - **Undo**: 1回の実行 = Undo 1回分。↶ で実行前に丸ごと戻る
 - **print() の出力**はメニュー下部の「出力」欄に出る。エラーは「ファイル名:行番号: 内容」でダイアログに出る
 - **内蔵プラグイン** (`BuiltinPlugins.swift`): `quad_InOut` / `quad_OutIn` / `Join Slides (Fixed)` (添付された Malody V 用プラグイン) と、editor.html から移植した `終点と始点を繋げる` / `折り返し敷` / `枝分かれ敷` が最初から入っている (結合系は、上の Order ボタンの「順番に選択」を使う)
+- **BetterMalody 用の内蔵プラグイン** (添付された Lua をそのまま収録): `BM Ease effects` (カーソルから scroll を 16 種類のカーブで置く。入力は `scroll, 開始値, 終了値, 長さ(拍), 1拍あたりの点の数`) / `BM Image to holds (img2hold)` (画像を選ぶと、黒い部分を 1 幅のホールド (seg 1 個のスライド) に変える。カーソルの拍から上へ並ぶ。入力は `長さ(拍) 1拍あたりのtick 閾値(0-255) 反転(0/1)`) / `BM Select by filter` (種類・x・幅・拍の条件でノーツを選択。`slide x=10-50 !w=3-4` のように書く)。
+  * `hs` (Taiko 用) の effect はこのエディタには無いので、置かずに「未対応」に出す。Taiko / Key 用の指定 (`tap` `long` `lane=` `don` `ka` など) は、Slide の譜面には該当するノーツが無いので何も選ばれない
+  * img2hold は、画像を横 256 × 縦 (長さ × tick) に引き伸ばして白黒にする (`DecodeImage`)。細かい画像だと、ホールドの数が多すぎて時間がかかる (メニューの停止で止められる)
 
 ### 操作型プラグイン (PluginType 2。例: GizaSlide)
 `Run()` を1回実行する型とは別に、**押すと「アクティブ」になり、レーンのタッチを受け取り続ける**型に対応している。Adv. メニューでは、行に **ON** と出て、アイコン (`PluginIcon`) が付く。
@@ -286,7 +289,8 @@ Swift Playgrounds のアプリには Lua 本体 (C 言語) を組み込めない
 | **実装済み (操作型プラグイン GizaSlide で使用・動作確認済み)** | `GetClickX` `GetClickBeat` `GetClickBeatFree` `AddSprite` `RemoveModule` `FindModule` `MakeBeat` `GetNoteBeat(note, false)` (終点) |
 | **このエディタ独自 (本物の Malody V には無い)** | `GetOrderNotes` (Order ボタンで選んだ順のスライド) `ClearOrderNotes` (その順番をリセット) `GetNoteSlideBodyAll` (スライドの seg を全部、1回の往復で読む。戻り値は 1 始まりの平らな表で、`[整数部, 分子, 分母, x]` が seg の数だけ並び、`.Length` が seg の数) `ReplaceNoteSlideBody` (スライドの seg を、同じ形の平らな表で丸ごと置き換える。並べ替えない) `DeleteNotes` (ノーツの番号を並べた表を渡して、まとめて消す) `AppendNoteSlideBody` (seg を並べ替えず、足した順のまま末尾に足す。beat が行ったり来たりするバグスライド用) |
 | **実装済み (使い方は推測。実際のプラグインで確かめて調整)** | `GetCurrentTime` (ms) `GetSystemTime` `GetCurrentBeat` `GetCurrentDivide` `GetNoteCount` `GetNoteAt` `GetTimeCount` `GetTimeAt` `GetEffectCount` `GetEffectAt` `AddTime` `DeleteTime` `AddEffect` `DeleteEffect` `SelectNote` `SetGridLine` `SeekTo` `MakeBeat` `GetUserInput` |
-| **未対応 (呼ばれると、何もせず通過して、実行後にどれが呼ばれたかを表示)** | `GetNoteFlag` `GetNoteGroup` (どちらも 0 を返す) `SetNoteFlag` `SetNoteGroup` `WriteFilePlugin` `ReadFileSelect` `ReadBytesSelect` `ReadData` `WriteData` `WriteChartCustom` `CallShortcut` `GetUserSelect` `GetUserOption` `AddText` `AddSpriteUndo` `AddTextUndo` `RemoveSpriteUndo` |
+| **実装済み (BetterMalody 用の内蔵プラグインで使用。モックで動作確認)** | `GetUserOption` (題, 選択肢の表, コールバック。選んだ番号は 0 始まり。キャンセルではコールバックを呼ばない) `ReadBytesSelect` (「ファイル」アプリで1つ選ぶ。中身は 1文字 = 1バイトの文字列。キャンセルは nil) `DecodeImage` (画像を 幅×高さ の白黒に。1ピクセル = 1文字、上の行から。写真の向きは直す) `ChartInfo` (譜面の meta の値。mode など) `ClearSelection` / `AddEffect` は scroll・jump 以外の種類 (hs など) を未対応として通過 |
+| **未対応 (呼ばれると、何もせず通過して、実行後にどれが呼ばれたかを表示)** | `GetNoteFlag` `GetNoteGroup` (どちらも 0 を返す) `SetNoteFlag` `SetNoteGroup` `WriteFilePlugin` `ReadFileSelect` `ReadData` `WriteData` `WriteChartCustom` `CallShortcut` `GetUserSelect` `AddText` `AddSpriteUndo` `AddTextUndo` `RemoveSpriteUndo` |
 
 - `GetUserInput(題, 初期値, コールバック)`: OK を押したときだけ、答えの文字列を `コールバック(値)` に渡して呼ぶ (キャンセルでは呼ばない)。戻り値でも同じ文字列を返すので、コールバックを使わない書き方もできる。`(題, コールバック)` のように初期値を省いてもよい。`wipe2hold` のようにコールバックで受け取るプラグインは、この対応で動く (操作型プラグインの中では、これまでどおり nil が返り、コールバックは呼ばれない)
 - `GetNoteBeat(note, true)` は始点、`GetNoteBeat(note, false)` は終点 (スライドは、始点 + 最後の seg の相対 beat)。`GetNoteTime` も同じ

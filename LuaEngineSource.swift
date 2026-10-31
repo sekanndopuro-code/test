@@ -2398,6 +2398,13 @@ function native(name, ...args) {
 }
 R.native = native;
 
+// バイト列 (Uint8Array) -> 1文字 = 1バイトの文字列
+function bytesToStr(u8) {
+  let out = '';
+  for (let i = 0; i < u8.length; i += 8192) out += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+  return out;
+}
+
 function makeEditor() {
   const Ed = new LuaTable();
   const def = (name, fn) => {
@@ -2500,6 +2507,7 @@ function makeEditor() {
     let kind = 'scroll', value = 1;
     if (typeof a === 'string') { kind = a; if (b !== undefined) value = num(b, 3, 'AddEffect'); }
     else if (a !== undefined) { value = num(a, 2, 'AddEffect'); if (typeof b === 'string') kind = b; }
+    if (kind !== 'scroll' && kind !== 'jump') { native('unsupported', 'AddEffect(' + kind + ')'); return; }   // このエディタの effect は scroll / jump だけ (hs など Taiko 用は通過)
     native('addEffect', ...beatArr(beat, 1, 'AddEffect'), kind, value);
   });
   def('DeleteEffect', (i) => { native('delEffect', checkInt(i, 1, 'DeleteEffect')); });
@@ -2564,6 +2572,42 @@ function makeEditor() {
     return answer;
   });
 
+  // GetUserOption(題, 選択肢の表, コールバック): 選択肢の一覧から1つ選ばせる。コールバックには、選んだ番号 (0 始まり) を渡す。
+  //   キャンセルしたときは、コールバックを呼ばない (GetUserInput と同じ)。戻り値でも同じ番号を受け取れる
+  def('GetUserOption', (title, options, cb) => {
+    if (!(options instanceof LuaTable)) throw argErr(2, 'GetUserOption', 'table expected, got ' + typeOrNoValue(options));
+    const list = [];
+    for (let i = 0; i < options.arr.length; i++) list.push(tostr(options.arr[i]));
+    if (list.length === 0) return undefined;
+    const idx = native('option', title === undefined ? '' : tostr(title), list);
+    if (typeof cb === 'function' && idx !== undefined) call(cb, idx);
+    return idx;
+  });
+  // ReadBytesSelect(題, コールバック): 「ファイル」アプリでファイルを1つ選ばせて、中身を (1文字 = 1バイトの) 文字列で渡す。
+  //   キャンセル・読み込み失敗のときは nil を渡す (DecodeImage に渡して画像として読める)
+  def('ReadBytesSelect', (title, cb) => {
+    let fn = cb;
+    if (typeof title === 'function') fn = title;
+    const b64 = native('readBytes', typeof title === 'string' ? title : '');
+    const bytes = b64 === undefined ? undefined : bytesToStr(b64decode(b64));
+    if (typeof fn === 'function') call(fn, bytes);
+    return bytes;
+  });
+  // DecodeImage(画像のバイト列, 幅, 高さ): 画像を 幅 x 高さ に引き伸ばして、白黒 (0=黒〜255=白) にした文字列を返す。
+  //   上の行から順に、1ピクセル = 1文字 (string.byte(gray, y * 幅 + x + 1) で読める)。読めない画像は nil
+  def('DecodeImage', (bytes, w, h) => {
+    const s = checkStr(bytes, 1, 'DecodeImage');
+    const W = checkInt(w, 2, 'DecodeImage'), H = checkInt(h, 3, 'DecodeImage');
+    const u8 = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i) & 255;
+    const r = native('decodeImage', b64encode(u8), W, H);
+    return r === undefined ? undefined : bytesToStr(b64decode(r));
+  });
+  // ChartInfo(キー): 譜面のメタ情報 (mode / title / artist / version / creator など) を返す。無ければ nil
+  def('ChartInfo', (key) => native('chartInfo', key === undefined ? '' : tostr(key)));
+  // ClearSelection(): 選択中のノーツを全部解除する
+  def('ClearSelection', () => { native('clearSelect'); });
+
   // ----- スプライト (レーンの上に画像を重ねる。操作型プラグインのつまみなど) -----
   //   モジュールの .Beat (拍の表) / .X (中心。レーン幅に対する %) / .Width (幅。レーン幅に対する %) を書き換えると、すぐ画面に反映される
   const modules = new Map();
@@ -2600,8 +2644,8 @@ function makeEditor() {
   });
 
   // ----- まだ対応していない API (呼ばれたら画面で知らせる) -----
-  const unsupported = ['SetNoteFlag', 'SetNoteGroup', 'WriteFilePlugin', 'ReadFileSelect', 'ReadBytesSelect',
-    'ReadData', 'WriteData', 'WriteChartCustom', 'CallShortcut', 'GetUserSelect', 'GetUserOption',
+  const unsupported = ['SetNoteFlag', 'SetNoteGroup', 'WriteFilePlugin', 'ReadFileSelect',
+    'ReadData', 'WriteData', 'WriteChartCustom', 'CallShortcut', 'GetUserSelect',
     'AddText', 'AddSpriteUndo', 'AddTextUndo', 'RemoveSpriteUndo'];
   for (const name of unsupported) {
     Ed.set(name, function () { native('unsupported', name); return [undefined]; });

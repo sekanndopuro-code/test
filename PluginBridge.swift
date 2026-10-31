@@ -1,10 +1,12 @@
 import Foundation
+import CoreGraphics
+import ImageIO
 
 // Lua プラグイン (別スレッドで動く) から、メインスレッドの EditorState を触るための橋渡し。
 //   ・Lua 側の Editor:〇〇() は、JavaScript 側で native("コマンド名", 引数…) に変換されて、ここの handle に届く
 //   ・譜面を書き換えるコマンドは、メインスレッドで実行する (DispatchQueue.main.sync)
 //   ・1回の Run() = Undo 1回分。最初に書き換えたときに pushUndo し、Run() が終わる (または画面にダイアログを出す) ときに chartChanged を1回だけ呼ぶ
-//   ・ShowMessage / GetUserInput は、画面にダイアログを出して、答えが返るまで Lua 側を待たせる
+//   ・ShowMessage / GetUserInput / GetUserOption / ReadBytesSelect は、画面にダイアログ (ファイル選択) を出して、答えが返るまで Lua 側を待たせる
 
 /// 実行の中断 (停止ボタン) を、別スレッドから安全に読み書きするための旗
 final class PluginCancel {
@@ -29,6 +31,7 @@ final class PluginDialog: Identifiable {
     enum Kind {
         case message
         case input
+        case choice            // GetUserOption: 選択肢の一覧から1つ選ばせる (答えは、選んだ番号を文字列にしたもの)
     }
 
     let id = UUID()
@@ -36,13 +39,15 @@ final class PluginDialog: Identifiable {
     let title: String
     let message: String
     let defaultText: String
+    let options: [String]
     private var completion: ((String?) -> Void)?
 
-    init(kind: Kind, title: String, message: String, defaultText: String = "", completion: ((String?) -> Void)? = nil) {
+    init(kind: Kind, title: String, message: String, defaultText: String = "", options: [String] = [], completion: ((String?) -> Void)? = nil) {
         self.kind = kind
         self.title = title
         self.message = message
         self.defaultText = defaultText
+        self.options = options
         self.completion = completion
     }
 
@@ -159,6 +164,17 @@ final class PluginBridge {
             // 操作型プラグインはメインスレッドで動くので、答えを待てない: 表示だけして、すぐ続ける (入力は nil になる)
             if Thread.isMainThread { return dialogOnMain(parseArgs(argsJSON)) }
             return dialogCall(name, parseArgs(argsJSON))
+        case "option":
+            // GetUserOption: 一覧から選ばせる。答えが返るまで Lua 側を待たせる (操作型プラグインはメインスレッドで動くので、待てない: nil)
+            if Thread.isMainThread { return nullJSON }
+            return choiceCall(parseArgs(argsJSON))
+        case "readBytes":
+            // ReadBytesSelect: 「ファイル」アプリでファイルを1つ選ばせる。答えが返るまで Lua 側を待たせる
+            if Thread.isMainThread { return nullJSON }
+            return readBytesCall()
+        case "decodeImage":
+            // DecodeImage: 画像を 幅 x 高さ の白黒にする。時間がかかるので、メインスレッドには移さず、Lua のスレッドで行う
+            return decodeImage(parseArgs(argsJSON))
         case "tip":
             let a = parseArgs(argsJSON)
             let s = text(a, 0)
@@ -256,6 +272,103 @@ final class PluginBridge {
         sem.wait()
         if isInput, let s = answer { return json(s) }
         return nullJSON
+    }
+
+    /// GetUserOption: 選択肢の一覧を出して、選んだ番号 (0 始まり) を返す。キャンセルは nil
+    private func choiceCall(_ a: [Any]) -> String {
+        if state == nil { return nullJSON }
+        let title = text(a, 0)
+        let opts: [String] = ((arg(a, 1) as? [Any]) ?? []).map { ($0 as? String) ?? "" }
+        if opts.isEmpty { return nullJSON }
+        let sem = DispatchSemaphore(value: 0)
+        var answer: String? = nil
+        DispatchQueue.main.async { [weak self] in
+            guard let me = self, let st = me.state else {
+                sem.signal()
+                return
+            }
+            me.flushMain()
+            let d = PluginDialog(kind: .choice,
+                                 title: me.pluginName,
+                                 message: title,
+                                 options: opts) { r in
+                answer = r
+                sem.signal()
+            }
+            st.pluginDialog = d
+        }
+        sem.wait()
+        if let s = answer, let i = Int(s) { return json(i) }
+        return nullJSON
+    }
+
+    /// ReadBytesSelect: 「ファイル」アプリでファイルを1つ選ばせて、中身を base64 の文字列で返す (キャンセル・読めないときは nil)。
+    /// JavaScript 側が、これを「1文字 = 1バイトの文字列」にして Lua に渡す
+    private func readBytesCall() -> String {
+        if state == nil { return nullJSON }
+        let sem = DispatchSemaphore(value: 0)
+        var picked: Data? = nil
+        DispatchQueue.main.async { [weak self] in
+            guard let me = self, me.state != nil else {
+                sem.signal()
+                return
+            }
+            me.flushMain()
+            PluginFilePicker.present(multiple: false, cancelled: {
+                sem.signal()
+            }, completion: { urls in
+                if let u = urls.first {
+                    let scoped = u.startAccessingSecurityScopedResource()
+                    picked = try? Data(contentsOf: u)
+                    if scoped { u.stopAccessingSecurityScopedResource() }
+                }
+                sem.signal()
+            })
+        }
+        sem.wait()
+        guard let d = picked, d.count > 0, d.count <= 64 * 1024 * 1024 else { return nullJSON }
+        return json(d.base64EncodedString())
+    }
+
+    /// DecodeImage: 画像 (base64) を 幅 w x 高さ h に引き伸ばして、白黒 (0 = 黒 〜 255 = 白) の 1ピクセル 1バイトにして、base64 で返す。
+    /// 上の行から順に並ぶ。透明な所は白になる。写真の向き (EXIF) は直して読む。読めない画像は nil
+    private func decodeImage(_ a: [Any]) -> String {
+        guard let b64 = arg(a, 0) as? String,
+              let data = Data(base64Encoded: b64, options: [.ignoreUnknownCharacters]) else { return nullJSON }
+        let w = intv(a, 1)
+        let h = intv(a, 2)
+        if w < 1 || h < 1 || w > 4096 || h > 65536 || w * h > 64_000_000 { return nullJSON }
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nullJSON }
+        var maxSide = 4096
+        if let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+           let pw = props[kCGImagePropertyPixelWidth] as? Int,
+           let ph = props[kCGImagePropertyPixelHeight] as? Int {
+            maxSide = max(1, min(4096, max(pw, ph)))
+        }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxSide
+        ]
+        guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+                ?? CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nullJSON }
+        var buf = [UInt8](repeating: 255, count: w * h)
+        let ok: Bool = buf.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(data: raw.baseAddress,
+                                      width: w,
+                                      height: h,
+                                      bitsPerComponent: 8,
+                                      bytesPerRow: w,
+                                      space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
+            ctx.setFillColor(gray: 1, alpha: 1)
+            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            ctx.interpolationQuality = .high
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        if !ok { return nullJSON }
+        return json(Data(buf).base64EncodedString())
     }
 
     // MARK: - 引数・戻り値の変換
@@ -398,6 +511,21 @@ final class PluginBridge {
             return json(ids)
         case "noteCount":
             return json(st.chart.notes.count)
+        case "chartInfo":
+            // ChartInfo(キー): 譜面の meta の値 (mode / version / creator …)。無ければ meta.song の中 (title / artist …) も探す。無ければ nil
+            let key = text(a, 0)
+            let meta = st.chart.root["meta"]?.objectValue ?? [:]
+            guard let v = meta[key] ?? meta["song"]?.objectValue?[key] else { return nullJSON }
+            switch v {
+            case .string(let s): return json(s)
+            case .int(let i): return json(i)
+            case .double(let d): return json(d)
+            case .bool(let b): return json(b)
+            default: return nullJSON
+            }
+        case "clearSelect":
+            if !st.selectedIDs.isEmpty { st.selectedIDs.removeAll() }
+            return nullJSON
         case "noteAt":
             let ids = sortedIDs(st)
             let i = intv(a, 0)

@@ -253,15 +253,38 @@ struct PluginDialogCard: View {
                         .onSubmit { state.resolvePluginDialog(text) }
                         .onAppear { focused = true }
                 }
+                if dialog.kind == .choice {
+                    // GetUserOption: 選択肢の一覧 (多いときは縦にスクロール)。押したものの番号 (0 始まり) を答えにする
+                    ScrollView(.vertical) {
+                        VStack(spacing: 6) {
+                            ForEach(0..<dialog.options.count, id: \.self) { i in
+                                Button {
+                                    state.resolvePluginDialog(String(i))
+                                } label: {
+                                    Text(dialog.options[i])
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(.white)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 9)
+                                        .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.1)))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 300)
+                }
                 HStack(spacing: 12) {
-                    if dialog.kind == .input {
+                    if dialog.kind == .input || dialog.kind == .choice {
                         Button("キャンセル") { state.resolvePluginDialog(nil) }
                             .buttonStyle(.bordered)
                     }
-                    Button("OK") {
-                        state.resolvePluginDialog(dialog.kind == .input ? text : "")
+                    if dialog.kind != .choice {
+                        Button("OK") {
+                            state.resolvePluginDialog(dialog.kind == .input ? text : "")
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
             }
             .padding(16)

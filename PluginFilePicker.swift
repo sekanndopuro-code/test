@@ -11,15 +11,22 @@ import UniformTypeIdentifiers
 final class PluginFilePicker: NSObject, UIDocumentPickerDelegate {
     private static var current: PluginFilePicker?        // delegate は弱参照なので、選び終わるまで自分で持っておく
     private var completion: (([URL]) -> Void)?
+    private var cancelled: (() -> Void)?
 
-    /// ファイルアプリを開く。選び終わったら completion に URL の一覧を渡す (キャンセルしたら呼ばれない)
-    static func present(completion: @escaping ([URL]) -> Void) {
-        guard let top = topViewController() else { return }
+    /// ファイルアプリを開く。選び終わったら completion に URL の一覧を渡す。
+    /// キャンセルしたとき (開けなかったときも) は completion は呼ばれず、cancelled があればそれが呼ばれる。
+    /// multiple = false なら、1つだけ選ばせる (ReadBytesSelect 用)
+    static func present(multiple: Bool = true, cancelled: (() -> Void)? = nil, completion: @escaping ([URL]) -> Void) {
+        guard let top = topViewController() else {
+            cancelled?()
+            return
+        }
         let me = PluginFilePicker()
         me.completion = completion
+        me.cancelled = cancelled
         current = me
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.item], asCopy: true)
-        picker.allowsMultipleSelection = true
+        picker.allowsMultipleSelection = multiple
         picker.delegate = me
         top.present(picker, animated: true)
     }
@@ -39,12 +46,16 @@ final class PluginFilePicker: NSObject, UIDocumentPickerDelegate {
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         let c = completion
         completion = nil
+        cancelled = nil
         PluginFilePicker.current = nil
         c?(urls)
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        let c = cancelled
         completion = nil
+        cancelled = nil
         PluginFilePicker.current = nil
+        c?()
     }
 }

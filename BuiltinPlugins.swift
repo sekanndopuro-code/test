@@ -3,6 +3,8 @@ import Foundation
 // ============================================================
 // アプリに内蔵しているプラグイン。
 //   ・quad_InOut / quad_OutIn / join_slides_fixed: 添付された Malody V 用 Lua プラグインをそのまま収録
+//   ・bm_ease / bm_img2hold / bm_select: 添付された BetterMalody 用 Lua プラグイン (ease effects / 画像から hold / 条件で選択) をそのまま収録
+//     (GetUserOption / ReadBytesSelect / DecodeImage / ChartInfo / ClearSelection を使う。PluginBridge / LuaEngineSource に実装)
 //   ・join_end_to_start / fold_join / branch_join: editor.html の「終点と始点を繋げる」「折り返し敷」「枝分かれ敷」を Lua にしたもの
 //     (branch_join は、新しい仕様の版 (幹・枝とも、すでに枝分かれ敷を使ったスライドでよい / 装飾の始点が本体より早くてもよい)。
 //      seg が多いときは、PluginBridge の segAll / setSegs / deleteNotes (まとめて読み書き) を使って速くしている)
@@ -1707,6 +1709,252 @@ function Run()
     return
   end
   Editor:ShowTip('✅ 枝分かれ結合: ' .. (#branches + 1) .. '本を処理しました')
+end
+"""##),
+        Entry(fileName: "bm_ease.lua", source: ##"""
+--BetterMalody built-in: ease effects (scroll / hs) between two values along a curve, from the cursor position
+PluginName='BM Ease effects'
+PluginType=0
+PluginRequire="5.0.1"
+
+local function mk(inf)   -- inf: ease-in 関数 → { In, Out, In-Out }
+	return {
+		function(t) return inf(t) end,
+		function(t) return 1 - inf(1 - t) end,
+		function(t) if t < 0.5 then return 0.5 * inf(2 * t) end return 1 - 0.5 * inf(2 * (1 - t)) end,
+	}
+end
+local quad  = mk(function(t) return t * t end)
+local cubic = mk(function(t) return t * t * t end)
+local sine  = mk(function(t) return 1 - math.cos(t * math.pi / 2) end)
+local expo  = mk(function(t) if t <= 0 then return 0 end return 2 ^ (10 * (t - 1)) end)
+local circ  = mk(function(t) return 1 - math.sqrt(1 - t * t) end)
+local CURVES = {
+	{ 'Linear', function(t) return t end },
+	{ 'Quad In', quad[1] }, { 'Quad Out', quad[2] }, { 'Quad In-Out', quad[3] },
+	{ 'Cubic In', cubic[1] }, { 'Cubic Out', cubic[2] }, { 'Cubic In-Out', cubic[3] },
+	{ 'Sine In', sine[1] }, { 'Sine Out', sine[2] }, { 'Sine In-Out', sine[3] },
+	{ 'Expo In', expo[1] }, { 'Expo Out', expo[2] }, { 'Expo In-Out', expo[3] },
+	{ 'Circ In', circ[1] }, { 'Circ Out', circ[2] }, { 'Circ In-Out', circ[3] },
+}
+
+local function parse(s)
+	local f = {}
+	for w in tostring(s):gmatch('[^,%s]+') do f[#f + 1] = w end
+	local kind = 'scroll'
+	if f[1] == 'scroll' or f[1] == 'hs' then kind = f[1]; table.remove(f, 1) end
+	local v0, v1, len, div = tonumber(f[1]), tonumber(f[2]), tonumber(f[3]), tonumber(f[4]) or 16
+	if not v0 or not v1 or not len or len <= 0 or div < 1 then return nil end
+	return kind, v0, v1, len, math.floor(div)
+end
+
+local function apply(kind, v0, v1, len, div, curve)
+	local n = math.floor(len * div + 0.5)
+	if n < 1 then n = 1 end
+	if n > 1000 then Editor:ShowMessage('Too many points (' .. n .. '). Max 1000: shorten the range or lower the points per beat') return end
+	local start = Editor:GetCurrentBeat()
+	local f = CURVES[curve][2]
+	Editor:StartBatch()
+	for i = 0, n do
+		local t = i / n
+		local v = v0 + (v1 - v0) * f(t)
+		local b = Editor:BeatAdd(start, Editor:MakeBeat(i // div, i % div, div))
+		Editor:AddEffect(b, kind, v)
+	end
+	Editor:FinishBatch()
+	Editor:ShowMessage(string.format('%s: %d points, %g -> %g over %g beats (%s)', kind, n + 1, v0, v1, n / div, CURVES[curve][1]))
+end
+
+function Run()
+	local def = 'scroll, 1, 0.5, 4, 16'
+	if tostring(Editor:ChartInfo('mode')) == '5' then def = 'hs, 1, 0.5, 4, 16' end   -- Taiko は hs を使う
+	Editor:GetUserInput('Ease effects from the cursor.  [scroll|hs], start, end, length(beats), points per beat\n e.g.  ' .. def, def,
+		function(s)
+			local kind, v0, v1, len, div = parse(s)
+			if not kind then Editor:ShowMessage('Invalid input. Example: scroll, 1, 0.5, 4, 16') return end
+			local names = {}
+			for i, c in ipairs(CURVES) do names[i] = c[1] end
+			Editor:GetUserOption('Curve', names, function(idx)
+				apply(kind, v0, v1, len, div, (idx or 0) + 1)
+			end)
+		end)
+end
+"""##),
+        Entry(fileName: "bm_img2hold.lua", source: ##"""
+--BetterMalody built-in: img2hold (Slide) - turn an image into a field of 1-wide holds
+-- Same idea as the web Slide editor's img2hold: the image is stretched to 256 (x) by height (ticks), every vertical run of dark pixels becomes one hold.
+-- The first row of ticks starts at the current beat (move the cursor to where the picture should start).
+PluginName='BM Image to holds (img2hold)'
+PluginType=0
+PluginRequire="5.0.1"
+
+local HELP = 'length(beats) ticks-per-beat threshold(0-255) invert(0/1)\n e.g. "4 32 128 0"  (dark pixels = holds)'
+
+local function beat_of(t, ompu) return { beat = t // ompu, numor = t % ompu, denom = ompu } end
+
+-- add one 1-wide hold: head tick (absolute, in 1/ompu beats), x (0-255), duration in ticks
+local function add_hold(head, x, dur, ompu)
+	local id = Editor:AddNote(2048)
+	Editor:SetNoteBeat(id, beat_of(head, ompu), true)
+	Editor:SetNoteX(id, x)
+	Editor:SetNoteWidth(id, 1)
+	Editor:AddNoteSlideBody(id, beat_of(dur, ompu))
+	return id
+end
+
+local function build(mode, bytes, len, ompu, shiki, inv)
+	local cb = Editor:GetCurrentBeat()
+	local base = math.floor((cb.beat + cb.numor / cb.denom) * ompu + 0.5)
+	local h = math.floor(len * ompu + 0.5)
+	if h < 1 then Editor:ShowMessage('Length is too short') return end
+	local W = 256
+	local count = 0
+	if mode == 1 or mode == 2 then      -- ignore the image: one hold at x=0, or every lane
+		local dur = math.max(1, h)
+		local from, to = 0, 0
+		if mode == 2 then to = W - 1 end
+		for x = from, to do add_hold(base, x, dur, ompu) count = count + 1 end
+	else
+		local gray = Editor:DecodeImage(bytes, W, h)
+		if not gray then Editor:ShowMessage('Could not read the image') return end
+		local byte = string.byte
+		for x = 0, W - 1 do
+			local runStart, runEnd = nil, nil            -- rows (from the top) of the current run, scanning bottom to top
+			for i = h - 1, -1, -1 do
+				local dark = false
+				if i >= 0 then
+					local v = byte(gray, i * W + x + 1)
+					dark = (v < shiki)
+					if inv then dark = not dark end
+				end
+				if dark then
+					if not runStart then runStart = i end
+					runEnd = i
+				elseif runStart then
+					local head = (h - runStart) - 1 + base
+					local d = runStart - runEnd
+					if d < 1 then d = 1 end
+					add_hold(head, x, d, ompu) count = count + 1
+					runStart = nil
+				end
+			end
+		end
+	end
+	if count == 0 then Editor:ShowMessage('No dark pixels found (try the threshold or invert)') return end
+	Editor:ShowMessage('Added ' .. count .. ' holds')
+end
+
+local function ask_params(mode, bytes)
+	if mode ~= 0 then
+		Editor:GetUserInput('length(beats) ticks-per-beat\n e.g. "4 32"', '4 32', function(s)
+			local len, ompu = s:match('^%s*([%d%.]+)%s+(%d+)')
+			len, ompu = tonumber(len), tonumber(ompu)
+			if not len or not ompu or ompu < 1 then Editor:ShowMessage('Bad input') return end
+			build(mode, nil, len, math.floor(ompu), 128, false)
+		end)
+		return
+	end
+	Editor:GetUserInput(HELP, '4 32 128 0', function(s)
+		local a, b, c, d = s:match('^%s*([%d%.]+)%s+(%d+)%s+(%d+)%s*(%d*)')
+		local len, ompu, shiki = tonumber(a), tonumber(b), tonumber(c)
+		if not len or not ompu or not shiki or ompu < 1 then Editor:ShowMessage('Bad input') return end
+		build(0, bytes, len, math.floor(ompu), shiki, d == '1')
+	end)
+end
+
+function Run()
+	Editor:GetUserOption('img2hold', { 'Image to holds', 'One hold at x=0 (no image)', 'Fill every lane with holds (no image)' }, function(mode)
+		if mode == 0 then
+			Editor:ReadBytesSelect('Choose an image', function(bytes)
+				if not bytes then return end
+				ask_params(0, bytes)
+			end)
+		else
+			ask_params(mode, nil)
+		end
+	end)
+end
+"""##),
+        Entry(fileName: "bm_select.lua", source: ##"""
+--BetterMalody built-in: select notes by a filter (type / lane / x / width / beat range)
+PluginName='BM Select by filter'
+PluginType=0
+PluginRequire="5.0.1"
+
+-- terms (AND).  A term is  name[,name...]  (OR)  or  key=list  (list: 1,3,5-7)
+--  Key/Taiko: tap long | Slide: wipe slide | Taiko: don ka big small roll balloon
+--  lane=1,3 (Key, 1-based)   x=10-50 (Slide)   w=3-8 (Slide width)   beat=4-8 (head beat)
+--  a leading ! negates a term
+local HELP = 'Filter terms (all must match):\n tap long | wipe slide | don ka big small roll balloon\n lane=1,3 | x=10-50 | w=3-8 | beat=4-8   ( ! = not )\n e.g.  long lane=1,2'
+
+local function inlist(v, list)
+	for part in tostring(list):gmatch('[^,]+') do
+		local a, b = part:match('^(-?[%d%.]+)%-(-?[%d%.]+)$')
+		if a then if v >= tonumber(a) and v <= tonumber(b) then return true end
+		elseif tonumber(part) == v then return true end
+	end
+	return false
+end
+local NAMES = {
+	tap = function(n) return n.type == 1 end, long = function(n) return n.type == 128 end,
+	wipe = function(n) return n.type == 1024 end, slide = function(n) return n.type == 2048 end,
+	don = function(n) return n.flag == 0 or n.flag == 1 end, ka = function(n) return n.flag == 2 or n.flag == 3 end,
+	big = function(n) return n.flag == 1 or n.flag == 3 or n.flag == 5 or n.flag == 7 end,
+	small = function(n) return n.flag == 0 or n.flag == 2 or n.flag == 4 or n.flag == 6 end,
+	roll = function(n) return n.flag == 4 or n.flag == 5 end, balloon = function(n) return n.flag == 6 or n.flag == 7 end,
+}
+local function compile(s)
+	local terms = {}
+	for w in tostring(s):gmatch('%S+') do
+		local neg = false
+		if w:sub(1, 1) == '!' then neg = true; w = w:sub(2) end
+		local k, v = w:match('^(%a+)=(.+)$')
+		local fn
+		if k then
+			if k == 'lane' then fn = function(n) return inlist(n.x + 1, v) end
+			elseif k == 'x' then fn = function(n) return inlist(n.x, v) end
+			elseif k == 'w' then fn = function(n) return inlist(n.w, v) end
+			elseif k == 'beat' then fn = function(n) return inlist(n.beat, v) end end
+		else
+			local alts = {}
+			for name in w:gmatch('[^,]+') do alts[#alts + 1] = NAMES[name:lower()] end
+			for _, a in ipairs(alts) do if not a then alts = nil break end end
+			if alts and #alts > 0 then fn = function(n) for _, a in ipairs(alts) do if a(n) then return true end end return false end end
+		end
+		if not fn then return nil, w end
+		terms[#terms + 1] = neg and function(n) return not fn(n) end or fn
+	end
+	if #terms == 0 then return nil, '' end
+	return terms
+end
+local function info(id)
+	local b = Editor:GetNoteBeat(id, true)
+	return { id = id, type = Editor:GetNoteType(id), flag = Editor:GetNoteFlag(id), x = Editor:GetNoteX(id), w = Editor:GetNoteWidth(id), beat = b.beat + b.numor / b.denom }
+end
+local function match(n, terms)
+	for _, t in ipairs(terms) do if not t(n) then return false end end
+	return true
+end
+
+function Run()
+	Editor:GetUserInput(HELP, '', function(s)
+		local terms, bad = compile(s)
+		if not terms then Editor:ShowMessage('Unknown term: "' .. tostring(bad) .. '"') return end
+		Editor:GetUserOption('Apply', { 'Replace selection', 'Add to selection', 'Keep only (narrow selection)' }, function(mode)
+			local ids = {}
+			if mode == 2 then
+				local sel = Editor:GetSelectNotes()
+				for i = 0, sel.Length - 1 do ids[#ids + 1] = sel[i] end
+			else
+				for i = 0, Editor:GetNoteCount() - 1 do ids[#ids + 1] = Editor:GetNoteAt(i) end
+			end
+			local hit = {}
+			for _, id in ipairs(ids) do if match(info(id), terms) then hit[#hit + 1] = id end end
+			if mode ~= 1 then Editor:ClearSelection() end
+			for _, id in ipairs(hit) do Editor:SelectNote(id) end
+			Editor:ShowMessage('Selected ' .. #hit .. ' note(s)')
+		end)
+	end)
 end
 """##)
     ]
