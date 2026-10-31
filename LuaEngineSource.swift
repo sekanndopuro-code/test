@@ -2583,15 +2583,34 @@ function makeEditor() {
     if (typeof cb === 'function' && idx !== undefined) call(cb, idx);
     return idx;
   });
-  // ReadBytesSelect(題, コールバック): 「ファイル」アプリでファイルを1つ選ばせて、中身を (1文字 = 1バイトの) 文字列で渡す。
+  // ReadBytesSelect(題, コールバック, 取り込み元): ファイルを1つ選ばせて、中身を (1文字 = 1バイトの) 文字列で渡す。
+  //   取り込み元 (省略可): 'file' (省略時。「ファイル」アプリ) / 'photo' (「写真」アプリ。画像だけ)。
+  //   本物の BetterMalody など、3番目の引数を知らない環境では無視されて「ファイル」アプリになる
   //   キャンセル・読み込み失敗のときは nil を渡す (DecodeImage に渡して画像として読める)
-  def('ReadBytesSelect', (title, cb) => {
+  def('ReadBytesSelect', (title, cb, source) => {
     let fn = cb;
     if (typeof title === 'function') fn = title;
-    const b64 = native('readBytes', typeof title === 'string' ? title : '');
+    const b64 = native('readBytes', typeof title === 'string' ? title : '', typeof source === 'string' ? source : '');
     const bytes = b64 === undefined ? undefined : bytesToStr(b64decode(b64));
     if (typeof fn === 'function') call(fn, bytes);
     return bytes;
+  });
+  // ShowImagePreview(題, 画像のバイト列, 長さ(拍), 分割数, しきい値, 反転, コールバック):
+  //   画像を 256 x (長さ x 分割数) に引き伸ばして白黒にした結果を画面に出し、長さ / 分割数 / しきい値 / 反転 をその場で変えさせる (DecodeImage と同じ処理で作るので、結果はずれない)。
+  //   「ホールドを作成」を押したときだけ、コールバックを (長さ, 分割数, しきい値, 反転(true/false)) で呼ぶ。キャンセルでは呼ばない (GetUserInput と同じ)。戻り値は 長さ
+  //   (このエディタ独自の API。無い環境のために、プラグイン側で Editor.ShowImagePreview ~= nil を調べて使う)
+  def('ShowImagePreview', (title, bytes, len, ompu, shiki, inv, cb) => {
+    const s = checkStr(bytes, 2, 'ShowImagePreview');
+    const u8 = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i) & 255;
+    const ans = native('imagePreview', title === undefined ? '' : tostr(title), b64encode(u8),
+      optNum(len, 4, 3, 'ShowImagePreview'), optNum(ompu, 32, 4, 'ShowImagePreview'), optNum(shiki, 128, 5, 'ShowImagePreview'),
+      (inv !== undefined && T(inv)) ? 1 : 0);
+    if (ans === undefined) return undefined;
+    const p = String(ans).split(' ');
+    const L = parseFloat(p[0]), O = parseInt(p[1], 10), S = parseInt(p[2], 10), V = p[3] === '1';
+    if (typeof cb === 'function') call(cb, L, O, S, V);
+    return L;
   });
   // DecodeImage(画像のバイト列, 幅, 高さ): 画像を 幅 x 高さ に引き伸ばして、白黒 (0=黒〜255=白) にした文字列を返す。
   //   上の行から順に、1ピクセル = 1文字 (string.byte(gray, y * 幅 + x + 1) で読める)。読めない画像は nil

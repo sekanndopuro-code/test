@@ -40,7 +40,8 @@
 | RenderersFX.swift | **FX 表示のレーン描画** (`LaneRenderer.drawFX`)。seg の丸なし・scroll / jump 反映・判定を過ぎたものは出さない・jump で飛んだリボンは画面に切り詰める |
 | PluginPanel.swift | **Adv. メニュー** (`AdvPanel`: プラグイン一覧・読み込みボタン・出力欄) と、プラグインが出すダイアログ (`PluginDialogLayer`) |
 | PluginStore.swift | プラグイン一覧 (`PluginStore.shared`)。内蔵 + 読み込んだもの (`Documents/Plugins/` にフォルダごと保存・次回起動時に自動で再読み込み。Files アプリから足した / 消したものは、アプリに戻ったときと Adv. を開いたときに `reload()` で読み直す。前の版の `Documents/MalodySlideEditor/Plugins/` にあったものは、起動時に移す)。.lua / .zip / 画像の取り込みもここ |
-| PluginFilePicker.swift | 「ファイル」アプリを開くピッカー (UIKit の `UIDocumentPickerViewController` を、いちばん手前の画面から直接出す) |
+| PluginFilePicker.swift | 「ファイル」アプリを開くピッカー (UIKit の `UIDocumentPickerViewController` を、いちばん手前の画面から直接出す) と、「写真」アプリを開くピッカー (`PluginPhotoPicker` / `PHPickerViewController`。`ReadBytesSelect` の `'photo'`) |
+| PluginImagePreview.swift | **画像プレビューのダイアログ** (`Editor:ShowImagePreview`)。画像を 256 × (長さ × 分割数) に引き伸ばして白黒にした結果を、長さ / 分割数 / しきい値 / 反転 を変えながら見る画面 (`PluginImagePreviewCard`)。白黒化は `DecodeImage` と同じ関数 (`PluginImageTools`) |
 | PluginSession.swift | **操作型プラグイン (PluginType 2)** の実行 (`PluginSession`)、レーンの上に出す画像 (`PluginSprite`)、画像の読み込み (`PluginImageCache`) |
 | PluginBridge.swift | Lua → エディタの橋渡し。`Editor:〇〇()` の中身 (ノーツ・BPM・effect・スプライト・クリック位置) はここ |
 | LuaEngine.swift | JavaScriptCore の起動と Lua の実行 (別スレッド・停止可能) |
@@ -233,6 +234,11 @@ EDIT の右ボタン列、**Order の下・More の上**に **Adv.** (λ) があ
 - **BetterMalody 用の内蔵プラグイン** (添付された Lua をそのまま収録): `BM Ease effects` (カーソルから scroll を 16 種類のカーブで置く。入力は `scroll, 開始値, 終了値, 長さ(拍), 1拍あたりの点の数`) / `BM Image to holds (img2hold)` (画像を選ぶと、黒い部分を 1 幅のホールド (seg 1 個のスライド) に変える。カーソルの拍から上へ並ぶ。入力は `長さ(拍) 1拍あたりのtick 閾値(0-255) 反転(0/1)`) / `BM Select by filter` (種類・x・幅・拍の条件でノーツを選択。`slide x=10-50 !w=3-4` のように書く)。
   * `hs` (Taiko 用) の effect はこのエディタには無いので、置かずに「未対応」に出す。Taiko / Key 用の指定 (`tap` `long` `lane=` `don` `ka` など) は、Slide の譜面には該当するノーツが無いので何も選ばれない
   * img2hold は、画像を横 256 × 縦 (長さ × tick) に引き伸ばして白黒にする (`DecodeImage`)。細かい画像だと、ホールドの数が多すぎて時間がかかる (メニューの停止で止められる)
+  * img2hold の **画像の取り込み元** は、最初のメニューで「写真」(`ReadBytesSelect` の `'photo'`。写真アプリの画像ピッカー。アクセス許可は要らない) か「ファイル」を選ぶ。画像を選ぶと **プレビュー画面** (`Editor:ShowImagePreview`) が開き、**長さ(拍) / 分割数(1拍あたりの tick) / しきい値 / 反転** を、結果を見ながら変えられる。「ホールドを作成」を押すと、その設定で作る (キャンセルでは何も作らない)
+    + プレビューは、`DecodeImage` と同じ関数で 256 × (長さ × 分割数) の白黒を作り、しきい値をかけたもの (ホールドになる所が水色)。拍の線 (下 = カーソルの拍 = 0) と、ホールドの本数 (縦に続く暗い所の塊 1つ = 1本。実際に作る本数と同じ数え方) も出る。「白黒」に切り替えると、しきい値をかけない画像が見える
+    + 表示の比率は、「レーンの比率」(既定。現在のズームでレーンに並べたときの縦横比の目安。高さ 820pt・レーンの幅 837.6pt が基準) と「256×N px」(引き伸ばした後のピクセルの比率) を切り替えられる
+    + 本数が 5000 本を超えると、時間がかかる目安を出す。本数が 0 のときは「ホールドを作成」を押せない
+    + `Editor.ShowImagePreview` が無いエディタ (本物の BetterMalody など) では、これまでどおり `長さ 分割数 しきい値 反転` を文字で入力する
 
 ### 操作型プラグイン (PluginType 2。例: GizaSlide)
 `Run()` を1回実行する型とは別に、**押すと「アクティブ」になり、レーンのタッチを受け取り続ける**型に対応している。Adv. メニューでは、行に **ON** と出て、アイコン (`PluginIcon`) が付く。
@@ -289,7 +295,8 @@ Swift Playgrounds のアプリには Lua 本体 (C 言語) を組み込めない
 | **実装済み (操作型プラグイン GizaSlide で使用・動作確認済み)** | `GetClickX` `GetClickBeat` `GetClickBeatFree` `AddSprite` `RemoveModule` `FindModule` `MakeBeat` `GetNoteBeat(note, false)` (終点) |
 | **このエディタ独自 (本物の Malody V には無い)** | `GetOrderNotes` (Order ボタンで選んだ順のスライド) `ClearOrderNotes` (その順番をリセット) `GetNoteSlideBodyAll` (スライドの seg を全部、1回の往復で読む。戻り値は 1 始まりの平らな表で、`[整数部, 分子, 分母, x]` が seg の数だけ並び、`.Length` が seg の数) `ReplaceNoteSlideBody` (スライドの seg を、同じ形の平らな表で丸ごと置き換える。並べ替えない) `DeleteNotes` (ノーツの番号を並べた表を渡して、まとめて消す) `AppendNoteSlideBody` (seg を並べ替えず、足した順のまま末尾に足す。beat が行ったり来たりするバグスライド用) |
 | **実装済み (使い方は推測。実際のプラグインで確かめて調整)** | `GetCurrentTime` (ms) `GetSystemTime` `GetCurrentBeat` `GetCurrentDivide` `GetNoteCount` `GetNoteAt` `GetTimeCount` `GetTimeAt` `GetEffectCount` `GetEffectAt` `AddTime` `DeleteTime` `AddEffect` `DeleteEffect` `SelectNote` `SetGridLine` `SeekTo` `MakeBeat` `GetUserInput` |
-| **実装済み (BetterMalody 用の内蔵プラグインで使用。モックで動作確認)** | `GetUserOption` (題, 選択肢の表, コールバック。選んだ番号は 0 始まり。キャンセルではコールバックを呼ばない) `ReadBytesSelect` (「ファイル」アプリで1つ選ぶ。中身は 1文字 = 1バイトの文字列。キャンセルは nil) `DecodeImage` (画像を 幅×高さ の白黒に。1ピクセル = 1文字、上の行から。写真の向きは直す) `ChartInfo` (譜面の meta の値。mode など) `ClearSelection` / `AddEffect` は scroll・jump 以外の種類 (hs など) を未対応として通過 |
+| **実装済み (BetterMalody 用の内蔵プラグインで使用。モックで動作確認)** | `GetUserOption` (題, 選択肢の表, コールバック。選んだ番号は 0 始まり。キャンセルではコールバックを呼ばない) `ReadBytesSelect` (題, コールバック, 取り込み元。取り込み元は省略可で `'file'` = 「ファイル」アプリ (既定) / `'photo'` = 「写真」アプリ (画像だけ)。1つ選ぶ。中身は 1文字 = 1バイトの文字列。キャンセルは nil) `DecodeImage` (画像を 幅×高さ の白黒に。1ピクセル = 1文字、上の行から。写真の向きは直す) `ChartInfo` (譜面の meta の値。mode など) `ClearSelection` / `AddEffect` は scroll・jump 以外の種類 (hs など) を未対応として通過 |
+| **このエディタ独自 (画像プレビュー)** | `ShowImagePreview` (題, 画像のバイト列, 長さ(拍), 分割数, しきい値, 反転(true/false), コールバック。画像のプレビュー画面を出して、「ホールドを作成」を押したときだけコールバックを `(長さ, 分割数, しきい値, 反転)` で呼ぶ。キャンセルでは呼ばない。本物の Malody V / BetterMalody には無いので、プラグイン側で `Editor.ShowImagePreview ~= nil` を調べて使う) |
 | **未対応 (呼ばれると、何もせず通過して、実行後にどれが呼ばれたかを表示)** | `GetNoteFlag` `GetNoteGroup` (どちらも 0 を返す) `SetNoteFlag` `SetNoteGroup` `WriteFilePlugin` `ReadFileSelect` `ReadData` `WriteData` `WriteChartCustom` `CallShortcut` `GetUserSelect` `AddText` `AddSpriteUndo` `AddTextUndo` `RemoveSpriteUndo` |
 
 - `GetUserInput(題, 初期値, コールバック)`: OK を押したときだけ、答えの文字列を `コールバック(値)` に渡して呼ぶ (キャンセルでは呼ばない)。戻り値でも同じ文字列を返すので、コールバックを使わない書き方もできる。`(題, コールバック)` のように初期値を省いてもよい。`wipe2hold` のようにコールバックで受け取るプラグインは、この対応で動く (操作型プラグインの中では、これまでどおり nil が返り、コールバックは呼ばれない)

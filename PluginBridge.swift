@@ -32,6 +32,7 @@ final class PluginDialog: Identifiable {
         case message
         case input
         case choice            // GetUserOption: 選択肢の一覧から1つ選ばせる (答えは、選んだ番号を文字列にしたもの)
+        case imagePreview      // ShowImagePreview: 画像のプレビューを見ながら 長さ / 分割数 / しきい値 / 反転 を決めさせる (答えは "長さ 分割数 しきい値 反転(0/1)")
     }
 
     let id = UUID()
@@ -40,14 +41,20 @@ final class PluginDialog: Identifiable {
     let message: String
     let defaultText: String
     let options: [String]
+    let imageData: Data?                    // imagePreview のとき: プレビューする画像の元のデータ
+    let imageParams: PluginImageParams?     // imagePreview のとき: 最初の設定
     private var completion: ((String?) -> Void)?
 
-    init(kind: Kind, title: String, message: String, defaultText: String = "", options: [String] = [], completion: ((String?) -> Void)? = nil) {
+    init(kind: Kind, title: String, message: String, defaultText: String = "", options: [String] = [],
+         imageData: Data? = nil, imageParams: PluginImageParams? = nil,
+         completion: ((String?) -> Void)? = nil) {
         self.kind = kind
         self.title = title
         self.message = message
         self.defaultText = defaultText
         self.options = options
+        self.imageData = imageData
+        self.imageParams = imageParams
         self.completion = completion
     }
 
@@ -169,9 +176,13 @@ final class PluginBridge {
             if Thread.isMainThread { return nullJSON }
             return choiceCall(parseArgs(argsJSON))
         case "readBytes":
-            // ReadBytesSelect: 「ファイル」アプリでファイルを1つ選ばせる。答えが返るまで Lua 側を待たせる
+            // ReadBytesSelect: 「ファイル」アプリ (既定) か「写真」アプリ (source = "photo") で1つ選ばせる。答えが返るまで Lua 側を待たせる
             if Thread.isMainThread { return nullJSON }
-            return readBytesCall()
+            return readBytesCall(source: text(parseArgs(argsJSON), 1))
+        case "imagePreview":
+            // ShowImagePreview: 画像のプレビュー画面を出して、設定 (長さ・分割数・しきい値・反転) を答えさせる。答えが返るまで Lua 側を待たせる
+            if Thread.isMainThread { return nullJSON }
+            return imagePreviewCall(parseArgs(argsJSON))
         case "decodeImage":
             // DecodeImage: 画像を 幅 x 高さ の白黒にする。時間がかかるので、メインスレッドには移さず、Lua のスレッドで行う
             return decodeImage(parseArgs(argsJSON))
@@ -302,10 +313,12 @@ final class PluginBridge {
         return nullJSON
     }
 
-    /// ReadBytesSelect: 「ファイル」アプリでファイルを1つ選ばせて、中身を base64 の文字列で返す (キャンセル・読めないときは nil)。
+    /// ReadBytesSelect: ファイルを1つ選ばせて、中身を base64 の文字列で返す (キャンセル・読めないときは nil)。
+    ///   source = "photo" / "photos": 「写真」アプリ (フォトライブラリ。画像だけ)。それ以外 (既定): 「ファイル」アプリ
     /// JavaScript 側が、これを「1文字 = 1バイトの文字列」にして Lua に渡す
-    private func readBytesCall() -> String {
+    private func readBytesCall(source: String) -> String {
         if state == nil { return nullJSON }
+        let fromPhotos = (source == "photo" || source == "photos")
         let sem = DispatchSemaphore(value: 0)
         var picked: Data? = nil
         DispatchQueue.main.async { [weak self] in
@@ -314,20 +327,66 @@ final class PluginBridge {
                 return
             }
             me.flushMain()
-            PluginFilePicker.present(multiple: false, cancelled: {
-                sem.signal()
-            }, completion: { urls in
-                if let u = urls.first {
-                    let scoped = u.startAccessingSecurityScopedResource()
-                    picked = try? Data(contentsOf: u)
-                    if scoped { u.stopAccessingSecurityScopedResource() }
+            if fromPhotos {
+                PluginPhotoPicker.present { data in
+                    picked = data
+                    sem.signal()
                 }
-                sem.signal()
-            })
+            } else {
+                PluginFilePicker.present(multiple: false, cancelled: {
+                    sem.signal()
+                }, completion: { urls in
+                    if let u = urls.first {
+                        let scoped = u.startAccessingSecurityScopedResource()
+                        picked = try? Data(contentsOf: u)
+                        if scoped { u.stopAccessingSecurityScopedResource() }
+                    }
+                    sem.signal()
+                })
+            }
         }
         sem.wait()
         guard let d = picked, d.count > 0, d.count <= 64 * 1024 * 1024 else { return nullJSON }
         return json(d.base64EncodedString())
+    }
+
+    /// ShowImagePreview: 画像 (base64) のプレビュー画面を出して、答え ("長さ 分割数 しきい値 反転(0/1)") を返す。キャンセルは nil
+    /// 引数: 題, 画像 (base64), 長さ (拍), 分割数, しきい値, 反転 (0/1)
+    private func imagePreviewCall(_ a: [Any]) -> String {
+        if state == nil { return nullJSON }
+        guard let b64 = arg(a, 1) as? String,
+              let data = Data(base64Encoded: b64, options: [.ignoreUnknownCharacters]),
+              data.count > 0 else { return nullJSON }
+        let title = text(a, 0)
+        let sem = DispatchSemaphore(value: 0)
+        var answer: String? = nil
+        DispatchQueue.main.async { [weak self] in
+            guard let me = self, let st = me.state else {
+                sem.signal()
+                return
+            }
+            me.flushMain()
+            // レーンの比率でプレビューするための、1拍の高さ ÷ レーンの幅 (現在のズーム。設計画面 高さ 820pt・レーンの幅 837.6pt が基準)
+            let vb = st.visibleBeats
+            let aspect = (vb.isFinite && vb > 0) ? (820.0 / vb) / 837.6 : 0.85
+            let params = PluginImageParams(length: me.num(a, 2),
+                                           ticks: me.intv(a, 3),
+                                           threshold: me.intv(a, 4),
+                                           invert: me.intv(a, 5) != 0,
+                                           beatAspect: aspect)
+            let d = PluginDialog(kind: .imagePreview,
+                                 title: me.pluginName,
+                                 message: title,
+                                 imageData: data,
+                                 imageParams: params) { r in
+                answer = r
+                sem.signal()
+            }
+            st.pluginDialog = d
+        }
+        sem.wait()
+        if let s = answer { return json(s) }
+        return nullJSON
     }
 
     /// DecodeImage: 画像 (base64) を 幅 w x 高さ h に引き伸ばして、白黒 (0 = 黒 〜 255 = 白) の 1ピクセル 1バイトにして、base64 で返す。
@@ -338,36 +397,9 @@ final class PluginBridge {
         let w = intv(a, 1)
         let h = intv(a, 2)
         if w < 1 || h < 1 || w > 4096 || h > 65536 || w * h > 64_000_000 { return nullJSON }
-        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nullJSON }
-        var maxSide = 4096
-        if let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
-           let pw = props[kCGImagePropertyPixelWidth] as? Int,
-           let ph = props[kCGImagePropertyPixelHeight] as? Int {
-            maxSide = max(1, min(4096, max(pw, ph)))
-        }
-        let opts: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxSide
-        ]
-        guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
-                ?? CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nullJSON }
-        var buf = [UInt8](repeating: 255, count: w * h)
-        let ok: Bool = buf.withUnsafeMutableBytes { raw -> Bool in
-            guard let ctx = CGContext(data: raw.baseAddress,
-                                      width: w,
-                                      height: h,
-                                      bitsPerComponent: 8,
-                                      bytesPerRow: w,
-                                      space: CGColorSpaceCreateDeviceGray(),
-                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
-            ctx.setFillColor(gray: 1, alpha: 1)
-            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-            ctx.interpolationQuality = .high
-            ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
-            return true
-        }
-        if !ok { return nullJSON }
+        // 読み込みと白黒化は、プレビュー画面 (PluginImagePreview.swift) と同じ関数。プレビューと結果がずれないようにしてある
+        guard let img = PluginImageTools.load(data),
+              let buf = PluginImageTools.gray(img, w: w, h: h) else { return nullJSON }
         return json(Data(buf).base64EncodedString())
     }
 

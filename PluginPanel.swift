@@ -200,7 +200,7 @@ struct AdvPanel: View {
     }
 }
 
-// MARK: - プラグインが出すダイアログ (ShowMessage / GetUserInput / エラー表示)
+// MARK: - プラグインが出すダイアログ (ShowMessage / GetUserInput / GetUserOption / ShowImagePreview / エラー表示)
 
 /// 画面全体の上に重ねる。出ている間はほかの操作を受けない (プラグインはここで答えを待っている)
 struct PluginDialogLayer: View {
@@ -208,8 +208,14 @@ struct PluginDialogLayer: View {
 
     var body: some View {
         if let d = state.pluginDialog {
-            PluginDialogCard(state: state, dialog: d)
-                .id(d.id)
+            if d.kind == .imagePreview {
+                // ShowImagePreview: 画像のプレビュー + 長さ / 分割数 / しきい値 / 反転 (PluginImagePreview.swift)
+                PluginImagePreviewCard(state: state, dialog: d)
+                    .id(d.id)
+            } else {
+                PluginDialogCard(state: state, dialog: d)
+                    .id(d.id)
+            }
         }
     }
 }

@@ -1784,6 +1784,9 @@ end
 --BetterMalody built-in: img2hold (Slide) - turn an image into a field of 1-wide holds
 -- Same idea as the web Slide editor's img2hold: the image is stretched to 256 (x) by height (ticks), every vertical run of dark pixels becomes one hold.
 -- The first row of ticks starts at the current beat (move the cursor to where the picture should start).
+-- Image source: Photos app or Files app.  After picking, a preview shows the resized black/white result
+-- (length / ticks-per-beat / threshold / invert can be changed while looking at it).  The preview needs Editor:ShowImagePreview
+-- (this editor only); other editors fall back to typing "length ticks threshold invert".
 PluginName='BM Image to holds (img2hold)'
 PluginType=0
 PluginRequire="5.0.1"
@@ -1854,6 +1857,15 @@ local function ask_params(mode, bytes)
 		end)
 		return
 	end
+	-- preview dialog: look at the resized result while changing length / ticks / threshold / invert
+	if Editor.ShowImagePreview then
+		Editor:ShowImagePreview('Preview', bytes, 4, 32, 128, false, function(len, ompu, shiki, inv)
+			if not len or not ompu or ompu < 1 then Editor:ShowMessage('Bad input') return end
+			build(0, bytes, len, math.floor(ompu), shiki, inv)
+		end)
+		return
+	end
+	-- editors without the preview: type the numbers
 	Editor:GetUserInput(HELP, '4 32 128 0', function(s)
 		local a, b, c, d = s:match('^%s*([%d%.]+)%s+(%d+)%s+(%d+)%s*(%d*)')
 		local len, ompu, shiki = tonumber(a), tonumber(b), tonumber(c)
@@ -1862,15 +1874,27 @@ local function ask_params(mode, bytes)
 	end)
 end
 
+-- source: 'photo' = Photos app, 'file' = Files app  (the 3rd argument is ignored by editors that do not know it -> Files app)
+local function pick_image(source)
+	Editor:ReadBytesSelect('Choose an image', function(bytes)
+		if not bytes then return end
+		ask_params(0, bytes)
+	end, source)
+end
+
 function Run()
-	Editor:GetUserOption('img2hold', { 'Image to holds', 'One hold at x=0 (no image)', 'Fill every lane with holds (no image)' }, function(mode)
-		if mode == 0 then
-			Editor:ReadBytesSelect('Choose an image', function(bytes)
-				if not bytes then return end
-				ask_params(0, bytes)
-			end)
+	Editor:GetUserOption('img2hold', {
+		'Image to holds - from Photos (写真)',
+		'Image to holds - from Files (ファイル)',
+		'One hold at x=0 (no image)',
+		'Fill every lane with holds (no image)'
+	}, function(sel)
+		if sel == 0 then
+			pick_image('photo')
+		elseif sel == 1 then
+			pick_image('file')
 		else
-			ask_params(mode, nil)
+			ask_params(sel - 1, nil)        -- 2 -> mode 1 (one hold), 3 -> mode 2 (every lane)
 		end
 	end)
 end
