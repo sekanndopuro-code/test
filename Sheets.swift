@@ -34,21 +34,16 @@ extension String {
 
 extension Beat {
     /// "8:0/4" / "8" 形式を解釈 (0拍始まり)。
-    /// マイナスは 整数部・分子・分母 のどこにつけてもよい (値は 整数部 + 分子/分母):
-    ///   "-50:0/1" = -50 拍 / "0:-1/4" = -0.25 拍 / "-1:1/4" = -0.75 拍 / "0:1/-4" = -0.25 拍
+    /// マイナスをつけられるのは整数部だけ (値は 整数部 + 分子/分母。本家 Malody と同じ決まり):
+    ///   "-50:0/1" = -50 拍 / "-1:1/4" = -0.75 拍 は OK。
+    ///   "0:-1/4" (分子がマイナス) と "0:1/-4" (分母がマイナス) は、本家が対応していないので nil (入力エラー)
     static func parse(_ s: String) -> Beat? {
         let t = s.normalizedForNumberInput
         let parts = t.split(whereSeparator: { $0 == ":" || $0 == "/" }).map { String($0) }
         let nums = parts.compactMap { Int($0) }
         if parts.isEmpty || nums.count != parts.count { return nil }
         if nums.count == 1 { return Beat(nums[0], 0, 1) }
-        if nums.count == 3 && nums[2] != 0 {
-            let (m, n, d) = (nums[0], nums[1], nums[2])
-            if d > 0 { return Beat(m, n, d) }
-            // 分母がマイナスのときは、分子の符号をひっくり返して、分母を正にする (1/-4 = -1/4)
-            guard n != Int.min, d != Int.min else { return nil }
-            return Beat(m, -n, -d)
-        }
+        if nums.count == 3 && nums[1] >= 0 && nums[2] > 0 { return Beat(nums[0], nums[1], nums[2]) }
         return nil
     }
 }
