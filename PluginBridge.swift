@@ -3,10 +3,10 @@ import CoreGraphics
 import ImageIO
 
 // Lua プラグイン (別スレッドで動く) から、メインスレッドの EditorState を触るための橋渡し。
-//   ・Lua 側の Editor:〇〇() は、JavaScript 側で native("コマンド名", 引数…) に変換されて、ここの handle に届く
-//   ・譜面を書き換えるコマンドは、メインスレッドで実行する (DispatchQueue.main.sync)
-//   ・1回の Run() = Undo 1回分。最初に書き換えたときに pushUndo し、Run() が終わる (または画面にダイアログを出す) ときに chartChanged を1回だけ呼ぶ
-//   ・ShowMessage / GetUserInput / GetUserOption / ReadBytesSelect は、画面にダイアログ (ファイル選択) を出して、答えが返るまで Lua 側を待たせる
+// ・Lua 側の Editor:〇〇() は、JavaScript 側で native("コマンド名", 引数…) に変換されて、ここの handle に届く
+// ・譜面を書き換えるコマンドは、メインスレッドで実行する (DispatchQueue.main.sync)
+// ・1回の Run() = Undo 1回分。最初に書き換えたときに pushUndo し、Run() が終わる (または画面にダイアログを出す) ときに chartChanged を1回だけ呼ぶ
+// ・ShowMessage / GetUserInput / GetUserOption / ReadBytesSelect は、画面にダイアログ (ファイル選択) を出して、答えが返るまで Lua 側を待たせる
 
 /// 実行の中断 (停止ボタン) を、別スレッドから安全に読み書きするための旗
 final class PluginCancel {
@@ -31,8 +31,8 @@ final class PluginDialog: Identifiable {
     enum Kind {
         case message
         case input
-        case choice            // GetUserOption: 選択肢の一覧から1つ選ばせる (答えは、選んだ番号を文字列にしたもの)
-        case imagePreview      // ShowImagePreview: 画像のプレビューを見ながら 長さ / 分割数 / しきい値 / 反転 を決めさせる (答えは "長さ 分割数 しきい値 反転(0/1)")
+        case choice // GetUserOption: 選択肢の一覧から1つ選ばせる (答えは、選んだ番号を文字列にしたもの)
+        case imagePreview // ShowImagePreview: 画像のプレビューを見ながら 長さ / 分割数 / しきい値 / 反転 を決めさせる (答えは "長さ 分割数 しきい値 反転(0/1)")
     }
 
     let id = UUID()
@@ -41,8 +41,8 @@ final class PluginDialog: Identifiable {
     let message: String
     let defaultText: String
     let options: [String]
-    let imageData: Data?                    // imagePreview のとき: プレビューする画像の元のデータ
-    let imageParams: PluginImageParams?     // imagePreview のとき: 最初の設定
+    let imageData: Data? // imagePreview のとき: プレビューする画像の元のデータ
+    let imageParams: PluginImageParams? // imagePreview のとき: 最初の設定
     private var completion: ((String?) -> Void)?
 
     init(kind: Kind, title: String, message: String, defaultText: String = "", options: [String] = [],
@@ -69,7 +69,7 @@ final class PluginDialog: Identifiable {
 final class PluginBridge {
     private weak var state: EditorState?
     let pluginName: String
-    let assetDir: URL?                     // スプライトの画像を探すフォルダ (プラグインのファイルがあるフォルダ)
+    let assetDir: URL? // スプライトの画像を探すフォルダ (プラグインのファイルがあるフォルダ)
     let cancel = PluginCancel()
 
     // メインスレッドだけで触る
@@ -77,19 +77,22 @@ final class PluginBridge {
     private var dirty = false
     private var indexMap: [NoteID: Int] = [:]
     private var sortedCache: [NoteID]? = nil
-    private var pendingSlides = Set<NoteID>()      // AddNote(2048) で作った、まだ seg を持たないスライド
+    private var pendingSlides = Set<NoteID>() // AddNote(2048) で作った、まだ seg を持たないスライド
 
     // 複数のスレッドから触る
     private let lock = NSLock()
     private var logText = ""
     private var unsupportedList: [String] = []
-    private var notified = false                       // プラグイン自身が ShowMessage / ShowTip で知らせたか (終了時の「実行しました」で上書きしないため)
-    private var clickXValue: Double = 127              // 操作型プラグインに渡す、いま触れているレーン上の位置
+    private var notified = false // プラグイン自身が ShowMessage / ShowTip で知らせたか (終了時の「実行しました」で上書きしないため)
+    private var clickXValue: Double = 127 // 操作型プラグインに渡す、いま触れているレーン上の位置
     private var clickBeatSnapped = Beat.zero
     private var clickBeatFreeValue: Double = 0
-    private var deadline: Date? = nil                  // この時刻を過ぎたら、実行を止める (操作型の1イベントの時間制限)
-
+    private var deadline: Date? = nil // この時刻を過ぎたら、実行を止める (操作型の1イベントの時間制限)
     private let nullJSON = "[null]"
+
+    /// img2hold 用の合図 (このエディタ独自)。GetUserInput の見出しがこれで始まるときは、ダイアログを出さずに、ホールドを一括で置く。
+    /// LuaEngineSource.swift (自動生成) に新しい関数を足さなくても、Lua から一括の入口を呼べるようにするための通り道
+    static let bulkHoldsTag = "@@BM_ADD_HOLDS@@"
 
     init(state: EditorState?, pluginName: String, assetDir: URL? = nil) {
         self.state = state
@@ -168,9 +171,12 @@ final class PluginBridge {
             notice(s)
             return nullJSON
         case "input":
+            let inputArgs = parseArgs(argsJSON)
+            // このエディタ独自 (img2hold 用): 見出しが bulkHoldsTag で始まるときは、ダイアログを出さずに、ホールドを一括で置く
+            if text(inputArgs, 0).hasPrefix(PluginBridge.bulkHoldsTag) { return bulkHolds(inputArgs) }
             // 操作型プラグインはメインスレッドで動くので、答えを待てない: 表示だけして、すぐ続ける (入力は nil になる)
-            if Thread.isMainThread { return dialogOnMain(parseArgs(argsJSON)) }
-            return dialogCall(name, parseArgs(argsJSON))
+            if Thread.isMainThread { return dialogOnMain(inputArgs) }
+            return dialogCall(name, inputArgs)
         case "option":
             // GetUserOption: 一覧から選ばせる。答えが返るまで Lua 側を待たせる (操作型プラグインはメインスレッドで動くので、待てない: nil)
             if Thread.isMainThread { return nullJSON }
@@ -257,7 +263,6 @@ final class PluginBridge {
     }
 
     // Lua スレッドで答えが返るまで待つ
-
     private func dialogCall(_ name: String, _ a: [Any]) -> String {
         if state == nil { return nullJSON }
         let sem = DispatchSemaphore(value: 0)
@@ -314,7 +319,7 @@ final class PluginBridge {
     }
 
     /// ReadBytesSelect: ファイルを1つ選ばせて、中身を base64 の文字列で返す (キャンセル・読めないときは nil)。
-    ///   source = "photo" / "photos": 「写真」アプリ (フォトライブラリ。画像だけ)。それ以外 (既定): 「ファイル」アプリ
+    /// source = "photo" / "photos": 「写真」アプリ (フォトライブラリ。画像だけ)。それ以外 (既定): 「ファイル」アプリ
     /// JavaScript 側が、これを「1文字 = 1バイトの文字列」にして Lua に渡す
     private func readBytesCall(source: String) -> String {
         if state == nil { return nullJSON }
@@ -403,6 +408,28 @@ final class PluginBridge {
         return json(Data(buf).base64EncodedString())
     }
 
+    /// ホールド (幅 1 のスライド) を一括で置く。img2hold が、1個ずつ AddNote / SetNoteBeat / … を呼ぶと、
+    /// 呼ぶたびに画面が描き直されて何分も掛かるので、全部を 1 回の往復で置く。
+    /// 呼び方 (Lua): Editor:GetUserInput(bulkHoldsTag .. " " .. ompu, "頭tick,x,長さtick,頭tick,x,長さtick,…", function(s) … end)
+    ///   ompu = 1拍あたりの tick 数 / 頭 = 絶対位置 (1/ompu 拍単位) / x = 0〜255 / 長さ = tick (1 以上)
+    /// 答え: "ok <置いた数>"。読めない入力は nil (Lua 側は、1個ずつ置く方法に切り替える)
+    private func bulkHolds(_ a: [Any]) -> String {
+        if state == nil { return nullJSON }
+        let parts = text(a, 0).split(separator: " ")
+        guard parts.count >= 2, let den = Int(parts[1]), den >= 1, den <= 1_048_576 else { return nullJSON }
+        let nums = text(a, 1).split(separator: ",").map { Int($0) ?? 0 }
+        if nums.count < 3 { return json("ok 0") }
+        var made = 0
+        if Thread.isMainThread {
+            made = addHoldsMain(nums, den)
+        } else {
+            DispatchQueue.main.sync {
+                made = self.addHoldsMain(nums, den)
+            }
+        }
+        return json("ok \(made)")
+    }
+
     // MARK: - 引数・戻り値の変換
 
     private func parseArgs(_ s: String) -> [Any] {
@@ -473,7 +500,7 @@ final class PluginBridge {
     // MARK: - ノーツの探索
 
     private func noteIndex(_ st: EditorState, _ idText: String) -> Int? {
-        guard let u = Int(idText) else { return nil }       // プラグインへは、ノーツ ID を文字列にして渡している
+        guard let u = Int(idText) else { return nil } // プラグインへは、ノーツ ID を文字列にして渡している
         if let i = indexMap[u], i < st.chart.notes.count, st.chart.notes[i].id == u { return i }
         indexMap.removeAll(keepingCapacity: true)
         for (i, n) in st.chart.notes.enumerated() {
@@ -512,12 +539,39 @@ final class PluginBridge {
         sortedCache = nil
     }
 
+    /// ホールドを一括で置く (メインスレッド)。v = [頭tick, x, 長さtick] を並べた配列。
+    /// ノーツを手元で全部作ってから、譜面へ 1 回で足す (1個ずつ足すと、そのたびに画面が描き直される)。
+    /// 1個ぶんの中身は、AddNote(2048) + SetNoteBeat + SetNoteX + SetNoteWidth(1) + AddNoteSlideBody(長さ) と同じ
+    private func addHoldsMain(_ v: [Int], _ den: Int) -> Int {
+        guard let st = state else { return 0 }
+        let n = v.count / 3
+        if n == 0 { return 0 }
+        touch(st)
+        var made: [Note] = []
+        made.reserveCapacity(n)
+        for k in 0..<n {
+            let head = max(0, v[k * 3])
+            let x = max(0, min(255, v[k * 3 + 1]))
+            let dur = max(1, v[k * 3 + 2])
+            let headBeat = PluginBridge.makeBeat(Double(head / den), Double(head % den), Double(den))
+            let durBeat = PluginBridge.makeBeat(Double(dur / den), Double(dur % den), Double(den))
+            var note = Note(beat: headBeat, x: x, w: 1, type: nil)
+            note.segs = [Seg(beat: durBeat, x: 0)]
+            made.append(note)
+        }
+        let first = st.chart.notes.count
+        st.chart.notes.append(contentsOf: made)
+        for (k, note) in made.enumerated() {
+            indexMap[note.id] = first + k
+        }
+        return n
+    }
+
     // MARK: - コマンド (メインスレッド)
 
     private func handleMain(_ name: String, _ a: [Any]) -> String {
         guard let st = state else { return nullJSON }
         switch name {
-
         // ---- 情報の取得 ----
         case "currentTimeMs":
             return json(st.currentSec() * 1000.0)
@@ -566,7 +620,7 @@ final class PluginBridge {
         case "noteTime":
             guard let i = noteIndex(st, text(a, 0)) else { return json(0.0) }
             let n = st.chart.notes[i]
-            let b = flag(a, 1) ? n.beat : tailBeat(n)               // 2つ目の引数: true = 始点 / false = 終点
+            let b = flag(a, 1) ? n.beat : tailBeat(n) // 2つ目の引数: true = 始点 / false = 終点
             return json(st.timeMap.sec(atBeat: b.value) * 1000.0)
         case "noteBeat":
             guard let i = noteIndex(st, text(a, 0)) else { return nullJSON }
@@ -833,7 +887,6 @@ final class PluginBridge {
             return nullJSON
         case "batch":
             return nullJSON
-
         default:
             return nullJSON
         }
