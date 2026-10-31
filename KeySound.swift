@@ -7,11 +7,16 @@ import QuartzCore
 /// 波形が読めなかったときだけ、従来の「高い鈴のような音(6.6kHz)を20msに潰した音」をコードで合成して代わりに鳴らす。
 /// 音声ファイルは使わない (Swift Playgrounds でも、.swift をコピーするだけで動くように)。
 ///
-/// - playNow()      : すぐ鳴らす (テストプレイの打鍵・SETTINGの試聴)
-/// - play(atTime:)  : CACurrentMediaTime() と同じ時間軸の時刻に鳴らす (エディタ再生中の先行予約)
+/// - playNow() : すぐ鳴らす (テストプレイの打鍵・SETTINGの試聴)
+/// - play(atTime:) : CACurrentMediaTime() と同じ時間軸の時刻に鳴らす (エディタ再生中の先行予約)
 /// - cancelScheduled(): 予約済みの音を全部捨てる (ポーズ・シーク時)
 ///
 /// すべてメインスレッドから呼ぶこと。
+///
+/// 出力先が変わったとき (有線イヤホン・USB-C オーディオ・Bluetooth の抜き差し) は、
+/// エンジンが止まり、出力側のサンプルレート/チャンネル数も変わることがある。
+/// そのため、変更の通知を受けたら「つなぎ直してから起動し直す」(rebuild)。
+/// 起動に失敗しても1回だけつなぎ直して再挑戦する (以前は失敗を黙って捨てていたので、ずっと無音のままだった)。
 final class KeySound {
     static let shared = KeySound()
 
@@ -23,6 +28,12 @@ final class KeySound {
     private var pendingUntil: [Double] = []   // ノードごとの「先行予約した音が鳴り終わる時刻」(CACurrentMediaTime と同じ時間軸)
     private var bufferDur = 0.02              // キー音1発の長さ (秒)。波形を読んだときに実際の長さへ更新する
     private static let synthDur = 0.02        // フォールバック (コード合成) の長さ (秒)
+
+    private var observing = false
+    private var needsRebuild = false          // 出力先が変わった → 次に鳴らす前につなぎ直す
+
+    /// 最後にエンジンの起動に失敗した理由 (空なら正常)。鳴らないときの診断用 (SETTING に出して使える)
+    private(set) var lastError = ""
 
     /// 波形の音量を稼ぐための軽い歪み (tanh)。0 = 使わない (自然な音。初期値)。
     /// 本家より音が小さく感じるときだけ 1.0〜3.0 くらいに上げる (大きいほど音量は上がるが、音は歪んで硬くなる)。
@@ -36,7 +47,7 @@ final class KeySound {
         }
     }
 
-    private static let voices = 8      // 同時に鳴らせる数 (ラウンドロビン)
+    private static let voices = 8   // 同時に鳴らせる数 (ラウンドロビン)
 
     private init() {}
 
@@ -49,6 +60,10 @@ final class KeySound {
 
     private func configureIfNeeded() {
         if configured { return }
+        // エンジンを組む前にセッションを起こす。
+        // (先に組むと、出力側の形式が「セッションを起こす前のもの」で決まってしまい、
+        //  イヤホン接続中だと起動に失敗することがある)
+        AudioSessionSetup.activate()
         guard let fmt = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1),
               let buf = KeySound.makeSampleBuffer(format: fmt) ?? KeySound.makeBuffer(format: fmt) else { return }
         buffer = buf
@@ -62,20 +77,58 @@ final class KeySound {
         pendingUntil = Array(repeating: 0, count: nodes.count)
         engine.mainMixerNode.outputVolume = min(max(volume, 0), 1)
         configured = true
+        observe()
     }
 
-    /// エンジンが止まっていたら(割り込み・イヤホン抜き差しなど)起こし直して、ノードも再生状態にする
+    /// 出力先の変更・エンジンの設定変更・メディアサービスのリセットを受け取る
+    private func observe() {
+        if observing { return }
+        observing = true
+        let mark: (Notification) -> Void = { [weak self] _ in self?.needsRebuild = true }
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main, using: mark)
+        nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main, using: mark)
+        nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main, using: mark)
+    }
+
+    /// エンジンを止めて、出力先の今の形式でつなぎ直す (まだ鳴っていない予約は捨てる)
+    private func rebuild() {
+        engine.stop()
+        for i in nodes.indices {
+            nodes[i].stop()
+            pendingUntil[i] = 0
+        }
+        let out = engine.outputNode.outputFormat(forBus: 0)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode,
+                       format: (out.sampleRate > 0 && out.channelCount > 0) ? out : nil)
+        if let f = buffer?.format {
+            for n in nodes { engine.connect(n, to: engine.mainMixerNode, format: f) }
+        }
+    }
+
+    /// エンジンが止まっていたら(割り込み・イヤホン抜き差しなど)つなぎ直して起こし、ノードも再生状態にする
     private func ensureRunning() -> Bool {
         configureIfNeeded()
         guard configured else { return false }
-        if !engine.isRunning {
+        if needsRebuild || !engine.isRunning {
             AudioSessionSetup.activate()
+            if needsRebuild { rebuild() }
             engine.prepare()
             do {
                 try engine.start()
             } catch {
-                return false
+                // 1回だけ、つなぎ直して再挑戦
+                rebuild()
+                engine.prepare()
+                do {
+                    try engine.start()
+                } catch {
+                    lastError = "\(error)"
+                    return false
+                }
             }
+            needsRebuild = false
+            lastError = ""
         }
         for n in nodes where !n.isPlaying {
             n.play()
@@ -134,7 +187,6 @@ final class KeySound {
               let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
               let ch = buf.floatChannelData?[0] else { return nil }
         buf.frameLength = AVAudioFrameCount(count)
-
         let bytes = [UInt8](data)
         let drive = KeySound.softClipDrive
         let peak = KeySoundData.peak
@@ -152,14 +204,13 @@ final class KeySound {
     /// (フォールバック) 鈴らしい非整数倍の部分音を3つ重ね、立ち上がりに短いノイズを足し、tanhで軽く潰す
     private static func makeBuffer(format: AVAudioFormat) -> AVAudioPCMBuffer? {
         let sr = format.sampleRate
-        let dur = KeySound.synthDur          // 全長 (秒)
+        let dur = KeySound.synthDur           // 全長 (秒)
         let count = Int(sr * dur)
         guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
               let ch = buf.floatChannelData?[0] else { return nil }
         buf.frameLength = AVAudioFrameCount(count)
-
-        let base = 6600.0                    // 鈴の高さ (Hz)
-        let drive = 100.0                    // 潰し具合 (大きいほど「ギュッ」と詰まる)
+        let base = 6600.0                     // 鈴の高さ (Hz)
+        let drive = 100.0                     // 潰し具合 (大きいほど「ギュッ」と詰まる)
         // (周波数比, 振幅, 減衰の時定数[秒])
         let partials: [(Double, Double, Double)] = [
             (1.00, 1.00, 0.012),
@@ -167,7 +218,7 @@ final class KeySound {
             (5.40, 0.22, 0.005)
         ]
         let norm = tanh(drive)
-        var seed: UInt32 = 12345             // ノイズは毎回同じ並びにする
+        var seed: UInt32 = 12345              // ノイズは毎回同じ並びにする
         for i in 0..<count {
             let t = Double(i) / sr
             var s = 0.0
@@ -177,7 +228,7 @@ final class KeySound {
             seed = seed &* 1664525 &+ 1013904223
             let noise = Double(seed) / 4294967295.0 * 2.0 - 1.0
             s += 0.30 * noise * exp(-t / 0.0012)
-            s *= min(1.0, t / 0.0004)        // 0.4msの立ち上がり (プチ音防止)
+            s *= min(1.0, t / 0.0004)         // 0.4msの立ち上がり (プチ音防止)
             let tail = dur - t
             if tail < 0.008 { s *= tail / 0.008 }   // 最後の8msでフェードアウト
             ch[i] = Float(tanh(drive * s) / norm * 0.9)
