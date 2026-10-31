@@ -71,16 +71,27 @@ struct EffectMap: Sendable {
         return EffectMap(starts: starts, bases: bases, slopes: slopes, negFrom: neg)
     }
 
-    /// 時刻 t の表示位置
-    func p(_ t: Double) -> Double {
-        guard let first = starts.first, t >= first else { return t }
-        // t 以下で最後の区間を二分探索
+    /// t 以下で最後の区間の番号 (最初の effect より前なら nil)。二分探索
+    private func segment(at t: Double) -> Int? {
+        guard let first = starts.first, t >= first else { return nil }
         var lo = 0, hi = starts.count - 1
         while lo < hi {
             let mid = (lo + hi + 1) / 2
             if starts[mid] <= t { lo = mid } else { hi = mid - 1 }
         }
-        return bases[lo] + slopes[lo] * (t - starts[lo])
+        return lo
+    }
+
+    /// 時刻 t の表示位置
+    func p(_ t: Double) -> Double {
+        guard let k = segment(at: t) else { return t }
+        return bases[k] + slopes[k] * (t - starts[k])
+    }
+
+    /// 時刻 t の scroll (effect が無い間は 1.0)。エディタの FX 表示の「SC」に出す値
+    func scroll(at t: Double) -> Double {
+        guard let k = segment(at: t) else { return 1.0 }
+        return slopes[k]
     }
 
     /// 表示位置が lo...hi に入る時刻の範囲 (区間ごとに高々 1 つ。互いに重ならない)。

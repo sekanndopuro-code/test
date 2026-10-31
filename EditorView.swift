@@ -353,9 +353,38 @@ struct StripView: View {
                         .padding(.top, 3)
                 }
                 .padding(.top, 10.75)
+
+                // FX (擬似テストプレイ): ズームボタンの下。本家のスクリーンショットでは、上端から約 160pt に中心が来る位置
+                FXButton(isOn: state.fxMode) { state.toggleFX() }
+                    .padding(.top, 159.5)
             }
         }
         .clipped()
+    }
+}
+
+/// FX ボタン。ズームボタンと同じ五角形 (幅 39 × 高さ 45pt、左端が画面の外で切れる)。
+/// OFF = ズームボタンと同じ灰色 / ON = 選択中の色 (Color.panelBlue = 右ボタン列の選択色) で塗る。
+/// 文字は「FX」だけ (幅 39pt に「FX ON」は収まらないので、ON / OFF は色で見せる)。中心は記号 (＋ / −) と同じ左端から 16.5pt
+struct FXButton: View {
+    let isOn: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                ZoomButtonShape().fill(isOn ? Color.panelBlue : Color(red: 127.0 / 255.0, green: 131.0 / 255.0, blue: 138.0 / 255.0))
+                ZoomButtonShape().stroke(Color.white, style: StrokeStyle(lineWidth: 1.5, lineJoin: .miter))
+                Text("FX")
+                    .font(PanelFont.menu(21))
+                    .foregroundColor(.white)
+                    .shadow(color: Color.black.opacity(isOn ? 0.35 : 0), radius: 1)
+                    .position(x: 16.5, y: 22.5)
+            }
+            .frame(width: 39, height: 45)
+            .contentShape(ZoomButtonShape())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -726,6 +755,7 @@ struct RightPanel: View {
         VStack(spacing: 0) {
             PanelButton(glyph: "✎", icon: { AnyView(PanelIconView(kind: .edit, color: $0)) }) {
                 state.popup = .none
+                state.setFX(false)          // FX 表示は見るだけ。編集に入るときは切る
                 state.editing = true
             }
             .frame(height: pitch)
@@ -791,14 +821,7 @@ struct RightPanel: View {
         let slideIcon = slideIconBuilder()
         return VStack(spacing: 0) {
             PanelButton(glyph: "←", icon: { AnyView(PanelIconView(kind: .back, color: $0)) }) {      // Back
-                state.advOpen = false
-                state.stopInteractivePlugin()
-                if state.tool == .plugin { state.tool = .unselected }
-                state.editing = false
-                state.tool = .unselected
-                state.selectedIDs = []
-                state.ghost = nil
-                state.popup = .none
+                state.leaveEdit()
             }
             .frame(height: pitch)
             // 選択中のアイコンをもう一度タップすると、未選択に戻る (未選択 = レーンの上下スライド / ピンチだけ)

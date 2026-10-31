@@ -221,6 +221,10 @@ struct TimeMap: Sendable {
     func index(atBeat b: Double) -> Int {
         TimeMap.lastIndex(notAfter: b, in: bs)
     }
+
+    /// 最初の BPM の 1 拍の秒数。エディタの FX 表示が「表示位置 (秒) → 画面の高さ」の基準にする
+    /// (テストプレイと同じく画面の高さは時間で決まる。基準を最初の BPM に固定すれば、BPM 変化をまたいでスクロールしても、画面全体の倍率は変わらない)
+    var firstSecPerBeat: Double { spb.first ?? 0.5 }
 }
 
 struct ChartData: Sendable {

@@ -689,7 +689,8 @@ extension EditorState {
     }
 
     /// レーンで編集ツール(配置/選択/削除など)を使う状態か。false のときは、上下スライドとピンチだけ
-    var laneToolActive: Bool { editing && tool != .unselected }
+    /// (FX 表示のあいだは、見るだけなので、ツールを選んでいても false)
+    var laneToolActive: Bool { editing && tool != .unselected && !fxMode }
 
     // MARK: - 追加 / 削除
 

@@ -60,12 +60,37 @@ struct Ghost {
     var endX: Int? = nil
 }
 
+/// FX 表示 (擬似テストプレイ) 用の「拍 → 表示位置」の写像。
+/// テストプレイと同じく、ノーツの画面の高さは「表示位置 P(t) − 今の表示位置 P(now)」(秒) で決まる (Effects.swift の `EffectMap`)。
+/// 秒 → ピクセルの倍率は `spbRef` (最初の BPM の 1 拍の秒数) で決める。
+/// effect も BPM 変化も無い譜面では、通常の表示 (1 拍 = ppb ピクセル) とぴったり同じ位置になる
+struct FXWarp {
+    let map: EffectMap
+    let time: TimeMap
+    let spbRef: Double
+    let nowSec: Double          // いまの時刻 (再生中は再生位置、止まっているときは再生ラインの拍)
+    let pNow: Double            // map.p(nowSec)
+
+    init(map: EffectMap, time: TimeMap, nowSec: Double) {
+        self.map = map
+        self.time = time
+        self.spbRef = max(1e-6, time.firstSecPerBeat)
+        self.nowSec = nowSec
+        self.pNow = map.p(nowSec)
+    }
+
+    /// 拍 b にあるものの表示位置 (秒)
+    func pSec(ofBeat b: Double) -> Double { map.p(time.sec(atBeat: b)) }
+}
+
 /// レーン座標系 (x: 0...255 / beat <-> 画面座標)
 struct LaneGeo {
     var W: CGFloat
     var H: CGFloat
     var viewBeat: Double      // 再生ライン(シアンの横棒)の位置の拍
     var ppb: Double           // 1拍あたりのピクセル
+    /// nil = 通常の表示。FX 表示のときだけ入る (py が effect を反映した位置を返す。beatOf は通常のまま = FX 表示では使わない)
+    var fx: FXWarp? = nil
 
     // 本家 (iPad Air 4) の縦線を実測した値: レーンの左端 = ビューの左端 + 25.2pt、右端 = ビューの右端 - 10.2pt (幅 837.6pt)。
     // (ビューの幅 873pt = 画面 1180 - 左の帯 145 - シークバーと時刻 104 - 右のボタン列 58)
@@ -77,8 +102,14 @@ struct LaneGeo {
 
     func px(_ x: Double) -> CGFloat { trackL + CGFloat(x / 255.0) * trackW }
     func xOf(_ p: CGFloat) -> Double { Double((p - trackL) / trackW) * 255.0 }
-    func py(_ b: Double) -> CGFloat { playY - CGFloat((b - viewBeat) * ppb) }
+    func py(_ b: Double) -> CGFloat {
+        if let f = fx { return playY - CGFloat((f.pSec(ofBeat: b) - f.pNow) * fxPxPerSec(f)) }
+        return playY - CGFloat((b - viewBeat) * ppb)
+    }
     func beatOf(_ y: CGFloat) -> Double { viewBeat + Double(playY - y) / ppb }
+
+    /// FX 表示: 表示位置 1 秒ぶんの高さ (ピクセル)。通常の 1 拍の高さ ÷ 最初の BPM の 1 拍の秒数
+    func fxPxPerSec(_ f: FXWarp) -> Double { ppb / f.spbRef }
 }
 
 final class EditorState: ObservableObject {
@@ -103,6 +134,12 @@ final class EditorState: ObservableObject {
     }
     @Published var isPlaying = false
     @Published var zoomLevel: Double = 8     // 0...16。整数のときは従来の16段階と同じ。ピンチ中は小数になる
+    /// FX 表示 (擬似テストプレイ)。ON のあいだ、レーンは seg の丸を消し、scroll / jump を反映して描く。編集はできない (見るだけ)。
+    /// 保存はしない (開くたびに OFF)。切り替えは toggleFX() (EditorState+FX.swift)
+    @Published var fxMode = false
+    /// FX 表示で使う EffectMap の使い回し (effect / BPM が変わったときだけ作り直す。EditorState+FX.swift)
+    var fxCache = EffectMap.none
+    var fxKey: Int? = nil
     @Published var snapDen = 4
     @Published var playSpeed = 1.0
     @Published var editing = false
@@ -534,7 +571,9 @@ final class EditorState: ObservableObject {
     }
 
     func geo(_ size: CGSize) -> LaneGeo {
-        LaneGeo(W: size.width, H: size.height, viewBeat: currentBeat(), ppb: Double(size.height) / visibleBeats)
+        var g = LaneGeo(W: size.width, H: size.height, viewBeat: currentBeat(), ppb: Double(size.height) / visibleBeats)
+        if fxMode { g.fx = FXWarp(map: fxEffectMap, time: timeMap, nowSec: currentSec()) }
+        return g
     }
 
     func timeString(_ sec: Double) -> String {

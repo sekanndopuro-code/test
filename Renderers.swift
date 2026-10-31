@@ -69,6 +69,11 @@ private func lineStyle(rem: Int, den: Int) -> (Color, CGFloat) {
 enum LaneRenderer {
     static func draw(ctx: GraphicsContext, size: CGSize, state: EditorState) {
         let g = state.geo(size)
+        // FX 表示 (擬似テストプレイ): scroll / jump を反映して、seg の丸なしで描く (drawFX)
+        if g.fx != nil {
+            drawFX(ctx: ctx, g: g, state: state)
+            return
+        }
         var c = ctx
         // 背景は塗らない (EditorBackground の背景画像を透かす)
         // 左の番号欄だけは、時刻表示から続く明るいパネルを敷く (本家と同じ)
@@ -114,16 +119,22 @@ enum LaneRenderer {
     }
 
     static func drawHLines(_ c: inout GraphicsContext, _ g: LaneGeo, den: Int) {
-        let b0 = g.beatOf(g.H)
-        let b1 = g.beatOf(0)
+        drawHLines(&c, g, den: den, from: g.beatOf(g.H), to: g.beatOf(0), pxPerBeat: g.ppb)
+    }
+
+    /// 拍 b0...b1 の分割線。pxPerBeat = その範囲の 1 拍の画面の高さ (線の細かさを決める。FX 表示では範囲ごとに違う)
+    /// within = true のときは、b0...b1 の中にある線だけを描く (FX 表示で、隣り合う範囲が同じ線を二重に描かないため)
+    static func drawHLines(_ c: inout GraphicsContext, _ g: LaneGeo, den: Int, from b0: Double, to b1: Double, pxPerBeat: Double,
+                           within: Bool = false) {
         var d = max(1, den)
-        while d > 1 && g.ppb / Double(d) < 6 { d = d / smallestPrime(d) }
+        while d > 1 && pxPerBeat / Double(d) < 6 { d = d / smallestPrime(d) }
         let t0 = Int(floor(b0 * Double(d)))
         let t1 = Int(ceil(b1 * Double(d)))
         if t1 < t0 || t1 - t0 > 800 { return }
         for t in t0...t1 {
             if t < 0 { continue }
             let b = Double(t) / Double(d)
+            if within && (b < b0 || b > b1) { continue }
             let y = g.py(b)
             let rem = ((t % d) + d) % d
             let st = lineStyle(rem: rem, den: d)
@@ -135,15 +146,25 @@ enum LaneRenderer {
     }
 
     static func drawLabels(_ c: inout GraphicsContext, _ g: LaneGeo) {
+        drawLabels(&c, g, from: g.beatOf(g.H), to: g.beatOf(0), pxPerBeat: g.ppb)
+    }
+
+    /// 拍 lo...hi の番号。pxPerBeat = その範囲の 1 拍の画面の高さ。
+    /// mid を渡すと、番号の位置 (N 拍目と N+1 拍目の真ん中) がその範囲に入るものだけを描く
+    /// (FX 表示で、隣り合う範囲が同じ番号を二重に描かないため)
+    static func drawLabels(_ c: inout GraphicsContext, _ g: LaneGeo, from lo: Double, to hi: Double, pxPerBeat: Double,
+                           mid: ClosedRange<Double>? = nil) {
         // 0拍始まり (mcファイルの値と同じ)
         // 番号 N は、N 拍目と N+1 拍目の線の真ん中に置く (本家と同じ)。下の端に半分見えている番号も出すため、1つ手前から数える
-        let b0 = max(0, Int(floor(g.beatOf(g.H))) - 1)
-        let b1 = Int(ceil(g.beatOf(0)))
+        let b0 = max(0, Int(floor(lo)) - 1)
+        let b1 = Int(ceil(hi))
         if b1 < b0 || b1 - b0 > 200 { return }
         var step = 1
-        while g.ppb * Double(step) < 18 { step *= 2 }
+        while pxPerBeat * Double(step) < 18 { step *= 2 }
         for b in b0...b1 where b % step == 0 {
-            let y = g.py(Double(b) + Double(step) / 2.0)
+            let m = Double(b) + Double(step) / 2.0
+            if let r = mid, !r.contains(m) { continue }
+            let y = g.py(m)
             if y < -12 || y > g.H + 12 { continue }
             // 本家の番号は細くて縦長 (数字の高さ 約14.5pt、3桁で幅 約24pt)。レーンの左端の線に少し掛かる
             drawNumber(c, "\(b)", at: CGPoint(x: 6.5, y: y), anchor: .leading, size: 20.5, scaleX: 0.77, alpha: 0.75)
@@ -448,10 +469,10 @@ enum LaneRenderer {
     }
 
     /// タップの棒の高さ (pt)。本家の実測 約 12pt (縁 1.5 + 帯 1.5 + 芯 5 + 帯 1.5 + 縁 1.5 のぶん)
-    private static let tapH: CGFloat = 11.5
+    static let tapH: CGFloat = 11.5
 
     /// タップ: 明るい水色の縁 → 濃い青緑の帯 → 白に近い水色の芯 (角は丸い)。外側に弱い水色のにじみ
-    private static func drawTap(_ c: inout GraphicsContext, rect: CGRect, selected: Bool) {
+    static func drawTap(_ c: inout GraphicsContext, rect: CGRect, selected: Bool) {
         let outer = selected ? Color.selTapOuter : Color.tapOuter
         let mid = selected ? Color.selTapMid : Color.tapMid
         let core = selected ? Color.selTapCore : Color.tapCore
@@ -466,7 +487,7 @@ enum LaneRenderer {
     }
 
     /// ウィップ: 左右の端がとがった六角形の棒 (黄色の縁 → オリーブ色の帯 → 淡い黄色の芯) の、さらに外側に「<」「>」の矢印
-    private static func drawWipe(_ c: inout GraphicsContext, xL: CGFloat, xR: CGFloat, yMid: CGFloat, selected: Bool) {
+    static func drawWipe(_ c: inout GraphicsContext, xL: CGFloat, xR: CGFloat, yMid: CGFloat, selected: Bool) {
         let outer = selected ? Color.selWipeOuter : Color.wipeOuter
         let mid = selected ? Color.selWipeMid : Color.wipeMid
         let core = selected ? Color.selWipeCore : Color.wipeCore
