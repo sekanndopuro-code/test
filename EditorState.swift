@@ -96,6 +96,9 @@ struct LaneGeo {
     // (ビューの幅 873pt = 画面 1180 - 左の帯 145 - シークバーと時刻 104 - 右のボタン列 58)
     // 他の画面比率では、W (ビューの幅) だけが変わる (高さ 820pt の設計画面。DesignCanvas / EditorView.swift)。
     // 25.2 や 35.4 は、設計画面の上の寸法なので、画面比率によらず固定でよい
+    // ※ v1/v2 で「枠の幅に上限を付けて中央に寄せる」案 (trackCap) を入れたが、実機で
+    //   レーンが半分近くまで縮んで画面構成が崩れたため撤去した (2026-11-10、玲さんの実機確認)。
+    //   iPhone では枠はレーン幅いっぱい (元の仕様) が正解
     var trackL: CGFloat { 25.2 }
     var trackW: CGFloat { max(10, W - 35.4) }
     var playY: CGFloat { H * 0.9134 }     // 再生ライン (シアンの横棒)。本家は画面の高さの 91.3% (iPad Air 4 で 749 / 820pt)
@@ -137,6 +140,9 @@ final class EditorState: ObservableObject {
     /// FX 表示 (擬似テストプレイ)。ON のあいだ、レーンは seg の丸を消し、scroll / jump を反映して描く。編集はできない (見るだけ)。
     /// 保存はしない (開くたびに OFF)。切り替えは toggleFX() (EditorState+FX.swift)
     @Published var fxMode = false
+    /// コンパクト表示 (iPhone 横画面) か。EditorView が Environment (\.editorCompact) を受けて入れる。
+    /// Canvas 描画 (Renderers) は Environment を読めないので、文字の大きさなどはこちら経由で切り替える
+    @Published var compactLayout = false
     /// FX 表示で使う EffectMap の使い回し (effect / BPM が変わったときだけ作り直す。EditorState+FX.swift)
     var fxCache = EffectMap.none
     var fxKey: Int? = nil
@@ -231,6 +237,22 @@ final class EditorState: ObservableObject {
     @Published var touchEffect = false {
         didSet { UserDefaults.standard.set(touchEffect, forKey: "editor.touchEffect") }
     }
+
+    // 小さい文字の拡大率 (SETTING の説明文・Adv. メニューの文字など、.system 直書きの小さい文字用)。
+    // コンパクト表示 (iPhone) のときだけ効く (iPad では 1 倍 = 従来どおり)。次回起動時も保存される
+    static let smallTextScaleRange = 1.0...3.0
+    @Published var smallTextScale: Double = 1.5 {
+        didSet { UserDefaults.standard.set(smallTextScale, forKey: "editor.smallTextScale") }
+    }
+    /// 実際に使う拡大率 (コンパクト表示でないときは 1)
+    var smallTextBoost: CGFloat { compactLayout ? CGFloat(smallTextScale) : 1 }
+
+    // Adv. メニュー (プラグイン一覧) の幅 (設計 pt)。広げるぶんレーンは細くなる。次回起動時も保存される
+    static let advPanelWidthRange = 160.0...520.0
+    @Published var advPanelWidth: Double = 196 {
+        didSet { UserDefaults.standard.set(advPanelWidth, forKey: "editor.advPanelWidth") }
+    }
+
 
     // 遅い速度の再生 (伸ばした音) の調整。次回起動時も保存される
     @Published var sharpStretch = false {               // true: 伸ばす窓を小さくして、ドラムなどの立ち上がりをはっきりさせる (低い音は少しぼやける)
@@ -448,6 +470,12 @@ final class EditorState: ObservableObject {
         if let v = ud.object(forKey: "editor.touchEffect") as? Bool { self.touchEffect = v }
         if let v = ud.object(forKey: "editor.holdDeselectSec") as? Double {
             self.holdDeselectSec = min(max(v, Self.holdRange.lowerBound), Self.holdRange.upperBound)
+        }
+        if let v = ud.object(forKey: "editor.smallTextScale") as? Double {
+            self.smallTextScale = min(max(v, Self.smallTextScaleRange.lowerBound), Self.smallTextScaleRange.upperBound)
+        }
+        if let v = ud.object(forKey: "editor.advPanelWidth") as? Double {
+            self.advPanelWidth = min(max(v, Self.advPanelWidthRange.lowerBound), Self.advPanelWidthRange.upperBound)
         }
         prepareEngineAudio()
         applyVolumes()

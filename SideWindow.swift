@@ -34,12 +34,14 @@ extension EditorState {
 /// 開いていないときは、タッチを一切受けない (下のエディタにそのまま通る)。
 struct SidePanelLayer: View {
     @ObservedObject var state: EditorState
+    @Environment(\.designScale) private var designScale
     @State private var keyboardHeight: CGFloat = 0
 
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
-            let globalBottom = proxy.frame(in: .global).maxY
+            // ウィンドウ幅は元の仕様のまま (v1/v2 でコンパクト時に広げる案を入れたが、
+            // 画面構成が大きく変わってしまったため撤去した。文字の拡大は PanelFont 側で効かせる)
             let width = min(SideWindow.width, size.width * 0.62)
             let top = size.height * SideWindow.topRatio
             // キーボードが出ているあいだは、ウィンドウの下端をキーボードの上へ上げる (入力欄が隠れない)
@@ -64,10 +66,22 @@ struct SidePanelLayer: View {
             .frame(width: size.width, height: size.height, alignment: .topTrailing)
             .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
                 guard let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue else { return }
-                // 画面の下にくっついているキーボードだけ避ける (フローティングのキーボードは避けない)
-                let docked = end.maxY >= globalBottom - 1
-                let overlap = docked ? max(0, globalBottom - end.minY) : 0
-                withAnimation(.easeOut(duration: 0.22)) { keyboardHeight = overlap }
+                // 基準は proxy.frame(in: .global) ではなく、DesignCanvas から Environment で渡された倍率 (designScale) で組み立てる。
+                // global の枠は scaleEffect を反映するかが前提になっていて、反映されないと
+                // 「画面下に付いているか」の判定も割り算も両方狂うため。
+                // DesignCanvas は画面いっぱい (上端 = 画面の上端) なので、この層の実寸の底辺 = 画面の下端。
+                // 実寸の画面の高さ = 設計の高さ (size.height = 820) × designScale
+                let screenH = size.height * designScale
+                // 画面の下にくっついているキーボードだけ避ける (フローティングのキーボードは避けない)。
+                // end は画面座標 (実寸 pt) で届く
+                let docked = end.maxY >= screenH - 1
+                let overlap = docked ? max(0, screenH - end.minY) : 0
+                // キーボードの重なりは「実寸 pt」、このビューの size は「設計 pt」。
+                // iPad では倍率が 約1 なので同じ値でよかったが、iPhone (倍率 約0.48) では
+                // そのまま引くと半分しか持ち上がらず、入力欄がキーボードに隠れていた。
+                // 倍率で割って、設計 pt に直してから使う
+                let overlapDesign = designScale > 0 ? overlap / designScale : overlap
+                withAnimation(.easeOut(duration: 0.22)) { keyboardHeight = overlapDesign }
             }
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -162,9 +176,10 @@ private struct SidePressStyle: ButtonStyle {
 
 private struct SideTitle: View {
     let text: String
+    @Environment(\.panelFontBoost) private var fontBoost
     var body: some View {
         Text(text)
-            .font(PanelFont.label(22))
+            .font(PanelFont.label(22, boost: fontBoost))
             .foregroundColor(.white)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 47)
@@ -177,11 +192,12 @@ private struct SideListRow<Content: View>: View {
     let selected: Bool
     let action: () -> Void
     @ViewBuilder let content: () -> Content
+    @Environment(\.panelFontBoost) private var fontBoost
 
     var body: some View {
         Button(action: action) {
             content()
-                .font(PanelFont.label(15))
+                .font(PanelFont.label(15, boost: fontBoost))
                 .foregroundColor(selected ? Color.white : Color.panelBlue)
                 .padding(.leading, 16.5)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -197,11 +213,12 @@ private struct SideListRow<Content: View>: View {
 private struct SideFormRow<Content: View>: View {
     let label: String
     @ViewBuilder let content: () -> Content
+    @Environment(\.panelFontBoost) private var fontBoost
 
     var body: some View {
         HStack(spacing: 0) {
             Text(label)
-                .font(PanelFont.label(22))
+                .font(PanelFont.label(22, boost: fontBoost))
                 .foregroundColor(.white)
                 .frame(width: 70, alignment: .leading)
             Spacer(minLength: 0)
@@ -214,26 +231,36 @@ private struct SideField: View {
     @Binding var text: String
     let placeholder: String
     let keyboard: UIKeyboardType
+    @Environment(\.panelFontBoost) private var fontBoost
+    @Environment(\.editorCompact) private var compact
+    @FocusState private var focused: Bool
 
     var body: some View {
+        // 当たり判定の改善 (iPhone で反応しづらかった):
+        // ・枠線は overlay ではなく background に置く (overlay の図形がタッチを横取りしないように)
+        // ・欄のどこを触っても入力開始になるよう、枠全体に contentShape + タップでフォーカス
+        // ・コンパクト表示では高さを 44 → 64 に広げる (実寸で約 24pt しかなく、上下の押し外しが多かった)
         TextField("", text: $text)
-            .font(PanelFont.label(22))
+            .font(PanelFont.label(22, boost: fontBoost))
             .foregroundColor(.white)
             .tint(.white)
             .multilineTextAlignment(.center)
             .keyboardType(keyboard)
             .autocorrectionDisabled()
             .textInputAutocapitalization(.never)
+            .focused($focused)
             .padding(.horizontal, 6)
-            .frame(width: 170, height: 44)
+            .frame(width: 170, height: compact ? 64 : 44)
+            .background(Rectangle().stroke(Color.white, lineWidth: 2))
             .overlay(
                 Text(placeholder)
-                    .font(PanelFont.label(18))
+                    .font(PanelFont.label(18, boost: fontBoost))
                     .foregroundColor(Color.white.opacity(0.3))
                     .opacity(text.isEmpty ? 1 : 0)
                     .allowsHitTesting(false)
             )
-            .overlay(Rectangle().stroke(Color.white, lineWidth: 2))
+            .contentShape(Rectangle())
+            .onTapGesture { focused = true }
     }
 }
 
@@ -241,11 +268,12 @@ private struct SideField: View {
 private struct SideButton: View {
     let title: String
     let action: () -> Void
+    @Environment(\.panelFontBoost) private var fontBoost
 
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(PanelFont.label(26))
+                .font(PanelFont.label(26, boost: fontBoost))
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .frame(height: 44)
@@ -260,11 +288,12 @@ private struct SideButton: View {
 private struct SideSmallButton: View {
     let title: String
     let action: () -> Void
+    @Environment(\.panelFontBoost) private var fontBoost
 
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(PanelFont.label(16))
+                .font(PanelFont.label(16, boost: fontBoost))
                 .foregroundColor(.white)
                 .padding(.horizontal, 10)
                 .frame(height: 44)
@@ -280,11 +309,12 @@ private struct SideChoice: View {
     let title: String
     let selected: Bool
     let action: () -> Void
+    @Environment(\.panelFontBoost) private var fontBoost
 
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(PanelFont.label(22))
+                .font(PanelFont.label(22, boost: fontBoost))
                 .foregroundColor(selected ? Color.panelBlue : Color.white)
                 .frame(maxWidth: .infinity)
                 .frame(height: 44)
@@ -381,6 +411,7 @@ private struct BPMWindowContent: View {
 private struct EffectWindowContent: View {
     @ObservedObject var state: EditorState
     let compact: Bool
+    @Environment(\.panelFontBoost) private var fontBoost
     @State private var selected = -1
     @State private var beatText: String
     @State private var kind: EffectPoint.Kind = .scroll
@@ -403,7 +434,7 @@ private struct EffectWindowContent: View {
                 LazyVStack(spacing: 0) {
                     if effects.isEmpty {
                         Text("effect はまだありません")
-                            .font(PanelFont.label(15))
+                            .font(PanelFont.label(15, boost: fontBoost))
                             .foregroundColor(Color.white.opacity(0.5))
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.leading, 16.5)
@@ -456,7 +487,7 @@ private struct EffectWindowContent: View {
                     Text(kind == .scroll
                          ? "scroll: その拍から、譜面の流れる速さが 値 倍になります (1 = 普通 / 0 = 止まる / マイナス = 逆走)。"
                          : "jump: その拍になった瞬間、譜面が先へ一気に飛びます。値は ms で、1000 = 1 秒間に進む距離ぶん (そのときの scroll の値に比例: scroll 0 なら飛ばず、2 なら 2 倍飛びます)。")
-                        .font(.system(size: 11))
+                        .font(.system(size: 11 * state.smallTextBoost))
                         .foregroundColor(Color.white.opacity(0.55))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -504,25 +535,33 @@ private struct SideWideField: View {
     @Binding var text: String
     var keyboard: UIKeyboardType = .default
     var isFileName = false      // ファイル名の欄は、先頭を勝手に大文字にしない
+    @Environment(\.panelFontBoost) private var fontBoost
+    @Environment(\.editorCompact) private var compact
+    @FocusState private var focused: Bool
 
     var body: some View {
+        // SideField と同じ当たり判定の改善 (枠線は background / 枠全体タップでフォーカス / コンパクト時は高さ 64)
         TextField("", text: $text)
-            .font(PanelFont.label(22))
+            .font(PanelFont.label(22, boost: fontBoost))
             .foregroundColor(.white)
             .tint(.white)
             .multilineTextAlignment(.leading)
             .keyboardType(keyboard)
             .autocorrectionDisabled()
             .textInputAutocapitalization(isFileName ? TextInputAutocapitalization.never : nil)
+            .focused($focused)
             .padding(.horizontal, 12)
             .frame(maxWidth: .infinity)
-            .frame(height: 44)
-            .overlay(Rectangle().stroke(Color.white, lineWidth: 2))
+            .frame(height: compact ? 64 : 44)
+            .background(Rectangle().stroke(Color.white, lineWidth: 2))
+            .contentShape(Rectangle())
+            .onTapGesture { focused = true }
     }
 }
 
 private struct InformationWindowContent: View {
     @ObservedObject var state: EditorState
+    @Environment(\.panelFontBoost) private var fontBoost
     @State private var offsetText: String
     @State private var soundText: String        // 曲のファイル (mc の sound)
     @State private var backgroundText: String   // 背景ファイル (mc の meta.background)
@@ -567,7 +606,7 @@ private struct InformationWindowContent: View {
                     }
                 }
                 Text(audioInfo)
-                    .font(.system(size: 11))
+                    .font(.system(size: 11 * state.smallTextBoost))
                     .foregroundColor(Color.white.opacity(0.55))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
@@ -623,7 +662,7 @@ private struct InformationWindowContent: View {
     private var photoButton: some View {
         PhotosPicker(selection: $photoItem, matching: .images) {
             Text("写真から読み込む")
-                .font(PanelFont.label(22))
+                .font(PanelFont.label(22, boost: fontBoost))
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .frame(height: 44)
@@ -648,7 +687,7 @@ private struct InformationWindowContent: View {
     private func labeled<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label)
-                .font(PanelFont.label(22))
+                .font(PanelFont.label(22, boost: fontBoost))
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(height: 26)
@@ -683,6 +722,7 @@ private struct SideDivider: View {
 
 private struct SettingWindowContent: View {
     @ObservedObject var state: EditorState
+    @Environment(\.panelFontBoost) private var fontBoost
 
     // SwiftUI の VStack は 1 つのブロックに 10 個までしか並べられないので、まとまりごとに分けてある
     var body: some View {
@@ -699,7 +739,11 @@ private struct SettingWindowContent: View {
                     holdRow
                     SideDivider()
                     touchEffectRow
-                    playInfoText
+                    Group {
+                        SideDivider()
+                        displayRows
+                        playInfoText
+                    }
                 }
                 .padding(.top, 8)
                 .padding(.bottom, 35)
@@ -792,7 +836,7 @@ private struct SettingWindowContent: View {
     private var playInfoText: some View {
         if !state.playInfo.isEmpty {
             Text(state.playInfo)
-                .font(.system(size: 11, design: .monospaced))
+                .font(.system(size: 11 * state.smallTextBoost, design: .monospaced))
                 .foregroundColor(Color.laneCyan.opacity(0.8))
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -804,7 +848,7 @@ private struct SettingWindowContent: View {
 
     private func note(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 11))
+            .font(.system(size: 11 * state.smallTextBoost))
             .foregroundColor(Color.white.opacity(0.55))
             .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
@@ -817,11 +861,11 @@ private struct SettingWindowContent: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(title)
-                    .font(PanelFont.label(21))
+                    .font(PanelFont.label(21, boost: fontBoost))
                     .foregroundColor(.white)
                 Spacer(minLength: 8)
                 Text(text)
-                    .font(PanelFont.label(21))
+                    .font(PanelFont.label(21, boost: fontBoost))
                     .foregroundColor(Color.panelBlue)
             }
             Slider(value: value, in: range, step: step, onEditingChanged: { editing in
@@ -848,6 +892,34 @@ private struct SettingWindowContent: View {
                  isOn: $state.touchEffect)
     }
 
+    /// 表示の調整 (主に iPhone 向け): 小さい文字の拡大率 / Adv. メニューの幅 / ノーツの切り取り。どれも保存される
+    private var displayRows: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            sliderRow(title: "小さい文字の大きさ", text: percent(state.smallTextScale),
+                      value: $state.smallTextScale, range: EditorState.smallTextScaleRange, step: 0.05,
+                      onEditingChanged: nil)
+            note("SETTING の説明文や Adv. メニューの文字など、小さく書かれた文字の拡大率です (iPhone 表示のときだけ効きます)。")
+            SideDivider()
+            sliderRow(title: "プラグインメニューの幅", text: "\(Int(state.advPanelWidth))pt",
+                      value: $state.advPanelWidth, range: EditorState.advPanelWidthRange, step: 4,
+                      onEditingChanged: nil)
+            note("Adv. (λ) を開いたときのメニューの幅です。広げるぶん、レーンは細くなります。")
+            SideDivider()
+            SideButton(title: "はみ出しノーツを数える") {
+                let r = state.overflowNotes()
+                if r.count == 0 {
+                    state.showToast("はみ出しているノーツはありません", seconds: 2.6)
+                } else if let b = r.firstBeat {
+                    state.showToast("はみ出し: \(r.count) 個 (最初は \(b.label))", seconds: 2.6)
+                }
+            }
+            SideButton(title: "はみ出しを枠に収める") {
+                state.fixOverflowNotes()
+            }
+            note("描画は譜面データに忠実なので、データの端が x: 0〜255 の外にあるノーツは、そのまま外へ描かれます (Malody から持ってきた譜面や、プラグインが置いたノーツに多い)。「枠に収める」は、幅は変えずに中心を内側へ寄せて収めます。Undo で戻せます。")
+        }
+    }
+
     /// 白い縁取りの四角 (BPM / Effect の入力欄と同じ線) のチェックボックス。オンのときは水色のチェック
     private func checkRow(title: String, note noteText: String, isOn: Binding<Bool>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -866,7 +938,7 @@ private struct SettingWindowContent: View {
                     }
                     .frame(width: 28, height: 28)
                     Text(title)
-                        .font(PanelFont.label(18))
+                        .font(PanelFont.label(18, boost: fontBoost))
                         .foregroundColor(.white)
                         .multilineTextAlignment(.leading)
                     Spacer(minLength: 0)

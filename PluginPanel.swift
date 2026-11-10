@@ -7,11 +7,15 @@ import SwiftUI
 //   ・一番下の「プラグイン(lua)を読み込む」で、.lua ファイルを追加できる (複数選択可・次回起動時も残る)
 
 struct AdvPanel: View {
-    /// メニューを開いたときの幅 (レーンはこの分だけ細くなる)
+    /// メニューを開いたときの幅の初期値 (レーンはこの分だけ細くなる)。
+    /// 実際の幅は state.advPanelWidth (SETTING の「プラグインメニューの幅」で変更でき、保存される)
     static let width: CGFloat = 196
 
     @ObservedObject var state: EditorState
     @ObservedObject private var store = PluginStore.shared
+
+    /// 小さい文字の拡大率 (SETTING の「小さい文字の大きさ」。iPhone 表示のときだけ 1 より大きい)
+    private var textBoost: CGFloat { state.smallTextBoost }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,7 +35,7 @@ struct AdvPanel: View {
             Rectangle().fill(Color.white.opacity(0.2)).frame(height: 1)
             importButton
         }
-        .frame(width: AdvPanel.width)
+        .frame(width: CGFloat(state.advPanelWidth))
         .frame(maxHeight: .infinity)
         .background(Color(white: 0.06))
         .overlay(Rectangle().fill(Color.white.opacity(0.3)).frame(width: 1), alignment: .trailing)
@@ -45,10 +49,10 @@ struct AdvPanel: View {
     private var header: some View {
         HStack(spacing: 6) {
             Text("Adv.")
-                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .font(.system(size: 13 * textBoost, weight: .bold, design: .monospaced))
                 .foregroundColor(Color.laneCyan)
             Text("Lua plugins")
-                .font(.system(size: 9))
+                .font(.system(size: 9 * textBoost))
                 .foregroundColor(Color.white.opacity(0.5))
             Spacer(minLength: 0)
             if state.pluginRunning {
@@ -58,7 +62,7 @@ struct AdvPanel: View {
                     state.stopPlugin()
                 } label: {
                     Text("停止")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 11 * textBoost, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
@@ -70,7 +74,7 @@ struct AdvPanel: View {
                     withAnimation(.easeInOut(duration: 0.22)) { state.advOpen = false }
                 } label: {
                     Text("✕")
-                        .font(.system(size: 14, weight: .bold))
+                        .font(.system(size: 14 * textBoost, weight: .bold))
                         .foregroundColor(Color.white.opacity(0.8))
                         .frame(width: 28, height: 28)
                 }
@@ -103,12 +107,12 @@ struct AdvPanel: View {
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 13 * textBoost, weight: .semibold))
                         .foregroundColor(item.hasError ? Color.red.opacity(0.9) : Color.white)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                     Text(item.subtitle)
-                        .font(.system(size: 9, design: .monospaced))
+                        .font(.system(size: 9 * textBoost, design: .monospaced))
                         .foregroundColor(Color.white.opacity(0.5))
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
@@ -116,7 +120,7 @@ struct AdvPanel: View {
                 Spacer(minLength: 0)
                 if isActive {
                     Text("ON")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .font(.system(size: 10 * textBoost, weight: .bold, design: .monospaced))
                         .foregroundColor(.black)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
@@ -147,21 +151,21 @@ struct AdvPanel: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text("出力")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 9 * textBoost, weight: .bold))
                     .foregroundColor(Color.white.opacity(0.55))
                 Spacer()
                 Button {
                     state.pluginLog = ""
                 } label: {
                     Text("消す")
-                        .font(.system(size: 9))
+                        .font(.system(size: 9 * textBoost))
                         .foregroundColor(Color.laneCyan)
                 }
                 .buttonStyle(.plain)
             }
             ScrollView(.vertical) {
                 Text(state.pluginLog)
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 10 * textBoost, design: .monospaced))
                     .foregroundColor(Color.white.opacity(0.85))
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -176,7 +180,7 @@ struct AdvPanel: View {
             openFilePicker()
         } label: {
             Text("プラグイン(lua)を読み込む")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 12 * textBoost, weight: .semibold))
                 .multilineTextAlignment(.center)
                 .foregroundColor(Color.laneCyan)
                 .frame(maxWidth: .infinity)

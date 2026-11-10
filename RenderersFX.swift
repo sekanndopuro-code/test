@@ -50,7 +50,8 @@ extension LaneRenderer {
         drawFXNotes(&c, g, f, state, ranges)
         drawPlayline(&c, g)
         for r in ranges where r.pxPerBeat >= 1 {
-            drawLabels(&c, g, from: r.lo, to: r.hi, pxPerBeat: r.pxPerBeat, mid: r.lo...max(r.lo, r.hi))
+            drawLabels(&c, g, from: r.lo, to: r.hi, pxPerBeat: r.pxPerBeat, mid: r.lo...max(r.lo, r.hi),
+                       size: state.compactLayout ? 28 : 20.5)
         }
         drawFXHud(&c, g, f)
     }

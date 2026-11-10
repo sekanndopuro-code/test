@@ -69,14 +69,14 @@ struct LaneView: View {
     @GestureState private var pinchActive = false    // ピンチ中だけ true (途中で取り消されても自動で false に戻る)
 
     /// レーンの右隣のボタン列の幅 (ノーツがレーンの右端からはみ出したとき、この下まで描く)
-    private static var spillRight: CGFloat { RightPanel.width }
+    private var spillRight: CGFloat { RightPanel.width(compact: state.compactLayout) }
 
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
             // レーンの左端が、エディタ全体の左端からどれだけ右にあるか (左の帯・シークバー・Adv. メニューの幅。Adv. の開閉アニメーションにも追従する)
             let spillL = max(0, proxy.frame(in: .named(EditorView.rootSpace)).minX)
-            let spillR = Self.spillRight
+            let spillR = spillRight
 
             // タッチを受けるのは、これまでどおりレーンの枠の中だけ。描画は下の overlay が、枠の外まで広げて行う。
             Color.clear
@@ -309,6 +309,7 @@ struct StripView: View {
     static let width: CGFloat = 145
 
     @ObservedObject var state: EditorState
+    @Environment(\.editorCompact) private var compact
     @State private var origin: Double? = nil
     @State private var scrollBeats: Double = 1      // ドラッグを始めたときの「帯の高さ全体 = 何拍か」(ズームに比例。ドラッグ中は固定)
     @GestureState private var touching = false      // 指が触れている間だけ true (取り消されても自動で false に戻る)
@@ -342,21 +343,30 @@ struct StripView: View {
                 }
 
                 // 本家の実測: − の上端は画面の上から 10.75pt、＋はその 57.25pt 下 (ボタンの高さ 45pt + すき間 12.25pt)
+                // コンパクト表示 (iPhone) では、画面の角丸に − の記号が掛からないよう、列全体を下へずらす。
+                // 下げ量は一番角丸の大きい iPhone 16 Pro 系 (実寸 半径 55pt) 基準:
+                // − の記号中心が実寸 約44pt の高さに来て、記号の左端 (実寸 左から約2pt) でも
+                // 角丸の弧 (その x では実寸 約41pt) より下に収まる。
+                // コンパクト表示ではボタン自体も 1.5 倍に大きくしてある (ZoomButton / FXButton 側)。
+                // ズーム列の下端は、大きくしても Dynamic Island の上端 (設計 約280pt) より上に収まる
                 VStack(alignment: .leading, spacing: 0) {
                     ZoomButton(isPlus: false) { state.zoomOut() }
-                    Color.clear.frame(width: 1, height: 12.25)
+                    Color.clear.frame(width: 1, height: compact ? 4 : 12.25)
                     ZoomButton(isPlus: true) { state.zoomIn() }
                     Text("Zoom " + state.zoomLabel)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: compact ? 22 : 10, design: .monospaced))
                         .foregroundColor(Color.white.opacity(0.7))
                         .padding(.leading, 4)
                         .padding(.top, 3)
                 }
-                .padding(.top, 10.75)
+                .padding(.top, compact ? 60 : 10.75)
 
-                // FX (擬似テストプレイ): ズームボタンの下。本家のスクリーンショットでは、上端から約 160pt に中心が来る位置
+                // FX (擬似テストプレイ): 本家では上端から約 160pt に中心が来る位置。
+                // コンパクト表示では Dynamic Island の下へ逃がす: 島は横画面の左端・上下中央にあり、
+                // 設計 pt 換算の下端は最大で約 541 (iPhone 16: 実寸 下端 259pt ÷ 倍率 0.479。
+                // Pro Max では約 526、16 Pro では約 538)。556 から置けば、どの機種でも島に掛からない
                 FXButton(isOn: state.fxMode) { state.toggleFX() }
-                    .padding(.top, 159.5)
+                    .padding(.top, compact ? 556 : 159.5)
             }
         }
         .clipped()
@@ -369,20 +379,45 @@ struct StripView: View {
 struct FXButton: View {
     let isOn: Bool
     let action: () -> Void
+    @Environment(\.editorCompact) private var compact
+    @Environment(\.designScale) private var designScale
+    @Environment(\.panelFontBoost) private var fontBoost
 
     var body: some View {
+        // コンパクト表示では見た目自体を 1.5 倍にする (FX は Dynamic Island の下へ移したので大きくできる)
+        let k: CGFloat = compact ? 1.5 : 1
+        let visW = 39 * k
+        let visH = 45 * k
+        // 当たり判定の大きさ (設計 pt)。コンパクト表示では見た目より広げる (DesignScreen.hitLength)
+        let hitW = DesignScreen.hitLength(visW, scale: designScale, compact: compact)
+        let hitH = DesignScreen.hitLength(visH, scale: designScale, compact: compact)
         Button(action: action) {
-            ZStack {
-                ZoomButtonShape().fill(isOn ? Color.panelBlue : Color(red: 127.0 / 255.0, green: 131.0 / 255.0, blue: 138.0 / 255.0))
-                ZoomButtonShape().stroke(Color.white, style: StrokeStyle(lineWidth: 1.5, lineJoin: .miter))
-                Text("FX")
-                    .font(PanelFont.menu(21))
-                    .foregroundColor(.white)
-                    .shadow(color: Color.black.opacity(isOn ? 0.35 : 0), radius: 1)
-                    .position(x: 16.5, y: 22.5)
+            // .frame / .contentShape は Button の「外」ではなくラベルの中に付ける。
+            // 外に付けると、Button のタップ範囲はラベル (39×45) のままで広がらないことがある。
+            // 中では、透明な当たり判定 (hitW × hitH) の左寄せ・上下中央に、見た目の五角形を置く。
+            // 左寄せなので、五角形の左端 (画面端) の位置はこれまでどおり
+            ZStack(alignment: .leading) {
+                Color.clear
+                    .frame(width: hitW, height: hitH)
+                ZStack {
+                    ZoomButtonShape().fill(isOn ? Color.panelBlue : Color(red: 127.0 / 255.0, green: 131.0 / 255.0, blue: 138.0 / 255.0))
+                    ZoomButtonShape().stroke(Color.white, style: StrokeStyle(lineWidth: 1.5, lineJoin: .miter))
+                    Text("FX")
+                        // 拡大率は他の PanelFont (×1.45) より抑える: 21 × 1.45 = 約30pt では、
+                        // 幅 39pt の五角形 (上辺は 24.65pt まで) から文字の角がはみ出すため。
+                        // ×1.2 = 25.2pt なら幅 約24pt に収まる。念のため minimumScaleFactor でも縮められるようにする。
+                        // コンパクト表示では五角形が 1.5 倍になるぶん、文字も 21 × 1.5 を基準にする
+                        .font(PanelFont.menu(21 * k, boost: min(fontBoost, 1.2)))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                        .frame(width: 35 * k)
+                        .shadow(color: Color.black.opacity(isOn ? 0.35 : 0), radius: 1)
+                        .position(x: 16.5 * k, y: 22.5 * k)
+                }
+                .frame(width: visW, height: visH)
             }
-            .frame(width: 39, height: 45)
-            .contentShape(ZoomButtonShape())
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -393,22 +428,35 @@ struct FXButton: View {
 struct ZoomButton: View {
     let isPlus: Bool
     let action: () -> Void
+    @Environment(\.editorCompact) private var compact
+    @Environment(\.designScale) private var designScale
 
     var body: some View {
+        // コンパクト表示では見た目自体を 1.5 倍にする (FXButton と同じ倍率)
+        let k: CGFloat = compact ? 1.5 : 1
+        let visW = 39 * k
+        let visH = 45 * k
+        // FXButton と同じく、当たり判定はラベルの中に入れて長方形全体にする (理由は FXButton 側のコメント)
+        let hitW = DesignScreen.hitLength(visW, scale: designScale, compact: compact)
+        let hitH = DesignScreen.hitLength(visH, scale: designScale, compact: compact)
         Button(action: action) {
-            ZStack {
-                ZoomButtonShape().fill(Color(red: 127.0 / 255.0, green: 131.0 / 255.0, blue: 138.0 / 255.0))
-                ZoomButtonShape().stroke(Color.white, style: StrokeStyle(lineWidth: 1.5, lineJoin: .miter))
+            ZStack(alignment: .leading) {
+                Color.clear
+                    .frame(width: hitW, height: hitH)
                 ZStack {
-                    Rectangle().fill(Color.white).frame(width: 25.5, height: 3.3)
-                    if isPlus {
-                        Rectangle().fill(Color.white).frame(width: 3.3, height: 25)
+                    ZoomButtonShape().fill(Color(red: 127.0 / 255.0, green: 131.0 / 255.0, blue: 138.0 / 255.0))
+                    ZoomButtonShape().stroke(Color.white, style: StrokeStyle(lineWidth: 1.5, lineJoin: .miter))
+                    ZStack {
+                        Rectangle().fill(Color.white).frame(width: 25.5 * k, height: 3.3 * k)
+                        if isPlus {
+                            Rectangle().fill(Color.white).frame(width: 3.3 * k, height: 25 * k)
+                        }
                     }
+                    .position(x: 16.5 * k, y: 22.5 * k)
                 }
-                .position(x: 16.5, y: 22.5)
+                .frame(width: visW, height: visH)
             }
-            .frame(width: 39, height: 45)
-            .contentShape(ZoomButtonShape())
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -586,9 +634,12 @@ struct PanelButton: View {
     /// 文字 (glyph) の代わりに出すアイコン。引数は今のボタンの文字色 (選択中はシアン)
     var icon: ((Color) -> AnyView)? = nil
     let action: () -> Void
+    @Environment(\.editorCompact) private var compact
 
     var body: some View {
         let fg = active ? Color.panelBlue : (dimmed ? Color.white.opacity(0.35) : Color.white)
+        // コンパクト表示ではアイコンと同じ倍率で文字も大きくする (PanelIconView.compactIconScale)
+        let k: CGFloat = compact ? PanelIconView.compactIconScale : 1
         Button(action: action) {
             ZStack {
                 if let icon = icon {
@@ -596,14 +647,14 @@ struct PanelButton: View {
                 } else {
                     // 本家のアイコン (高さ 約36pt) と同じくらいの存在感になるよう、文字を大きく
                     Text(glyph)
-                        .font(.system(size: 30, weight: .semibold))
+                        .font(.system(size: 30 * k, weight: .semibold))
                         .foregroundColor(fg)
                 }
                 if let badge = badge {
                     Text(badge)
-                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .font(.system(size: 14 * k, weight: .bold, design: .monospaced))
                         .foregroundColor(Color.laneCyan)
-                        .offset(x: 22, y: -21)
+                        .offset(x: 22 * k, y: -21 * k)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -615,10 +666,14 @@ struct PanelButton: View {
 
 struct RightPanel: View {
     @ObservedObject var state: EditorState
+    @Environment(\.editorCompact) private var compact
 
     // ── 本家 (iPad Air 4 / 横画面 1180 × 820pt) のスクリーンショットから実測した値 ──
     /// ボタン列の幅 (左の細い白線から画面の右端まで。アイコンの中心はその真ん中)
     static let width: CGFloat = 58
+    /// コンパクト表示 (iPhone) でのボタン列の幅。レーンが細くなるぶん、できる限り横幅を取ってアイコンを大きくする
+    static let compactWidth: CGFloat = 100
+    static func width(compact: Bool) -> CGFloat { compact ? compactWidth : width }
     /// アイコンの中心どうしの間隔 (本家: 68.45〜68.6pt)。アイコン自体は高さ 36pt なので、上下に 約32pt の余白が入る
     static let slotPitch: CGFloat = 68.5
     /// 最初のアイコンの中心は画面の上端から 45pt、最後のアイコンの中心は下端から 45pt (= 1つぶんの枠の上下に 10.75pt)
@@ -636,21 +691,33 @@ struct RightPanel: View {
     @State private var labelAlpha: Double = 1
     @State private var labelFade: DispatchWorkItem? = nil
 
+    /// コンパクト表示 (iPhone) での上下の追加の空き (設計 pt)。
+    /// 画面の角丸の範囲に、最初と最後のアイコンが掛からないようにする。
+    /// 最初のアイコンの中心は 45pt (実寸 約22pt) しか離れておらず、鉛筆 (EDIT) などが角で切れていた。
+    /// 値は一番角丸の大きい iPhone 16 Pro 系 (実寸 半径 55pt、iPhone 16 は 47pt) 基準:
+    /// 最初のアイコンの中心が実寸 約46pt の高さに来て、アイコンの右端寄りでも角丸の弧より下に収まる
+    static let compactEdgeExtra: CGFloat = 52
+
+    /// 上下の空き (コンパクト表示では角丸ぶん広い)
+    static func edgeInset(compact: Bool) -> CGFloat {
+        edgeInset + (compact ? compactEdgeExtra : 0)
+    }
+
     /// アイコンの中心どうしの間隔。本家の間隔を基本にして、入りきらないとき (EDIT 中のボタンが多いとき・小さい画面) だけ詰める。
     /// 上の並びのボタン数は、EDIT 中は 9 (アイコンが増える。LASSO は More メニューの中)、通常は 6
-    static func pitch(forHeight height: CGFloat, editing: Bool) -> CGFloat {
+    static func pitch(forHeight height: CGFloat, editing: Bool, compact: Bool = false) -> CGFloat {
         let topCount = editing ? 9 : 6
-        return min(slotPitch, (height - edgeInset * 2) / CGFloat(topCount + bottomCount))
+        return min(slotPitch, (height - edgeInset(compact: compact) * 2) / CGFloat(topCount + bottomCount))
     }
 
     /// EDIT 中の More ボタン (上から 8 番目) の中心の高さ。More メニューは、これを基準に置く
-    static func moreCenterY(forHeight height: CGFloat) -> CGFloat {
-        edgeInset + pitch(forHeight: height, editing: true) * 7.5
+    static func moreCenterY(forHeight height: CGFloat, compact: Bool = false) -> CGFloat {
+        edgeInset(compact: compact) + pitch(forHeight: height, editing: true, compact: compact) * 7.5
     }
 
     var body: some View {
         GeometryReader { proxy in
-            let pitch = Self.pitch(forHeight: proxy.size.height, editing: state.editing)
+            let pitch = Self.pitch(forHeight: proxy.size.height, editing: state.editing, compact: compact)
             VStack(spacing: 0) {
                 // EDIT / Back で、アイコン列が右へ滑って入れ替わる (入れ替わり中は 2つが重なるので ZStack に入れる)
                 ZStack(alignment: .top) {
@@ -678,7 +745,7 @@ struct RightPanel: View {
                 }
                 .frame(height: pitch)
             }
-            .padding(.vertical, Self.edgeInset)
+            .padding(.vertical, Self.edgeInset(compact: compact))
             .overlay(alignment: .topLeading) {
                 labelColumn(pitch: pitch)
                     .animation(.easeInOut(duration: 0.2), value: state.editing)
@@ -687,17 +754,17 @@ struct RightPanel: View {
             .overlay(alignment: .bottom) {
                 // 保存の状態 (オートセーブ)。下の2つのアイコンの上の余白に、小さく出す (レイアウトには影響しない)
                 Text(state.saveStatus)
-                    .font(.system(size: 9))
+                    .font(.system(size: compact ? 12 : 9))
                     .foregroundColor(Color.white.opacity(0.55))
                     .multilineTextAlignment(.center)
-                    .frame(width: Self.width - 4)
-                    .padding(.bottom, Self.edgeInset + pitch * CGFloat(Self.bottomCount) + 1)
+                    .frame(width: Self.width(compact: compact) - 4)
+                    .padding(.bottom, Self.edgeInset(compact: compact) + pitch * CGFloat(Self.bottomCount) + 1)
                     .allowsHitTesting(false)
             }
         }
         // BPM / Effect の右ウィンドウが開いているあいだは、本家と同じくアイコンが見えなくなる (ウィンドウが列の上まで覆う)
         .opacity(state.sidePanel == nil ? 1 : 0)
-        .frame(width: Self.width)
+        .frame(width: Self.width(compact: compact))
         .frame(maxHeight: .infinity)
         .background(Color.black.opacity(0.35))           // 背景画像とはみ出したノーツが透けて見える
         .overlay(Rectangle().fill(Color.white.opacity(0.6)).frame(width: 1), alignment: .leading)   // 本家は左端に細い白線
@@ -728,7 +795,7 @@ struct RightPanel: View {
                         .frame(height: pitch)
                 }
             }
-            .padding(.top, Self.edgeInset)
+            .padding(.top, Self.edgeInset(compact: compact))
             .fixedSize()
             .frame(width: 0, alignment: .trailing)      // 幅 0 の枠の右端にそろえる = 列は、枠の左側へ伸びる
             .offset(x: -Self.labelGap)
@@ -890,6 +957,57 @@ enum DesignScreen {
     static func scale(forHeight h: CGFloat) -> CGFloat {
         max(h, 1) / height
     }
+
+    // MARK: コンパクト表示 (iPhone 横画面)
+
+    /// 倍率がこれ未満なら「コンパクト表示」として扱う。
+    /// iPhone 横画面は高さ 375〜440pt (倍率 0.46〜0.54)、iPad は一番小さい mini でも
+    /// 横画面の高さ 744pt (倍率 約 0.91) なので、0.62 が境界になる
+    static let compactThreshold: CGFloat = 0.62
+
+    /// コンパクト表示か (画面の高さから判定)
+    static func isCompact(forHeight h: CGFloat) -> Bool {
+        scale(forHeight: h) < compactThreshold
+    }
+
+    /// コンパクト表示のときの PanelFont の拡大率。
+    /// DesignCanvas が Environment (\.panelFontBoost) で子ビューへ渡し、各ビューが PanelFont の引数に使う。
+    /// (static 変数で渡すと SwiftUI が変化を検知せず、最初の描画だけ拡大されないことがあるため)
+    static let compactFontBoost: CGFloat = 1.45
+
+    /// ボタンの当たり判定の 1 辺 (設計 pt)。
+    /// コンパクト表示では、見た目 (五角形) より広く取る: 実寸で最低 約31pt を確保する。
+    /// (iPhone 16 では見た目 39×45pt が実寸 約19×22pt しかなく、指 (約44pt) では押せなかった)
+    /// 上限 92 は、ズーム/FX を縦に並べたときに Dynamic Island の範囲 (実寸 上から約134pt〜) へ
+    /// 入らないための値。iPad (コンパクトでない) では見た目のまま
+    static func hitLength(_ visual: CGFloat, scale: CGFloat, compact: Bool) -> CGFloat {
+        guard compact else { return visual }
+        return min(92, max(visual, 31 / max(scale, 0.2)))
+    }
+}
+
+// MARK: - コンパクト表示 / 倍率を子ビューへ渡す
+
+private struct EditorCompactKey: EnvironmentKey { static let defaultValue = false }
+private struct DesignScaleKey: EnvironmentKey { static let defaultValue: CGFloat = 1 }
+private struct PanelFontBoostKey: EnvironmentKey { static let defaultValue: CGFloat = 1 }
+
+extension EnvironmentValues {
+    /// コンパクト表示 (iPhone 横画面など) か。DesignCanvas が入れる
+    var editorCompact: Bool {
+        get { self[EditorCompactKey.self] }
+        set { self[EditorCompactKey.self] = newValue }
+    }
+    /// 設計画面の倍率 (画面の高さ ÷ 820)。DesignCanvas が入れる
+    var designScale: CGFloat {
+        get { self[DesignScaleKey.self] }
+        set { self[DesignScaleKey.self] = newValue }
+    }
+    /// PanelFont の拡大率 (コンパクト表示では DesignScreen.compactFontBoost、それ以外は 1)。DesignCanvas が入れる
+    var panelFontBoost: CGFloat {
+        get { self[PanelFontBoostKey.self] }
+        set { self[PanelFontBoostKey.self] = newValue }
+    }
 }
 
 struct DesignCanvas<Content: View>: View {
@@ -902,9 +1020,13 @@ struct DesignCanvas<Content: View>: View {
     var body: some View {
         GeometryReader { geo in
             let s = DesignScreen.scale(forHeight: geo.size.height)
+            let compact = s < DesignScreen.compactThreshold
             content
                 .frame(width: geo.size.width / s, height: DesignScreen.height)
                 .scaleEffect(s, anchor: .topLeading)
+                .environment(\.editorCompact, compact)
+                .environment(\.designScale, s)
+                .environment(\.panelFontBoost, compact ? DesignScreen.compactFontBoost : 1)
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
         }
     }
@@ -914,6 +1036,8 @@ struct DesignCanvas<Content: View>: View {
 
 struct EditorView: View {
     @ObservedObject var state: EditorState
+    @Environment(\.editorCompact) private var compact
+    @Environment(\.panelFontBoost) private var fontBoost
 
     /// 画面全体の座標系の名前。LaneView が「自分の左端が画面の左端からどれだけ右か」を知るために使う
     static let rootSpace = "editorRoot"
@@ -938,6 +1062,9 @@ struct EditorView: View {
             RightPanel(state: state)
         }
         .coordinateSpace(name: Self.rootSpace)
+        // Canvas 描画 (Renderers) は Environment を読めないので、コンパクト表示かどうかは state 経由でも渡す
+        .onAppear { state.compactLayout = compact }
+        .onChange(of: compact) { state.compactLayout = $0 }
         .background(EditorBackground(state: state))      // 背景画像 (無いときは黒)。ノーツ・レーン・帯は透明に描いて、これを透かす
         // SETTING の「タッチエフェクト」。画面 (UIWindow) に取り付けるので、置く場所はどこでもよい。
         // テストプレイが出ている間は外す (テストプレイが自分で同じものを出すので、二重になるのを避ける)
@@ -968,9 +1095,10 @@ struct EditorView: View {
         }
     }
 
-    /// Adv. メニューの今の幅 (EDIT 中に開いているときだけ。閉じているときは 0)
+    /// Adv. メニューの今の幅 (EDIT 中に開いているときだけ。閉じているときは 0)。
+    /// 幅そのものは SETTING で変えられる (state.advPanelWidth、初期値 196)
     private var advWidth: CGFloat {
-        (state.editing && state.advOpen) ? AdvPanel.width : 0
+        (state.editing && state.advOpen) ? CGFloat(state.advPanelWidth) : 0
     }
 
     /// Grid settings のダイアログ。シートと違って、下からせり上がる動きがなく、押した瞬間に出る
@@ -995,7 +1123,7 @@ struct EditorView: View {
                         .contentShape(Rectangle())
                         .onTapGesture { state.popup = .none }
                     popupBody
-                        .padding(.trailing, RightPanel.width + RightPanel.sideGap)
+                        .padding(.trailing, RightPanel.width(compact: compact) + RightPanel.sideGap)
                         // 本家は、再生速度も分割も、メニューの下端が画面の下端のすぐ上にそろう。
                         // More だけは上から: 上端が、More ボタンの中心より 263pt 上 (自作は More ボタンが本家より下なので、その分メニューも下がる)
                         .padding(isMore ? Edge.Set.top : Edge.Set.bottom,
@@ -1066,7 +1194,7 @@ struct EditorView: View {
             ForEach(Array(items.enumerated()), id: \.offset) { entry in
                 Button(action: entry.element.action) {
                     Text(entry.element.title)
-                        .font(PanelFont.menu(29))
+                        .font(PanelFont.menu(29, boost: fontBoost))
                         .foregroundColor(entry.element.selected ? Color.panelBlue : Color.white)
                         .lineLimit(1)
                         .minimumScaleFactor(0.5)
@@ -1095,7 +1223,7 @@ struct EditorView: View {
 
     /// More メニューの上端の高さ (画面の上端から)。画面の下にはみ出すときだけ、はみ出さない位置まで上げる
     private func moreMenuTop(height: CGFloat) -> CGFloat {
-        let top = RightPanel.moreCenterY(forHeight: height) - Self.moreTopAboveButton
+        let top = RightPanel.moreCenterY(forHeight: height, compact: compact) - Self.moreTopAboveButton
         let menuHeight = Self.moreRowHeight * CGFloat(Self.moreRowCount) + Self.morePad * 2
         return max(4, min(top, height - menuHeight - 4))
     }
@@ -1141,7 +1269,7 @@ struct EditorView: View {
                 MoreMenuIcon(kind: icon, color: fg)
                     .frame(width: 64, height: Self.moreRowHeight)
                 Text(t)
-                    .font(PanelFont.label(22))
+                    .font(PanelFont.label(22, boost: fontBoost))
                     .foregroundColor(fg)
                     .lineLimit(1)
                     .padding(.leading, Self.moreTextX)
@@ -1156,7 +1284,7 @@ struct EditorView: View {
     private var toastLayer: some View {
         if let t = state.toast {
             Text(t)
-                .font(.system(size: 14))
+                .font(.system(size: compact ? 17 : 14))
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)
                 .lineLimit(5)

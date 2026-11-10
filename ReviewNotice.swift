@@ -32,6 +32,7 @@ struct ReviewNoticeShape: Shape {
 /// - tick: `EditorState.reviewNoticeTick`。値が変わるたびに 1 回出る
 struct ReviewNoticeLayer: View {
     let tick: Int
+    @Environment(\.panelFontBoost) private var fontBoost
 
     @State private var opacity: Double = 0
     @State private var generation = 0       // 出し直したとき、前の「消す予約」を無効にするための番号
@@ -42,7 +43,7 @@ struct ReviewNoticeLayer: View {
 
     var body: some View {
         Text("0 issue found")
-            .font(PanelFont.label(16))
+            .font(PanelFont.label(16, boost: fontBoost))
             .foregroundColor(.white)
             .frame(width: 168, height: 34)
             .background(ReviewNoticeShape().fill(Color.black.opacity(0.5)))

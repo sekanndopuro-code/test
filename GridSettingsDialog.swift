@@ -64,6 +64,7 @@ private struct GridDialogButtonStyle: ButtonStyle {
 
 struct GridSettingsDialog: View {
     @ObservedObject var state: EditorState
+    @Environment(\.panelFontBoost) private var fontBoost
 
     /// 編集中の値。「完了」で state に書き込み、「戻る」なら捨てる (今までのシートと同じ)
     @State private var lines: Int
@@ -131,7 +132,7 @@ struct GridSettingsDialog: View {
     private var linesRow: some View {
         HStack(spacing: 0) {
             Text("Grid lines")
-                .font(PanelFont.label(19))
+                .font(PanelFont.label(19, boost: fontBoost))
                 .foregroundColor(.white)
                 .frame(width: Self.labelW, alignment: .trailing)
             bar.padding(.leading, Self.labelGap)
@@ -155,7 +156,7 @@ struct GridSettingsDialog: View {
                 )
             GridBarShape().stroke(Color.white.opacity(0.6), lineWidth: 0.8)
             Text("\(lines)")
-                .font(PanelFont.menu(23))
+                .font(PanelFont.menu(23, boost: fontBoost))
                 .foregroundColor(.white)
         }
         .frame(width: Self.barW, height: Self.barH)
@@ -175,7 +176,7 @@ struct GridSettingsDialog: View {
     private var alignRow: some View {
         HStack(spacing: 0) {
             Text("Grid align")
-                .font(PanelFont.label(19))
+                .font(PanelFont.label(19, boost: fontBoost))
                 .foregroundColor(.white)
                 .frame(width: Self.labelW, alignment: .trailing)
             checkbox.padding(.leading, Self.labelGap)

@@ -27,7 +27,7 @@ extension EditorState {
     func shareMCZNow() {
         do {
             let url = try exportPackage()
-            MCZSharer.present(url: url)
+            MCZSharer.present(url: url, compact: compactLayout)
         } catch {
             showToast("エクスポートに失敗しました: \(error.localizedDescription)")
         }
@@ -46,6 +46,58 @@ extension EditorState {
             setViewBeat(beat.value)
         } else {
             reviewNoticeTick &+= 1
+        }
+    }
+
+    /// レーンの枠 (x: 0...255) から端がはみ出しているノーツを探す (SETTING の「はみ出しノーツを数える」用)。
+    /// 判定は描画 (Renderers) と同じ: 端 = 中心 x ± w/2。スライドは始点と各 seg の絶対 x (始点 + 相対 x) で判定する。
+    /// 描画はデータに忠実なので、データが範囲内に収まっていれば、ノーツが枠の外に描かれることはない
+    func overflowNotes() -> (count: Int, firstBeat: Beat?) {
+        var count = 0
+        var first: Beat? = nil
+        for n in chart.notes {
+            let half = Double(n.w) / 2
+            var bad = Double(n.x) - half < 0 || Double(n.x) + half > 255
+            if !bad {
+                for s in n.segs {
+                    let ax = Double(n.x + s.x)
+                    if ax - half < 0 || ax + half > 255 { bad = true; break }
+                }
+            }
+            if bad {
+                count += 1
+                if first == nil || n.beat < first! { first = n.beat }
+            }
+        }
+        return (count, first)
+    }
+
+    /// はみ出しているノーツを、幅 (w) は変えずに中心を内側へ寄せて、枠に収める (SETTING の「はみ出しを枠に収める」用)。
+    /// スライドは seg の相対位置を保ったまま始点ごとずらす。Undo で戻せる。
+    /// 幅 + seg の広がりが 255 を超えるノーツは、寄せても収まりきらない (その場合は数え直して残数を伝える)
+    func fixOverflowNotes() {
+        let (count, _) = overflowNotes()
+        if count == 0 {
+            showToast("はみ出しているノーツはありません", seconds: 2.6)
+            return
+        }
+        pushUndo()
+        for i in chart.notes.indices {
+            let n = chart.notes[i]
+            var relMin = 0
+            var relMax = 0
+            for s in n.segs {
+                relMin = min(relMin, s.x)
+                relMax = max(relMax, s.x)
+            }
+            chart.notes[i].x = laneFittedHead(n.x, width: n.w, relMin: relMin, relMax: relMax, origHead: nil)
+        }
+        chartChanged()
+        let (rest, _) = overflowNotes()
+        if rest == 0 {
+            showToast("\(count) 個のノーツを枠に収めました (Undo で戻せます)", seconds: 2.6)
+        } else {
+            showToast("\(count) 個を内側へ寄せました。幅が広すぎて収まりきらないものが \(rest) 個あります", seconds: 3.2)
         }
     }
 
@@ -99,7 +151,7 @@ extension EditorState {
 /// mcz の共有シート。SwiftUI の ShareLink は「もう 1 回タップ」が要るので、UIKit の UIActivityViewController を直接出す。
 /// iPad ではポップオーバーの基準 (sourceView) が無いとクラッシュするので、右ボタン列の More のあたりを基準にしている
 enum MCZSharer {
-    static func present(url: URL) {
+    static func present(url: URL, compact: Bool = false) {
         guard let top = topViewController() else { return }
         let vc = UIActivityViewController(activityItems: [url], applicationActivities: nil)
         if let pop = vc.popoverPresentationController {
@@ -108,7 +160,7 @@ enum MCZSharer {
             // META の列の 3 番目 (More) の中心
             // 右ボタン列の寸法は設計画面 (高さ 820pt) の値なので、実際の画面の倍率をかける (DesignCanvas)
             let s = DesignScreen.scale(forHeight: b.height)
-            pop.sourceRect = CGRect(x: b.maxX - RightPanel.width * s / 2,
+            pop.sourceRect = CGRect(x: b.maxX - RightPanel.width(compact: compact) * s / 2,
                                     y: (RightPanel.edgeInset + RightPanel.slotPitch * 2.5) * s,
                                     width: 1, height: 1)
             pop.permittedArrowDirections = [.right]

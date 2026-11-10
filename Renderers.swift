@@ -85,8 +85,8 @@ enum LaneRenderer {
         // (描き方は同じ。画面の外のノーツは、もともと何も描かれていなかった)
         let allNotes = state.chart.notes
         let visible = state.visibleNoteIndices(g)
-        drawNotes(&c, g, visible.count == allNotes.count ? allNotes : visible.map { allNotes[$0] },
-                  selected: state.selectedIDs)
+        let drawList = visible.count == allNotes.count ? allNotes : visible.map { allNotes[$0] }
+        drawNotes(&c, g, drawList, selected: state.selectedIDs)
         drawOrder(&c, g, state)
         drawSprites(&c, g, state)
         drawSlideModify(&c, g, state)
@@ -94,7 +94,8 @@ enum LaneRenderer {
         if let gh = state.ghost { drawGhost(&c, g, gh) }
         drawLasso(&c, state)
         drawPlayline(&c, g)
-        drawLabels(&c, g)
+        // コンパクト表示 (iPhone) ではレーン左端の拍番号も大きくする (Canvas は Environment を読めないので state 経由)
+        drawLabels(&c, g, size: state.compactLayout ? 28 : 20.5)
     }
 
     static func drawVLines(_ c: inout GraphicsContext, _ g: LaneGeo, lines: Int) {
@@ -143,29 +144,29 @@ enum LaneRenderer {
         }
     }
 
-    static func drawLabels(_ c: inout GraphicsContext, _ g: LaneGeo) {
-        drawLabels(&c, g, from: g.beatOf(g.H), to: g.beatOf(0), pxPerBeat: g.ppb)
+    static func drawLabels(_ c: inout GraphicsContext, _ g: LaneGeo, size: CGFloat = 20.5) {
+        drawLabels(&c, g, from: g.beatOf(g.H), to: g.beatOf(0), pxPerBeat: g.ppb, size: size)
     }
 
     /// 拍 lo...hi の番号。pxPerBeat = その範囲の 1 拍の画面の高さ。
     /// mid を渡すと、番号の位置 (N 拍目と N+1 拍目の真ん中) がその範囲に入るものだけを描く
     /// (FX 表示で、隣り合う範囲が同じ番号を二重に描かないため)
     static func drawLabels(_ c: inout GraphicsContext, _ g: LaneGeo, from lo: Double, to hi: Double, pxPerBeat: Double,
-                           mid: ClosedRange<Double>? = nil) {
+                           mid: ClosedRange<Double>? = nil, size: CGFloat = 20.5) {
         // 0拍始まり (mcファイルの値と同じ)
         // 番号 N は、N 拍目と N+1 拍目の線の真ん中に置く (本家と同じ)。下の端に半分見えている番号も出すため、1つ手前から数える
         let b0 = max(0, Int(floor(lo)) - 1)
         let b1 = Int(ceil(hi))
         if b1 < b0 || b1 - b0 > 200 { return }
         var step = 1
-        while pxPerBeat * Double(step) < 18 { step *= 2 }
+        while pxPerBeat * Double(step) < size * 0.88 { step *= 2 }
         for b in b0...b1 where b % step == 0 {
             let m = Double(b) + Double(step) / 2.0
             if let r = mid, !r.contains(m) { continue }
             let y = g.py(m)
             if y < -12 || y > g.H + 12 { continue }
             // 本家の番号は細くて縦長 (数字の高さ 約14.5pt、3桁で幅 約24pt)。レーンの左端の線に少し掛かる
-            drawNumber(c, "\(b)", at: CGPoint(x: 6.5, y: y), anchor: .leading, size: 20.5, scaleX: 0.77, alpha: 0.75)
+            drawNumber(c, "\(b)", at: CGPoint(x: 6.5, y: y), anchor: .leading, size: size, scaleX: 0.77, alpha: 0.75)
         }
     }
 
@@ -177,8 +178,9 @@ enum LaneRenderer {
             p.move(to: CGPoint(x: g.trackL, y: y))
             p.addLine(to: CGPoint(x: g.trackL + g.trackW, y: y))
             c.stroke(p, with: .color(Color.yellow.opacity(0.35)), style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
-            let t = Text(String(format: "BPM %.2f", tp.bpm)).font(.system(size: 11, design: .monospaced)).foregroundColor(Color.yellow.opacity(0.8))
-            c.draw(t, at: CGPoint(x: g.trackL + g.trackW - 4, y: y - 9), anchor: .trailing)
+            let fs: CGFloat = s.compactLayout ? 16 : 11
+            let t = Text(String(format: "BPM %.2f", tp.bpm)).font(.system(size: fs, design: .monospaced)).foregroundColor(Color.yellow.opacity(0.8))
+            c.draw(t, at: CGPoint(x: g.trackL + g.trackW - 4, y: y - (s.compactLayout ? 13 : 9)), anchor: .trailing)
         }
     }
 
@@ -210,8 +212,9 @@ enum LaneRenderer {
             // scroll を先に、jump を後に並べる (同じ時刻では scroll を変えてから、その値で jump するため)
             let items = row.items.sorted { $0.kind == .scroll && $1.kind != .scroll }
             let text = items.map { "\($0.kind.label) \($0.valueText)" }.joined(separator: " ")
-            let t = Text(text).font(.system(size: 11, design: .monospaced)).foregroundColor(blue.opacity(0.95))
-            c.draw(t, at: CGPoint(x: g.trackL + 4, y: y - 9), anchor: .leading)
+            let fs: CGFloat = s.compactLayout ? 16 : 11
+            let t = Text(text).font(.system(size: fs, design: .monospaced)).foregroundColor(blue.opacity(0.95))
+            c.draw(t, at: CGPoint(x: g.trackL + 4, y: y - (s.compactLayout ? 13 : 9)), anchor: .leading)
         }
     }
 
@@ -286,7 +289,7 @@ enum LaneRenderer {
                 c.fill(badge, with: .color(Color.black.opacity(0.75)))
                 c.stroke(badge, with: .color(fill), lineWidth: 2)
                 let label = Text("\(k + 1)")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: state.compactLayout ? 18 : 13, weight: .bold))
                     .foregroundColor(.white)
                 c.draw(label, at: CGPoint(x: cx, y: y0), anchor: .center)
             }
@@ -677,14 +680,15 @@ enum StripRenderer {
             }
         }
         // 拍番号 (0拍始まり)。本家は細くて縦長 (数字の高さ 約24.5pt、3桁で幅 約36.5pt)
+        // コンパクト表示 (iPhone) では少し大きくし、間引きの間隔も文字の大きさに合わせる
         var step = 1
-        while ppb * Double(step) < 28 { step *= 2 }
+        while ppb * Double(step) < (state.compactLayout ? 34 : 28) { step *= 2 }
         let lb0 = max(0, Int(floor(b0)) - 1)
         let lb1 = Int(ceil(b1))
         if lb1 >= lb0 && lb1 - lb0 < 2000 {
             for b in lb0...lb1 where b % step == 0 {
                 drawNumber(inner, "\(b)", at: CGPoint(x: faceW * 0.53, y: y(Double(b) + Double(step) / 2.0)),
-                           anchor: .center, size: 34.7, scaleX: 0.78, alpha: 0.78)
+                           anchor: .center, size: state.compactLayout ? 42 : 34.7, scaleX: 0.78, alpha: 0.78)
             }
         }
         // 帯の枠 (本家の実測: 上下と左は明るい線、右は暗い線。右の外側の側面は SeekRenderer が描く)
@@ -848,8 +852,11 @@ enum TimeLabelRenderer {
         var c = ctx
         // 明るい半透明のパネル (レーンの番号欄まで続く)
         c.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color.timePanel))
-        vtext(c, state.timeString(state.totalSec), centerY: edgeInset)
-        vtext(c, state.timeString(state.currentSec()), centerY: size.height - edgeInset)
+        // コンパクト表示 (iPhone) では時刻の数字も大きくする (送り幅も同じ割合で広げる)
+        let fs: CGFloat = state.compactLayout ? 33 : fontSize
+        let pt: CGFloat = pitch * fs / fontSize
+        vtext(c, state.timeString(state.totalSec), centerY: edgeInset, fontSize: fs, pitch: pt)
+        vtext(c, state.timeString(state.currentSec()), centerY: size.height - edgeInset, fontSize: fs, pitch: pt)
     }
 
     private static func dot(_ c: GraphicsContext, _ x: CGFloat, _ y: CGFloat) {
@@ -857,7 +864,7 @@ enum TimeLabelRenderer {
         c.fill(Path(r), with: .color(.white))
     }
 
-    private static func vtext(_ ctx: GraphicsContext, _ s: String, centerY: CGFloat) {
+    private static func vtext(_ ctx: GraphicsContext, _ s: String, centerY: CGFloat, fontSize: CGFloat, pitch: CGFloat) {
         var cc = ctx
         cc.translateBy(x: centerX, y: centerY)
         cc.rotate(by: .degrees(-90)) // 下から上へ読む。この座標では +x が上向き、+y が右向き (字の下向き)

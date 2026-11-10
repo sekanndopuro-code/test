@@ -16,13 +16,19 @@ enum PanelIconKind {
 struct PanelIconView: View {
     let kind: PanelIconKind
     let color: Color
+    @Environment(\.editorCompact) private var compact
 
     /// 本家のアイコンの高さ (これを表示の高さに合わせる)
     static let refHeight: CGFloat = 36
 
+    /// コンパクト表示 (iPhone) でのアイコンの倍率。ボタン列の幅を 100 に広げ、
+    /// 縦は1つぶんの高さ (最小 約63pt) にギリギリ収まる大きさ: 枠の高さ 42 × 1.45 = 約61pt
+    static let compactIconScale: CGFloat = 1.45
+
     var body: some View {
+        let iconScale: CGFloat = compact ? Self.compactIconScale : 1
         Canvas { ctx, size in
-            let s: CGFloat = 1      // 座標は本家の pt のまま (枠は少し余裕を持たせてあるので、拡大縮小はしない)
+            let s: CGFloat = iconScale      // 座標は本家の pt が単位。コンパクト表示ではそのまま拡大して描く
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             switch kind {
             case .edit:
@@ -53,7 +59,7 @@ struct PanelIconView: View {
                 Self.fillPolys(ctx, PanelIconData.divide, center: center, scale: s, color: color)
             }
         }
-        .frame(width: 50, height: Self.refHeight + 6)      // 本家と同じ大きさ (高さ 36pt、いちばん横長の鉛筆で幅 44pt)。縁が欠けないよう上下に 3pt ずつ余裕
+        .frame(width: 50 * iconScale, height: (Self.refHeight + 6) * iconScale)      // 本家と同じ大きさ (高さ 36pt、いちばん横長の鉛筆で幅 44pt)。縁が欠けないよう上下に 3pt ずつ余裕。コンパクト表示では枠ごと拡大
     }
 
     /// 輪郭 (x, y, x, y, ... の並び) を、偶奇規則で塗る。穴 (内側の輪郭) は抜ける
@@ -189,10 +195,17 @@ extension Color {
 /// 幅と高さの比が近い、iPad 標準の字体で代用している。字体を変えたいときは、ここの名前だけ変えればよい
 /// (本家の字体ファイルを Playgrounds に入れた場合も、ここに名前を書けば全部に効く)。
 enum PanelFont {
+    // 拡大率 (boost) は、各ビューが Environment (\.panelFontBoost) から読んで引数で渡す。
+    // 以前は static 変数に入れていたが、static 変数は SwiftUI の再描画の対象にならないので、
+    // 拡大が効くのが「最初に描かれたあと、たまたま再描画された所から」になっていた。
+    // DesignCanvas が倍率を見て Environment に入れる (iPad では 1 = これまでどおり)。
+    // 設計画面の文字は倍率ぶん縮むので (iPhone 16 では ×0.48)、
+    // PanelFont を使う文字だけでも実寸に近づけるための応急処置
+
     /// 再生速度 / 分割のメニューの数字 (本家: 1/32 や 0.75x)
-    static func menu(_ size: CGFloat) -> Font { Font.custom("DINCondensed-Bold", size: size) }
+    static func menu(_ size: CGFloat, boost: CGFloat = 1) -> Font { Font.custom("DINCondensed-Bold", size: size * boost) }
     /// EDIT 中のアイコンの左に出る名前 (本家: Back / Note / Wipe ...)
-    static func label(_ size: CGFloat) -> Font { Font.custom("AvenirNextCondensed-Medium", size: size) }
+    static func label(_ size: CGFloat, boost: CGFloat = 1) -> Font { Font.custom("AvenirNextCondensed-Medium", size: size * boost) }
 }
 
 /// 左右が尖った (上下が平らな) 正六角形。本家の再生ボタンの形
@@ -275,10 +288,11 @@ extension AnyTransition {
 /// EDIT 中、アイコンの左に出る名前。本家は、黒い半透明の箱 (黒 80%、高さ 43pt) の上に白い字
 struct PanelEditLabel: View {
     let text: String
+    @Environment(\.panelFontBoost) private var fontBoost
 
     var body: some View {
         Text(text)
-            .font(PanelFont.label(25))
+            .font(PanelFont.label(25, boost: fontBoost))
             .foregroundColor(.white)
             .lineLimit(1)
             .fixedSize()
@@ -294,10 +308,17 @@ struct PanelEditLabel: View {
 // 線の太さ・角の丸さ・高さ (約 36pt) は、他のアイコンと同じ。数字は文字ではなくパスで描いている (字体に頼らない)。
 struct OrderIcon: View {
     let color: Color
+    @Environment(\.editorCompact) private var compact
 
     var body: some View {
+        let iconScale: CGFloat = compact ? PanelIconView.compactIconScale : 1
         Canvas { ctx, size in
-            let cx = size.width / 2, cy = size.height / 2
+            var ctx = ctx
+            // コンパクト表示では PanelIconView と同じ倍率。描画コードは 50×42 の座標のまま、文脈ごと拡大する
+            ctx.translateBy(x: size.width / 2, y: size.height / 2)
+            ctx.scaleBy(x: iconScale, y: iconScale)
+            ctx.translateBy(x: -25, y: -21)
+            let cx: CGFloat = 25, cy: CGFloat = 21
             let boxW: CGFloat = 19, boxH: CGFloat = 34, gap: CGFloat = 5
             let lineW: CGFloat = 3.2
             let centers = [cx - (boxW + gap) / 2, cx + (boxW + gap) / 2]
@@ -333,6 +354,6 @@ struct OrderIcon: View {
             two.addLine(to: CGPoint(x: x2 + 4.4, y: cy + 7.5))
             ctx.stroke(two, with: .color(color), style: digitStyle)
         }
-        .frame(width: 50, height: PanelIconView.refHeight + 6)      // 他のアイコンと同じ枠
+        .frame(width: 50 * iconScale, height: (PanelIconView.refHeight + 6) * iconScale)      // 他のアイコンと同じ枠 (コンパクト表示では枠ごと拡大)
     }
 }

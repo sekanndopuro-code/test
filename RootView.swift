@@ -89,6 +89,10 @@ struct RootView: View {
             importMode = .files
             importFiles([url])
         }
+        // キーボードが出たとき、入力中の欄が見えるよう画面を持ち上げる仕組みを起動する。
+        // KeyboardLifter 側のコメントでは「RootView の onAppear から呼ぶ」前提だったが、
+        // 呼び出しがどこにも無く、丸ごと動いていなかった (BPM / Effect 以外の入力欄は無防備だった)
+        .onAppear { KeyboardLifter.shared.start() }
         // mcz に譜面 (.mc) が複数入っていたとき、どれを開くか選ぶ
         .sheet(item: $pendingMCZ) { packed in
             MCZChartPicker(folderName: packed.folder.lastPathComponent, charts: packed.charts) { chart in
