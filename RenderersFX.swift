@@ -47,7 +47,14 @@ extension LaneRenderer {
         }
         drawBPM(&c, g, state)
         drawEffects(&c, g, state)
-        drawFXNotes(&c, g, f, state, ranges)
+        if state.clipNotesToTrack {
+            // 通常表示と同じく、ノーツだけをレーンの枠で切り取る (SETTING の確認用)
+            var nc = c
+            nc.clip(to: Path(CGRect(x: g.trackL, y: 0, width: g.trackW, height: g.H)))
+            drawFXNotes(&nc, g, f, state, ranges)
+        } else {
+            drawFXNotes(&c, g, f, state, ranges)
+        }
         drawPlayline(&c, g)
         for r in ranges where r.pxPerBeat >= 1 {
             drawLabels(&c, g, from: r.lo, to: r.hi, pxPerBeat: r.pxPerBeat, mid: r.lo...max(r.lo, r.hi),

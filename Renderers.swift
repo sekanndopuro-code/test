@@ -86,7 +86,14 @@ enum LaneRenderer {
         let allNotes = state.chart.notes
         let visible = state.visibleNoteIndices(g)
         let drawList = visible.count == allNotes.count ? allNotes : visible.map { allNotes[$0] }
-        drawNotes(&c, g, drawList, selected: state.selectedIDs)
+        if state.clipNotesToTrack {
+            // SETTING の確認用: ノーツだけをレーンの枠 (x: 0...255) で切り取って描く (データは変えない)
+            var nc = c
+            nc.clip(to: Path(CGRect(x: g.trackL, y: 0, width: g.trackW, height: g.H)))
+            drawNotes(&nc, g, drawList, selected: state.selectedIDs)
+        } else {
+            drawNotes(&c, g, drawList, selected: state.selectedIDs)
+        }
         drawOrder(&c, g, state)
         drawSprites(&c, g, state)
         drawSlideModify(&c, g, state)

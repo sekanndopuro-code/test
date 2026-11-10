@@ -27,7 +27,7 @@ extension EditorState {
     func shareMCZNow() {
         do {
             let url = try exportPackage()
-            MCZSharer.present(url: url, compact: compactLayout)
+            MCZSharer.present(url: url)
         } catch {
             showToast("エクスポートに失敗しました: \(error.localizedDescription)")
         }
@@ -151,7 +151,7 @@ extension EditorState {
 /// mcz の共有シート。SwiftUI の ShareLink は「もう 1 回タップ」が要るので、UIKit の UIActivityViewController を直接出す。
 /// iPad ではポップオーバーの基準 (sourceView) が無いとクラッシュするので、右ボタン列の More のあたりを基準にしている
 enum MCZSharer {
-    static func present(url: URL, compact: Bool = false) {
+    static func present(url: URL) {
         guard let top = topViewController() else { return }
         let vc = UIActivityViewController(activityItems: [url], applicationActivities: nil)
         if let pop = vc.popoverPresentationController {
@@ -160,7 +160,7 @@ enum MCZSharer {
             // META の列の 3 番目 (More) の中心
             // 右ボタン列の寸法は設計画面 (高さ 820pt) の値なので、実際の画面の倍率をかける (DesignCanvas)
             let s = DesignScreen.scale(forHeight: b.height)
-            pop.sourceRect = CGRect(x: b.maxX - RightPanel.width(compact: compact) * s / 2,
+            pop.sourceRect = CGRect(x: b.maxX - RightPanel.width * s / 2,
                                     y: (RightPanel.edgeInset + RightPanel.slotPitch * 2.5) * s,
                                     width: 1, height: 1)
             pop.permittedArrowDirections = [.right]

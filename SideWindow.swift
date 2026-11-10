@@ -232,14 +232,8 @@ private struct SideField: View {
     let placeholder: String
     let keyboard: UIKeyboardType
     @Environment(\.panelFontBoost) private var fontBoost
-    @Environment(\.editorCompact) private var compact
-    @FocusState private var focused: Bool
 
     var body: some View {
-        // 当たり判定の改善 (iPhone で反応しづらかった):
-        // ・枠線は overlay ではなく background に置く (overlay の図形がタッチを横取りしないように)
-        // ・欄のどこを触っても入力開始になるよう、枠全体に contentShape + タップでフォーカス
-        // ・コンパクト表示では高さを 44 → 64 に広げる (実寸で約 24pt しかなく、上下の押し外しが多かった)
         TextField("", text: $text)
             .font(PanelFont.label(22, boost: fontBoost))
             .foregroundColor(.white)
@@ -248,10 +242,8 @@ private struct SideField: View {
             .keyboardType(keyboard)
             .autocorrectionDisabled()
             .textInputAutocapitalization(.never)
-            .focused($focused)
             .padding(.horizontal, 6)
-            .frame(width: 170, height: compact ? 64 : 44)
-            .background(Rectangle().stroke(Color.white, lineWidth: 2))
+            .frame(width: 170, height: 44)
             .overlay(
                 Text(placeholder)
                     .font(PanelFont.label(18, boost: fontBoost))
@@ -259,8 +251,7 @@ private struct SideField: View {
                     .opacity(text.isEmpty ? 1 : 0)
                     .allowsHitTesting(false)
             )
-            .contentShape(Rectangle())
-            .onTapGesture { focused = true }
+            .overlay(Rectangle().stroke(Color.white, lineWidth: 2))
     }
 }
 
@@ -536,11 +527,8 @@ private struct SideWideField: View {
     var keyboard: UIKeyboardType = .default
     var isFileName = false      // ファイル名の欄は、先頭を勝手に大文字にしない
     @Environment(\.panelFontBoost) private var fontBoost
-    @Environment(\.editorCompact) private var compact
-    @FocusState private var focused: Bool
 
     var body: some View {
-        // SideField と同じ当たり判定の改善 (枠線は background / 枠全体タップでフォーカス / コンパクト時は高さ 64)
         TextField("", text: $text)
             .font(PanelFont.label(22, boost: fontBoost))
             .foregroundColor(.white)
@@ -549,13 +537,10 @@ private struct SideWideField: View {
             .keyboardType(keyboard)
             .autocorrectionDisabled()
             .textInputAutocapitalization(isFileName ? TextInputAutocapitalization.never : nil)
-            .focused($focused)
             .padding(.horizontal, 12)
             .frame(maxWidth: .infinity)
-            .frame(height: compact ? 64 : 44)
-            .background(Rectangle().stroke(Color.white, lineWidth: 2))
-            .contentShape(Rectangle())
-            .onTapGesture { focused = true }
+            .frame(height: 44)
+            .overlay(Rectangle().stroke(Color.white, lineWidth: 2))
     }
 }
 
@@ -904,6 +889,10 @@ private struct SettingWindowContent: View {
                       value: $state.advPanelWidth, range: EditorState.advPanelWidthRange, step: 4,
                       onEditingChanged: nil)
             note("Adv. (λ) を開いたときのメニューの幅です。広げるぶん、レーンは細くなります。")
+            SideDivider()
+            checkRow(title: "ノーツをレーンの枠で切り取る (表示のみ)",
+                     note: "オンにすると、レーンの枠 (x: 0〜255) からはみ出して描かれるノーツを、枠の端で切って描きます。譜面データは変わりません。はみ出しが譜面データ側の問題かどうかを切り分けるための確認用です。",
+                     isOn: $state.clipNotesToTrack)
             SideDivider()
             SideButton(title: "はみ出しノーツを数える") {
                 let r = state.overflowNotes()

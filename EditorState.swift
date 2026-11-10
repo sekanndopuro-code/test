@@ -240,7 +240,7 @@ final class EditorState: ObservableObject {
 
     // 小さい文字の拡大率 (SETTING の説明文・Adv. メニューの文字など、.system 直書きの小さい文字用)。
     // コンパクト表示 (iPhone) のときだけ効く (iPad では 1 倍 = 従来どおり)。次回起動時も保存される
-    static let smallTextScaleRange = 1.0...3.0
+    static let smallTextScaleRange = 1.0...2.0
     @Published var smallTextScale: Double = 1.5 {
         didSet { UserDefaults.standard.set(smallTextScale, forKey: "editor.smallTextScale") }
     }
@@ -253,6 +253,11 @@ final class EditorState: ObservableObject {
         didSet { UserDefaults.standard.set(advPanelWidth, forKey: "editor.advPanelWidth") }
     }
 
+    // ノーツをレーンの枠 (x: 0...255 の範囲) で切り取って描くか (表示のみ。データは変えない)。
+    // 譜面データ側のはみ出し (x ± w/2 が 0...255 の外) が見た目に出ているかを切り分けるための確認用。初期値はオフ
+    @Published var clipNotesToTrack = false {
+        didSet { UserDefaults.standard.set(clipNotesToTrack, forKey: "editor.clipNotesToTrack") }
+    }
 
     // 遅い速度の再生 (伸ばした音) の調整。次回起動時も保存される
     @Published var sharpStretch = false {               // true: 伸ばす窓を小さくして、ドラムなどの立ち上がりをはっきりさせる (低い音は少しぼやける)
@@ -477,6 +482,7 @@ final class EditorState: ObservableObject {
         if let v = ud.object(forKey: "editor.advPanelWidth") as? Double {
             self.advPanelWidth = min(max(v, Self.advPanelWidthRange.lowerBound), Self.advPanelWidthRange.upperBound)
         }
+        if let v = ud.object(forKey: "editor.clipNotesToTrack") as? Bool { self.clipNotesToTrack = v }
         prepareEngineAudio()
         applyVolumes()
         KeySound.shared.prepare()
