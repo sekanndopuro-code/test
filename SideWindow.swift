@@ -938,14 +938,42 @@ private struct SettingWindowContent: View {
                  isOn: $state.touchEffect)
     }
 
-    /// 表示の調整 (主に iPhone 向け): 小さい文字の拡大率 / Adv. メニューの幅 / ノーツの切り取り。どれも保存される
+    /// 表示の調整 (主に iPhone 向け): 小さい文字の拡大率 / UI調整モード / Adv. メニューの幅 / ノーツの切り取り。どれも保存される
+    /// (VStack の 1 ブロックは 10 個までなので、まとまりごとに分けてある)
     private var displayRows: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            textSizeRows
+            SideDivider()
+            uiAdjustRow
+            SideDivider()
+            advAndClipRows
+        }
+    }
+
+    /// 小さい文字の大きさ (100% 〜 300%)
+    private var textSizeRows: some View {
         VStack(alignment: .leading, spacing: 16) {
             sliderRow(title: "小さい文字の大きさ", text: percent(state.smallTextScale),
                       value: $state.smallTextScale, range: EditorState.smallTextScaleRange, step: 0.05,
                       onEditingChanged: nil)
-            note("SETTING の説明文や Adv. メニューの文字など、小さく書かれた文字の拡大率です (iPhone 表示のときだけ効きます)。")
-            SideDivider()
+            note("SETTING の説明文や Adv. メニューの文字など、小さく書かれた文字の拡大率です (iPhone 表示のときだけ効きます)。100% 〜 300% まで変えられます。")
+        }
+    }
+
+    /// UI調整モード: オンにすると SETTING が閉じて、画面構成だけを編集するモードになる (UIAdjust.swift)
+    private var uiAdjustRow: some View {
+        checkRow(title: "UI調整モード",
+                 note: "オンにすると、譜面の編集や再生はできなくなり、画面構成だけを編集するモードになります。左の帯の右端を右へドラッグすると帯の幅が広がり、ズーム (−/＋) と FX のボタンも大きくなります (FX は、ノッチ / ダイナミックアイランドに掛かるときは、それを跨いで下へ移ります)。右メニューの左端を左へドラッグすると、右メニューのアイコンが大きくなります。縦に収まらなくなったり、アイコン同士の間隔が今より狭くなる大きさにはなりません (EDIT 中はアイコンが多いので、あまり大きくなりません)。画面の「完了」で、もとの画面に戻ります。",
+                 isOn: Binding(
+                    get: { state.uiAdjustMode },
+                    set: { on in
+                        if on { state.enterUIAdjust() } else { state.exitUIAdjust() }
+                    }))
+    }
+
+    /// プラグインメニューの幅 / ノーツの切り取り / はみ出しノーツ
+    private var advAndClipRows: some View {
+        VStack(alignment: .leading, spacing: 16) {
             sliderRow(title: "プラグインメニューの幅", text: "\(Int(state.advPanelWidth))pt",
                       value: $state.advPanelWidth, range: EditorState.advPanelWidthRange, step: 4,
                       onEditingChanged: nil)

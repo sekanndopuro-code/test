@@ -48,12 +48,16 @@ struct AdvPanel: View {
 
     private var header: some View {
         HStack(spacing: 6) {
+            // 小さい文字を 300% まで大きくしても、ヘッダーの中で押し合わないように、「Lua plugins」は先に縮めてよい
             Text("Adv.")
                 .font(.system(size: 13 * textBoost, weight: .bold, design: .monospaced))
                 .foregroundColor(Color.laneCyan)
+                .lineLimit(1)
             Text("Lua plugins")
                 .font(.system(size: 9 * textBoost))
                 .foregroundColor(Color.white.opacity(0.5))
+                .lineLimit(1)
+                .minimumScaleFactor(0.4)
             Spacer(minLength: 0)
             if state.pluginRunning {
                 ProgressView()
@@ -76,14 +80,17 @@ struct AdvPanel: View {
                     Text("✕")
                         .font(.system(size: 14 * textBoost, weight: .bold))
                         .foregroundColor(Color.white.opacity(0.8))
-                        .frame(width: 28, height: 28)
+                        .frame(width: 28 * headerScale, height: 28 * headerScale)
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 8)
-        .frame(height: 36)
+        .frame(minHeight: 36 * headerScale)
     }
+
+    /// ヘッダーの高さ・✕ の大きさの倍率。小さい文字が 150% (初期値) までは従来のまま、それより大きくしたときだけ文字に合わせて広げる
+    private var headerScale: CGFloat { max(1, textBoost / 1.5) }
 
     @ViewBuilder
     private func row(_ item: PluginItem) -> some View {

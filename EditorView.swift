@@ -68,15 +68,15 @@ struct LaneView: View {
     @State private var panBlocked = false            // ピンチ中・直後は、指が1本残ってもスクロールしない
     @GestureState private var pinchActive = false    // ピンチ中だけ true (途中で取り消されても自動で false に戻る)
 
-    /// レーンの右隣のボタン列の幅 (ノーツがレーンの右端からはみ出したとき、この下まで描く)
-    private static var spillRight: CGFloat { RightPanel.width }
+    /// レーンの右隣のボタン列の幅 (ノーツがレーンの右端からはみ出したとき、この下まで描く)。UI調整モードで変えた幅に従う
+    private var spillRight: CGFloat { state.rightPanelWidth }
 
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
             // レーンの左端が、エディタ全体の左端からどれだけ右にあるか (左の帯・シークバー・Adv. メニューの幅。Adv. の開閉アニメーションにも追従する)
             let spillL = max(0, proxy.frame(in: .named(EditorView.rootSpace)).minX)
-            let spillR = Self.spillRight
+            let spillR = spillRight
 
             // タッチを受けるのは、これまでどおりレーンの枠の中だけ。描画は下の overlay が、枠の外まで広げて行う。
             Color.clear
@@ -305,11 +305,14 @@ struct LaneWidthSlider: View {
 struct StripView: View {
     /// 左の帯 (拍の番号と目盛り) の幅。本家 (iPad Air 4 の横画面 1180pt) では 約 145pt。
     /// この幅 + シークバー 66 + 時刻 38 で、レーン (左の番号の欄 25.2pt を含む) の左端が 249pt になる。
-    /// 本家の帯は、右に約10pt の暗い側面 (斜めの面取り) が続く。側面はシークバーの左端に重なるので、SeekRenderer が描く
-    static let width: CGFloat = 145
+    /// 本家の帯は、右に約10pt の暗い側面 (斜めの面取り) が続く。側面はシークバーの左端に重なるので、SeekRenderer が描く。
+    /// これは従来 (本家) の幅。実際の幅は state.stripWidth (UI調整モードで広げられる。UIAdjust.swift)
+    static let width: CGFloat = UIAdjust.stripWidthDefault
 
     @ObservedObject var state: EditorState
     @Environment(\.editorCompact) private var compact
+    @Environment(\.designScale) private var designScale
+    @Environment(\.notchBand) private var notchBand
     @State private var origin: Double? = nil
     @State private var scrollBeats: Double = 1      // ドラッグを始めたときの「帯の高さ全体 = 何拍か」(ズームに比例。ドラッグ中は固定)
     @GestureState private var touching = false      // 指が触れている間だけ true (取り消されても自動で false に戻る)
@@ -349,29 +352,28 @@ struct StripView: View {
                 // 角丸の弧 (その x では実寸 約41pt) より下に収まる。
                 // あわせて、当たり判定を広げたぶんボタンが縦に伸びるので、すき間は詰める (12.25 → 4)。
                 // それでも FX の見た目の下端は実寸 約130pt で、Dynamic Island の範囲
-                // (横画面では左端・上下中央、iPhone 16 では実寸 上から約134pt〜) に入る前に収まる
+                // (横画面では左端・上下中央、iPhone 16 では実寸 上から約134pt〜) に入る前に収まる。
+                //
+                // UI調整モードで帯を広げると、ボタンも幅に比例して大きくなる (layout.scale)。
+                // 島に掛からない大きさ・位置は StripButtonLayout が決める (FX は、島に掛かるなら島を跨いで下へ移る)
+                let layout = StripButtonLayout.resolve(requested: state.stripWidth / UIAdjust.stripWidthDefault,
+                                                       compact: compact, designScale: designScale, band: notchBand)
                 VStack(alignment: .leading, spacing: 0) {
-                    ZoomButton(isPlus: false) { state.zoomOut() }
-                    Color.clear.frame(width: 1, height: compact ? 4 : 12.25)
-                    ZoomButton(isPlus: true) { state.zoomIn() }
+                    ZoomButton(isPlus: false, scale: layout.scale) { state.zoomOut() }
+                    Color.clear.frame(width: 1, height: layout.gap)
+                    ZoomButton(isPlus: true, scale: layout.scale) { state.zoomIn() }
                     Text("Zoom " + state.zoomLabel)
-                        .font(.system(size: compact ? 17 : 10, design: .monospaced))
+                        .font(.system(size: layout.labelFont, design: .monospaced))
                         .foregroundColor(Color.white.opacity(0.7))
-                        .padding(.leading, 4)
+                        .padding(.leading, 4 * layout.scale)
                         .padding(.top, 3)
-                    if compact {
-                        FXButton(isOn: state.fxMode) { state.toggleFX() }
-                            .padding(.top, 4)
-                    }
                 }
-                .padding(.top, compact ? 60 : 10.75)
+                .padding(.top, layout.minusTop)
 
-                // FX (擬似テストプレイ): ズームボタンの下。本家のスクリーンショットでは、上端から約 160pt に中心が来る位置
-                // (コンパクト表示では上の列の中に置くので、ここには出さない)
-                if !compact {
-                    FXButton(isOn: state.fxMode) { state.toggleFX() }
-                        .padding(.top, 159.5)
-                }
+                // FX (擬似テストプレイ): ズームボタンの下 (本家のスクリーンショットでは、上端から約 160pt に中心が来る位置)。
+                // 位置は layout.fxTop (従来と同じ位置か、大きくなったときは「Zoom n」の下 / 島の下)
+                FXButton(isOn: state.fxMode, scale: layout.scale) { state.toggleFX() }
+                    .padding(.top, layout.fxTop)
             }
         }
         .clipped()
@@ -383,6 +385,8 @@ struct StripView: View {
 /// 文字は「FX」だけ (幅 39pt に「FX ON」は収まらないので、ON / OFF は色で見せる)。中心は記号 (＋ / −) と同じ左端から 16.5pt
 struct FXButton: View {
     let isOn: Bool
+    /// 見た目の拡大率 (UI調整モードで帯を広げたとき。1 = 従来の大きさ)
+    var scale: CGFloat = 1
     let action: () -> Void
     @Environment(\.editorCompact) private var compact
     @Environment(\.designScale) private var designScale
@@ -390,8 +394,9 @@ struct FXButton: View {
 
     var body: some View {
         // 当たり判定の大きさ (設計 pt)。コンパクト表示では見た目より広げる (DesignScreen.hitLength)
-        let hitW = DesignScreen.hitLength(39, scale: designScale, compact: compact)
-        let hitH = DesignScreen.hitLength(45, scale: designScale, compact: compact)
+        let hit = StripButtonLayout.hit(forScale: scale, compact: compact, designScale: designScale)
+        let hitW = hit.width
+        let hitH = hit.height
         Button(action: action) {
             // .frame / .contentShape は Button の「外」ではなくラベルの中に付ける。
             // 外に付けると、Button のタップ範囲はラベル (39×45) のままで広がらないことがある。
@@ -416,6 +421,7 @@ struct FXButton: View {
                         .position(x: 16.5, y: 22.5)
                 }
                 .frame(width: 39, height: 45)
+                .scaleEffect(scale, anchor: .leading)      // 左端 (画面の端) と縦の中心はそのまま、右へ・上下へ広がる
             }
             .contentShape(Rectangle())
         }
@@ -427,14 +433,17 @@ struct FXButton: View {
 /// 塗りは不透明な青みのある灰色、縁は白 1.5pt、記号は白い棒 (長さ 25pt × 太さ 3.3pt) で中心は左端から 16.5pt
 struct ZoomButton: View {
     let isPlus: Bool
+    /// 見た目の拡大率 (UI調整モードで帯を広げたとき。1 = 従来の大きさ)
+    var scale: CGFloat = 1
     let action: () -> Void
     @Environment(\.editorCompact) private var compact
     @Environment(\.designScale) private var designScale
 
     var body: some View {
         // FXButton と同じく、当たり判定はラベルの中に入れて長方形全体にする (理由は FXButton 側のコメント)
-        let hitW = DesignScreen.hitLength(39, scale: designScale, compact: compact)
-        let hitH = DesignScreen.hitLength(45, scale: designScale, compact: compact)
+        let hit = StripButtonLayout.hit(forScale: scale, compact: compact, designScale: designScale)
+        let hitW = hit.width
+        let hitH = hit.height
         Button(action: action) {
             ZStack(alignment: .leading) {
                 Color.clear
@@ -451,6 +460,7 @@ struct ZoomButton: View {
                     .position(x: 16.5, y: 22.5)
                 }
                 .frame(width: 39, height: 45)
+                .scaleEffect(scale, anchor: .leading)
             }
             .contentShape(Rectangle())
         }
@@ -630,6 +640,8 @@ struct PanelButton: View {
     /// 文字 (glyph) の代わりに出すアイコン。引数は今のボタンの文字色 (選択中はシアン)
     var icon: ((Color) -> AnyView)? = nil
     let action: () -> Void
+    /// アイコンの拡大率 (UI調整モードで右ボタン列を広げたとき。RightPanel が入れる。1 = 従来の大きさ)
+    @Environment(\.panelIconScale) private var iconScale
 
     var body: some View {
         let fg = active ? Color.panelBlue : (dimmed ? Color.white.opacity(0.35) : Color.white)
@@ -650,6 +662,7 @@ struct PanelButton: View {
                         .offset(x: 22, y: -21)
                 }
             }
+            .scaleEffect(iconScale)         // 押せる範囲 (下の frame) は、列の幅 × 1つぶんの高さのまま
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
         }
@@ -662,8 +675,9 @@ struct RightPanel: View {
     @Environment(\.editorCompact) private var compact
 
     // ── 本家 (iPad Air 4 / 横画面 1180 × 820pt) のスクリーンショットから実測した値 ──
-    /// ボタン列の幅 (左の細い白線から画面の右端まで。アイコンの中心はその真ん中)
-    static let width: CGFloat = 58
+    /// ボタン列の幅 (左の細い白線から画面の右端まで。アイコンの中心はその真ん中)。これは従来 (本家) の幅。
+    /// 実際の幅は state.rightPanelWidth (UI調整モードで広げられる。UIAdjust.swift)
+    static let width: CGFloat = UIAdjust.panelWidthDefault
     /// アイコンの中心どうしの間隔 (本家: 68.45〜68.6pt)。アイコン自体は高さ 36pt なので、上下に 約32pt の余白が入る
     static let slotPitch: CGFloat = 68.5
     /// 最初のアイコンの中心は画面の上端から 45pt、最後のアイコンの中心は下端から 45pt (= 1つぶんの枠の上下に 10.75pt)
@@ -695,19 +709,46 @@ struct RightPanel: View {
 
     /// アイコンの中心どうしの間隔。本家の間隔を基本にして、入りきらないとき (EDIT 中のボタンが多いとき・小さい画面) だけ詰める。
     /// 上の並びのボタン数は、EDIT 中は 9 (アイコンが増える。LASSO は More メニューの中)、通常は 6
-    static func pitch(forHeight height: CGFloat, editing: Bool, compact: Bool = false) -> CGFloat {
+    /// iconScale > 1 (UI調整モードでアイコンを大きくしているとき) は、アイコンの縁から縁までのすき間を従来のまま保つため、
+    /// 大きくなったぶんだけ間隔を広げる。広げられる限度は iconScaleLimit (それ以下の拡大率で呼ぶこと)
+    static func pitch(forHeight height: CGFloat, editing: Bool, compact: Bool = false, iconScale: CGFloat = 1) -> CGFloat {
+        let base = basePitch(forHeight: height, editing: editing, compact: compact)
+        return base + PanelIconView.refHeight * max(0, iconScale - 1)
+    }
+
+    /// 従来の間隔 (アイコンを大きくしていないとき)
+    private static func basePitch(forHeight height: CGFloat, editing: Bool, compact: Bool) -> CGFloat {
         let topCount = editing ? 9 : 6
         return min(slotPitch, (height - edgeInset(compact: compact) * 2) / CGFloat(topCount + bottomCount))
     }
 
+    /// 縦に収まる範囲での、アイコンの拡大率の上限 (1 = 従来の大きさ)。
+    /// 従来の「アイコンの縁から縁までのすき間」(間隔 − アイコンの高さ) を保ったまま、並ぶ数ぶんが画面の高さに収まる最大の大きさ。
+    /// EDIT 中はアイコンが多く、従来の間隔がすでに縦いっぱいなので、通常の列より上限が低い
+    /// (iPhone では 1 = 大きくならない。iPad で約 1.1 倍)
+    static func iconScaleLimit(forHeight height: CGFloat, editing: Bool, compact: Bool) -> CGFloat {
+        let count = CGFloat((editing ? 9 : 6) + bottomCount)
+        let room = (height - edgeInset(compact: compact) * 2) / count      // 1つぶんに使える縦の長さ
+        let gap = basePitch(forHeight: height, editing: editing, compact: compact) - PanelIconView.refHeight
+        return max(1, (room - gap) / PanelIconView.refHeight)
+    }
+
+    /// いまの列 (EDIT 中か) で実際に使うアイコンの拡大率 = 要求 (列の幅 ÷ 58) と、縦に収まる上限の小さいほう
+    static func effectiveIconScale(requested: CGFloat, forHeight height: CGFloat, editing: Bool, compact: Bool) -> CGFloat {
+        max(1, min(requested, iconScaleLimit(forHeight: height, editing: editing, compact: compact)))
+    }
+
     /// EDIT 中の More ボタン (上から 8 番目) の中心の高さ。More メニューは、これを基準に置く
-    static func moreCenterY(forHeight height: CGFloat, compact: Bool = false) -> CGFloat {
-        edgeInset(compact: compact) + pitch(forHeight: height, editing: true, compact: compact) * 7.5
+    static func moreCenterY(forHeight height: CGFloat, compact: Bool = false, iconScale: CGFloat = 1) -> CGFloat {
+        edgeInset(compact: compact) + pitch(forHeight: height, editing: true, compact: compact, iconScale: iconScale) * 7.5
     }
 
     var body: some View {
         GeometryReader { proxy in
-            let pitch = Self.pitch(forHeight: proxy.size.height, editing: state.editing, compact: compact)
+            // UI調整モードで広げた幅に比例して、アイコンを大きくする (縦に収まる範囲まで。EDIT 中は上限が低い)
+            let iconScale = Self.effectiveIconScale(requested: state.rightPanelWidth / Self.width,
+                                                    forHeight: proxy.size.height, editing: state.editing, compact: compact)
+            let pitch = Self.pitch(forHeight: proxy.size.height, editing: state.editing, compact: compact, iconScale: iconScale)
             VStack(spacing: 0) {
                 // EDIT / Back で、アイコン列が右へ滑って入れ替わる (入れ替わり中は 2つが重なるので ZStack に入れる)
                 ZStack(alignment: .top) {
@@ -735,6 +776,7 @@ struct RightPanel: View {
                 }
                 .frame(height: pitch)
             }
+            .environment(\.panelIconScale, iconScale)
             .padding(.vertical, Self.edgeInset(compact: compact))
             .overlay(alignment: .topLeading) {
                 labelColumn(pitch: pitch)
@@ -747,14 +789,14 @@ struct RightPanel: View {
                     .font(.system(size: compact ? 12 : 9))
                     .foregroundColor(Color.white.opacity(0.55))
                     .multilineTextAlignment(.center)
-                    .frame(width: Self.width - 4)
+                    .frame(width: state.rightPanelWidth - 4)
                     .padding(.bottom, Self.edgeInset(compact: compact) + pitch * CGFloat(Self.bottomCount) + 1)
                     .allowsHitTesting(false)
             }
         }
         // BPM / Effect の右ウィンドウが開いているあいだは、本家と同じくアイコンが見えなくなる (ウィンドウが列の上まで覆う)
         .opacity(state.sidePanel == nil ? 1 : 0)
-        .frame(width: Self.width)
+        .frame(width: state.rightPanelWidth)
         .frame(maxHeight: .infinity)
         .background(Color.black.opacity(0.35))           // 背景画像とはみ出したノーツが透けて見える
         .overlay(Rectangle().fill(Color.white.opacity(0.6)).frame(width: 1), alignment: .leading)   // 本家は左端に細い白線
@@ -981,6 +1023,7 @@ enum DesignScreen {
 private struct EditorCompactKey: EnvironmentKey { static let defaultValue = false }
 private struct DesignScaleKey: EnvironmentKey { static let defaultValue: CGFloat = 1 }
 private struct PanelFontBoostKey: EnvironmentKey { static let defaultValue: CGFloat = 1 }
+private struct PanelIconScaleKey: EnvironmentKey { static let defaultValue: CGFloat = 1 }
 
 extension EnvironmentValues {
     /// コンパクト表示 (iPhone 横画面など) か。DesignCanvas が入れる
@@ -998,6 +1041,11 @@ extension EnvironmentValues {
         get { self[PanelFontBoostKey.self] }
         set { self[PanelFontBoostKey.self] = newValue }
     }
+    /// 右ボタン列のアイコンの拡大率 (UI調整モードで列を広げたとき。1 = 従来の大きさ)。RightPanel が入れる
+    var panelIconScale: CGFloat {
+        get { self[PanelIconScaleKey.self] }
+        set { self[PanelIconScaleKey.self] = newValue }
+    }
 }
 
 struct DesignCanvas<Content: View>: View {
@@ -1011,11 +1059,14 @@ struct DesignCanvas<Content: View>: View {
         GeometryReader { geo in
             let s = DesignScreen.scale(forHeight: geo.size.height)
             let compact = s < DesignScreen.compactThreshold
+            // 左端のノッチ / ダイナミックアイランドの縦の範囲 (実寸 → 設計 pt)。無い機種は nil
+            let band = NotchGuard.leftBand(screenHeight: geo.size.height).map { ($0.lowerBound / s)...($0.upperBound / s) }
             content
                 .frame(width: geo.size.width / s, height: DesignScreen.height)
                 .scaleEffect(s, anchor: .topLeading)
                 .environment(\.editorCompact, compact)
                 .environment(\.designScale, s)
+                .environment(\.notchBand, band)
                 .environment(\.panelFontBoost, compact ? DesignScreen.compactFontBoost : 1)
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
         }
@@ -1038,7 +1089,7 @@ struct EditorView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            StripView(state: state).frame(width: StripView.width)
+            StripView(state: state).frame(width: state.stripWidth)      // 従来は 145pt。UI調整モードで広げられる
             SeekPanel(state: state).frame(width: SeekPanel.totalWidth)
             // Adv. メニュー: 幅 0 → 196 に変わると、右隣のレーンは右端を固定したまま左端が右へ動いて縮む
             AdvPanel(state: state)
@@ -1066,6 +1117,7 @@ struct EditorView: View {
         .overlay(SidePanelLayer(state: state))           // BPM list / Effect list / Information / SETTING: 右からスライドして出る (トーストより下の層)
         .overlay(toastLayer, alignment: .bottom)
         .overlay(ReviewNoticeLayer(tick: state.reviewNoticeTick), alignment: .top)    // review の「0 issue found」(画面の上に一瞬だけ)
+        .overlay(UIAdjustLayer(state: state))            // UI調整モード (SETTING): オンのあいだだけ、一番上に重ねて下のタッチを止める (UIAdjust.swift)
         .alert("分割 (1/n)", isPresented: $showInput) {
             TextField("2〜1024", text: $inputText)
                 .keyboardType(.numberPad)
@@ -1113,7 +1165,7 @@ struct EditorView: View {
                         .contentShape(Rectangle())
                         .onTapGesture { state.popup = .none }
                     popupBody
-                        .padding(.trailing, RightPanel.width + RightPanel.sideGap)
+                        .padding(.trailing, state.rightPanelWidth + RightPanel.sideGap)
                         // 本家は、再生速度も分割も、メニューの下端が画面の下端のすぐ上にそろう。
                         // More だけは上から: 上端が、More ボタンの中心より 263pt 上 (自作は More ボタンが本家より下なので、その分メニューも下がる)
                         .padding(isMore ? Edge.Set.top : Edge.Set.bottom,
@@ -1213,7 +1265,10 @@ struct EditorView: View {
 
     /// More メニューの上端の高さ (画面の上端から)。画面の下にはみ出すときだけ、はみ出さない位置まで上げる
     private func moreMenuTop(height: CGFloat) -> CGFloat {
-        let top = RightPanel.moreCenterY(forHeight: height, compact: compact) - Self.moreTopAboveButton
+        // EDIT 中のアイコンの拡大率 (UI調整モードで列を広げたとき。EDIT 中は縦に収まる上限が低い)
+        let iconScale = RightPanel.effectiveIconScale(requested: state.rightPanelWidth / RightPanel.width,
+                                                      forHeight: height, editing: true, compact: compact)
+        let top = RightPanel.moreCenterY(forHeight: height, compact: compact, iconScale: iconScale) - Self.moreTopAboveButton
         let menuHeight = Self.moreRowHeight * CGFloat(Self.moreRowCount) + Self.morePad * 2
         return max(4, min(top, height - menuHeight - 4))
     }

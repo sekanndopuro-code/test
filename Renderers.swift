@@ -640,8 +640,9 @@ private func stripLineStyle(rem: Int, den: Int) -> (Color, CGFloat) {
 // MARK: - 左の縦長タイムライン
 
 enum StripRenderer {
-    /// 帯の本体の右端 (本家 143.5pt)。この右に、暗い側面 (斜めの面取り) が 約10pt 続く (SeekRenderer が描く)
-    static let faceW: CGFloat = 143.5
+    /// 帯の本体の右端は、帯の幅 (本家 145pt) より 1.5pt 内側 (本家 143.5pt)。この右に、暗い側面 (斜めの面取り) が 約10pt 続く (SeekRenderer が描く)。
+    /// 帯の幅は UI調整モードで広げられる (state.stripWidth) ので、本体の右端は「帯の幅 − faceInset」で決める
+    static let faceInset: CGFloat = 1.5
     static let faceTop: CGFloat = 2
     static let faceBottomInset: CGFloat = 2.5
     /// 帯・シークバーの地。本家は半透明の暗い色で、背景画像と、レーンからはみ出したノーツが透けて見える
@@ -652,6 +653,9 @@ enum StripRenderer {
         var c = ctx
         let H = size.height
         let W = size.width
+        let faceW = W - faceInset
+        // 帯を広げたとき (UI調整モード) は、目盛りの長さ・拍の番号・現在位置の三角も、幅に比例して大きくする (従来の幅 145pt で 1 倍)
+        let k = W / UIAdjust.stripWidthDefault
         let faceRect = CGRect(x: 0, y: faceTop, width: faceW, height: max(1, H - faceTop - faceBottomInset))
         c.fill(Path(faceRect), with: .color(faceColor))
         let beats = state.stripBeats
@@ -678,8 +682,8 @@ enum StripRenderer {
                 let rem = ((t % d) + d) % d
                 let st = stripLineStyle(rem: rem, den: d)
                 // 拍の線は 6.5pt 〜 帯の本体の右端、細かい目盛りは 9pt から約 27pt の長さ (本家の実測)
-                let x0: CGFloat = rem == 0 ? 6.5 : 9
-                let x1: CGFloat = rem == 0 ? (faceW - 0.5) : 36
+                let x0: CGFloat = (rem == 0 ? 6.5 : 9) * k
+                let x1: CGFloat = rem == 0 ? (faceW - 0.5) : 36 * k
                 var p = Path()
                 p.move(to: CGPoint(x: x0, y: yy))
                 p.addLine(to: CGPoint(x: x1, y: yy))
@@ -689,13 +693,13 @@ enum StripRenderer {
         // 拍番号 (0拍始まり)。本家は細くて縦長 (数字の高さ 約24.5pt、3桁で幅 約36.5pt)
         // コンパクト表示 (iPhone) では少し大きくし、間引きの間隔も文字の大きさに合わせる
         var step = 1
-        while ppb * Double(step) < (state.compactLayout ? 34 : 28) { step *= 2 }
+        while ppb * Double(step) < (state.compactLayout ? 34 : 28) * Double(k) { step *= 2 }
         let lb0 = max(0, Int(floor(b0)) - 1)
         let lb1 = Int(ceil(b1))
         if lb1 >= lb0 && lb1 - lb0 < 2000 {
             for b in lb0...lb1 where b % step == 0 {
                 drawNumber(inner, "\(b)", at: CGPoint(x: faceW * 0.53, y: y(Double(b) + Double(step) / 2.0)),
-                           anchor: .center, size: state.compactLayout ? 42 : 34.7, scaleX: 0.78, alpha: 0.78)
+                           anchor: .center, size: (state.compactLayout ? 42 : 34.7) * k, scaleX: 0.78, alpha: 0.78)
             }
         }
         // 帯の枠 (本家の実測: 上下と左は明るい線、右は暗い線。右の外側の側面は SeekRenderer が描く)
@@ -720,8 +724,8 @@ enum StripRenderer {
         c.stroke(m, with: .color(.white), lineWidth: 3)
         var tri = Path()
         tri.move(to: CGPoint(x: 0, y: center))
-        tri.addLine(to: CGPoint(x: 9, y: center - 7))
-        tri.addLine(to: CGPoint(x: 9, y: center + 7))
+        tri.addLine(to: CGPoint(x: 9 * k, y: center - 7 * k))
+        tri.addLine(to: CGPoint(x: 9 * k, y: center + 7 * k))
         tri.closeSubpath()
         c.fill(tri, with: .color(.orange))
     }
@@ -758,7 +762,7 @@ enum SeekRenderer {
         // 地は本家と同じ半透明の暗い色 (背景画像とはみ出したノーツが透ける)
         c.fill(Path(CGRect(x: 0, y: top, width: W, height: max(1, bottom - top))), with: .color(StripRenderer.faceColor))
         // 左の帯の側面 (暗い平行四辺形)。帯の右端 (負の座標) から 約10.5pt 右まで、上下は斜めに削れる
-        let ox = StripRenderer.faceW - StripView.width
+        let ox = -StripRenderer.faceInset      // 帯の本体の右端 (帯の幅 145pt なら 143.5pt) から帯の幅までの差。帯を広げても変わらない
         let sideW: CGFloat = 10.5
         var side = Path()
         side.move(to: CGPoint(x: ox, y: top))

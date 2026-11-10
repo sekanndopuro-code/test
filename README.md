@@ -21,6 +21,7 @@
 | Renderers.swift | レーン・縦タイムライン・シークバーの描画 (Canvas) |
 | SeekDensity.swift | シークバー (再生ボタンの下) のノーツ密度ヒストグラムの計算 (120 区間 / 20 段階)。描画は `Renderers.swift` の `SeekRenderer` |
 | EditorView.swift | 画面レイアウト・右ボタン列・ポップアップ |
+| UIAdjust.swift | **UI調整モード** (SETTING)。画面構成だけを編集するモードの画面 (`UIAdjustLayer`)、左の帯の上のズーム (−/＋) / FX ボタンの大きさと位置 (`StripButtonLayout`)、ノッチ / ダイナミックアイランドの範囲 (`NotchGuard`)、幅の上限 (`UIAdjust`)。下の「UI調整モード」参照 |
 | Sheets.swift | `Beat.parse` (拍の入力) だけ。META のシートはやめて、右ボタン列 + 右ウィンドウになった (下の「META / SETTING」) |
 | EditorState+Meta.swift | **META の動き**: 列を開く / 閉じる (`openMetaMenu` / `closeMetaMenu`)、More の mcz 共有 (`shareMCZNow` + 共有シート `MCZSharer`)、Review の tap 同士の重なり / 近すぎ探し (`reviewChart`)、Quit (`quitEditor`) |
 | MetaMenuIcons.swift | META の列のアイコン (Information = `InfoIcon` / Review = `ReviewIcon` / Quit = `PowerIcon`)。Back と More は EDIT 中と同じ |
@@ -46,6 +47,19 @@
 | LuaEngineSource.swift | **自動生成**。Lua→JavaScript 変換器 + Lua 標準ライブラリ + `Editor` の定義 (JavaScript) を文字列で埋め込んだもの |
 | BuiltinPlugins.swift | 内蔵プラグイン 9 つ (`bm_ease` / `bm_img2hold` / `bm_select` (BetterMalody 用) と `quad_InOut` / `quad_OutIn` / `Join Slides (Fixed)` / `終点と始点を繋げる` / `折り返し敷` / `枝分かれ敷`) |
 | EditorState+Plugins.swift | プラグインの実行 (`runPlugin`) / 停止 (`stopPlugin`) と、Order ボタン (「順番に選択」) のタップ処理 (`orderTap`) |
+
+## UI調整モード / 小さい文字 300% (SETTING)
+
+- **小さい文字の大きさ**: 100% 〜 **300%** (以前は 200% まで。初期値は 150% のまま。`EditorState.smallTextScaleRange`)。iPhone 表示のときだけ効く (iPad は 1 倍)。Adv. メニューのヘッダーは、150% を超えて大きくしたときだけ文字に合わせて高さが広がる (`AdvPanel.headerScale`)
+- **UI調整モード** (SETTING のチェックボックス。保存はしない = 開くたびにオフ):
+  - オンにすると SETTING が閉じて、**譜面の編集・再生・ボタンは全部効かなくなり** (一番上の層 `UIAdjustLayer` が画面全体のタッチを止める)、画面構成だけを編集するモードになる。画面の上の札の **「完了」** で戻る / **「リセット」** で従来の幅に戻す
+  - **左の帯**: 右端の持ち手 (青い縦線) を右へドラッグすると、帯の幅が広がる (`EditorState.stripWidth`。従来は 145pt、上限は 3 倍 or レーンの最低幅 360pt が残るまで)。**ズーム (−/＋) と FX ボタン、帯の中の拍番号・目盛り・現在位置の三角も、幅に比例して大きくなる** (`StripRenderer` の `k` / `StripButtonLayout`)
+    - **ノッチ / ダイナミックアイランド** (横画面では左端・上下中央。島は長さ 125pt) とは重ならない (`NotchGuard`)。−/＋ と「Zoom n」は島より上に収まる大きさまで (iPhone 16 で約 190%)。**FX は、大きくなって島に掛かる位置になるときだけ、島を跨いで島の下へ移る** (島の上端と下端の間には入らない)。大きくなっていない (従来の幅の) ときは、これまでと同じ位置
+    - 島の有無は、実機は画面左右の安全領域の大きさ (島 約59pt 以上 / 旧ノッチ 約44〜50pt / 無し 0)、iPad の iPhone 表示プレビューは選んだ機種で決める。島の無い機種 (iPhone SE・iPad) では、FX は「Zoom n」の下のまま
+  - **右ボタン列**: 左端の持ち手を左へドラッグすると、列の幅が広がり (`EditorState.rightPanelWidth`。従来は 58pt)、**アイコンが幅に比例して大きくなる** (`PanelButton` の `panelIconScale`)。レーンは、広がったぶんだけ細くなる
+    - **限界** (`RightPanel.iconScaleLimit`): アイコンの縁から縁までのすき間を従来のまま保ち、並ぶ数ぶんが画面の高さに収まる大きさまで。それ以上は、列を広げてもアイコンは大きくならない (持ち手は、通常の列の限界で止まる。限界では持ち手が橙色になる)
+    - **EDIT 中はアイコンが 9 + 2 個あって、従来の間隔がすでに縦いっぱい**なので、通常の列 (6 + 2 個。iPhone で約 150%、iPad で約 187%) よりずっと小さい (iPhone で 100% = 大きくならない、iPad で約 111%)。列の幅は EDIT に入っても変わらない (レーンが動かないように) ので、EDIT 中は幅が広いままアイコンだけが上限の大きさになる。札には、通常の列と EDIT 中の倍率を両方出している
+  - 決めた幅は保存される (`UserDefaults` の `editor.stripWidth` / `editor.rightPanelWidth`)。メニューや BPM / Effect のウィンドウ、More メニューの位置は、列の幅に追従する
 
 ## 起動画面のファイル選択 (RootView.swift)
 「ファイルを選択…」1つのボタンで、mc・音源・背景画像を**複数まとめて**選べる。種類は拡張子で決める (`RootView.kind(of:)`)。

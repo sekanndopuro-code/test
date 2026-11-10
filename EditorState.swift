@@ -240,12 +240,26 @@ final class EditorState: ObservableObject {
 
     // 小さい文字の拡大率 (SETTING の説明文・Adv. メニューの文字など、.system 直書きの小さい文字用)。
     // コンパクト表示 (iPhone) のときだけ効く (iPad では 1 倍 = 従来どおり)。次回起動時も保存される
-    static let smallTextScaleRange = 1.0...2.0
+    // 上限は 300% (以前は 200%)。初期値は変えていない (150%)
+    static let smallTextScaleRange = 1.0...3.0
     @Published var smallTextScale: Double = 1.5 {
         didSet { UserDefaults.standard.set(smallTextScale, forKey: "editor.smallTextScale") }
     }
     /// 実際に使う拡大率 (コンパクト表示でないときは 1)
     var smallTextBoost: CGFloat { compactLayout ? CGFloat(smallTextScale) : 1 }
+
+    // MARK: UI調整モード (SETTING の「UI調整モード」。画面構成だけを編集するモード。UIAdjust.swift)
+    //   オン: 譜面の編集・再生などは一切できなくなり、左の帯の右端 / 右ボタン列の左端をドラッグして幅を変えられる。
+    //   保存はしない (開くたびにオフ)。決めた幅 (stripWidth / rightPanelWidth) は次回起動時も保存される
+    @Published var uiAdjustMode = false
+    /// 左の帯 (拍の番号と目盛り) の幅 (設計 pt)。145 が従来どおり。広げると、ズーム / FX ボタンも比例して大きくなる
+    @Published var stripWidth: CGFloat = UIAdjust.stripWidthDefault {
+        didSet { UserDefaults.standard.set(Double(stripWidth), forKey: "editor.stripWidth") }
+    }
+    /// 右ボタン列の幅 (設計 pt)。58 が従来どおり。広げると、アイコンが比例して大きくなる (縦に収まる範囲まで)
+    @Published var rightPanelWidth: CGFloat = UIAdjust.panelWidthDefault {
+        didSet { UserDefaults.standard.set(Double(rightPanelWidth), forKey: "editor.rightPanelWidth") }
+    }
 
     // Adv. メニュー (プラグイン一覧) の幅 (設計 pt)。広げるぶんレーンは細くなる。次回起動時も保存される
     static let advPanelWidthRange = 160.0...520.0
@@ -478,6 +492,12 @@ final class EditorState: ObservableObject {
         }
         if let v = ud.object(forKey: "editor.smallTextScale") as? Double {
             self.smallTextScale = min(max(v, Self.smallTextScaleRange.lowerBound), Self.smallTextScaleRange.upperBound)
+        }
+        if let v = ud.object(forKey: "editor.stripWidth") as? Double {
+            self.stripWidth = min(max(CGFloat(v), UIAdjust.stripWidthDefault), UIAdjust.stripWidthMax)
+        }
+        if let v = ud.object(forKey: "editor.rightPanelWidth") as? Double {
+            self.rightPanelWidth = min(max(CGFloat(v), UIAdjust.panelWidthDefault), UIAdjust.panelWidthMax)
         }
         if let v = ud.object(forKey: "editor.advPanelWidth") as? Double {
             self.advPanelWidth = min(max(v, Self.advPanelWidthRange.lowerBound), Self.advPanelWidthRange.upperBound)
