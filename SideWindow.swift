@@ -166,6 +166,42 @@ private func dismissKeyboard() {
     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
 }
 
+// MARK: - 当たり判定の拡張 (BPM / Effect の入力欄とボタン)
+//
+// iPhone (コンパクト表示) では、設計 pt 44 の入力欄・ボタンが実寸 約21pt しかなく、指で狙えない。
+// さらに SwiftUI の TextField は、文字の 1 行ぶんしか反応しない。外したタッチは窓の背景に落ちて
+// dismissKeyboard() が走るので、「反応しない」うえに、出ていたキーボードまで閉じていた。
+// 見た目とレイアウトはそのままで、触れる範囲だけ上下に広げる (広げた分は、行の間隔でちょうど埋める)。
+
+private struct SideHitExtraKey: EnvironmentKey { static let defaultValue: CGFloat = 0 }
+
+extension EnvironmentValues {
+    /// 入力欄・ボタンの当たり判定を、見た目の上下へ広げる量 (設計 pt・片側)。0 = 見た目のまま
+    fileprivate var sideHitExtra: CGFloat {
+        get { self[SideHitExtraKey.self] }
+        set { self[SideHitExtraKey.self] = newValue }
+    }
+}
+
+/// 見た目の枠を、上下に extra ずつ広げた形 (contentShape 用。extra = 0 なら Rectangle と同じ)
+private struct SideHitShape: Shape {
+    var extra: CGFloat
+    func path(in r: CGRect) -> Path { Path(r.insetBy(dx: 0, dy: -extra)) }
+}
+
+extension SideWindow {
+    /// 当たり判定を片側へ広げる量 (設計 pt)。右ボタン列と同じ基準 (DesignScreen.hitLength = 実寸 約31pt) を使う。
+    /// iPad (コンパクトでない) では 0
+    fileprivate static func hitExtra(scale: CGFloat, phoneCompact: Bool) -> CGFloat {
+        max(0, (DesignScreen.hitLength(44, scale: scale, compact: phoneCompact) - 44) / 2)
+    }
+
+    /// 入力欄・ボタンの行どうしの間隔。広げた当たり判定が隣の行と重ならないように、広げた分だけ空ける (最低 12pt)
+    fileprivate static func formSpacing(hitExtra: CGFloat) -> CGFloat {
+        max(12, hitExtra * 2)
+    }
+}
+
 // MARK: - 部品 (白い縁取りの長方形が基本)
 
 private struct SidePressStyle: ButtonStyle {
@@ -232,9 +268,12 @@ private struct SideField: View {
     let placeholder: String
     let keyboard: UIKeyboardType
     @Environment(\.panelFontBoost) private var fontBoost
+    @Environment(\.sideHitExtra) private var hitExtra
+    @FocusState private var focused: Bool
 
     var body: some View {
         TextField("", text: $text)
+            .focused($focused)
             .font(PanelFont.label(22, boost: fontBoost))
             .foregroundColor(.white)
             .tint(.white)
@@ -244,6 +283,13 @@ private struct SideField: View {
             .textInputAutocapitalization(.never)
             .padding(.horizontal, 6)
             .frame(width: 170, height: 44)
+            // TextField は文字の 1 行ぶんしか反応しないので、枠の全面 (と、広げた上下) を触っても入力に入るようにする。
+            // 文字の行の上は、これまでどおり TextField 自身が受ける (カーソル位置の指定もそのまま)
+            .background(
+                Color.clear
+                    .contentShape(SideHitShape(extra: hitExtra))
+                    .onTapGesture { focused = true }
+            )
             .overlay(
                 Text(placeholder)
                     .font(PanelFont.label(18, boost: fontBoost))
@@ -251,7 +297,7 @@ private struct SideField: View {
                     .opacity(text.isEmpty ? 1 : 0)
                     .allowsHitTesting(false)
             )
-            .overlay(Rectangle().stroke(Color.white, lineWidth: 2))
+            .overlay(Rectangle().stroke(Color.white, lineWidth: 2).allowsHitTesting(false))
     }
 }
 
@@ -260,6 +306,7 @@ private struct SideButton: View {
     let title: String
     let action: () -> Void
     @Environment(\.panelFontBoost) private var fontBoost
+    @Environment(\.sideHitExtra) private var hitExtra
 
     var body: some View {
         Button(action: action) {
@@ -269,7 +316,7 @@ private struct SideButton: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 44)
                 .overlay(Rectangle().stroke(Color.white, lineWidth: 2))
-                .contentShape(Rectangle())
+                .contentShape(SideHitShape(extra: hitExtra))
         }
         .buttonStyle(SidePressStyle())
     }
@@ -280,6 +327,7 @@ private struct SideSmallButton: View {
     let title: String
     let action: () -> Void
     @Environment(\.panelFontBoost) private var fontBoost
+    @Environment(\.sideHitExtra) private var hitExtra
 
     var body: some View {
         Button(action: action) {
@@ -289,7 +337,7 @@ private struct SideSmallButton: View {
                 .padding(.horizontal, 10)
                 .frame(height: 44)
                 .overlay(Rectangle().stroke(Color.white.opacity(0.7), lineWidth: 1.5))
-                .contentShape(Rectangle())
+                .contentShape(SideHitShape(extra: hitExtra))
         }
         .buttonStyle(SidePressStyle())
     }
@@ -301,6 +349,7 @@ private struct SideChoice: View {
     let selected: Bool
     let action: () -> Void
     @Environment(\.panelFontBoost) private var fontBoost
+    @Environment(\.sideHitExtra) private var hitExtra
 
     var body: some View {
         Button(action: action) {
@@ -310,7 +359,7 @@ private struct SideChoice: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 44)
                 .overlay(Rectangle().stroke(selected ? Color.panelBlue : Color.white, lineWidth: 2))
-                .contentShape(Rectangle())
+                .contentShape(SideHitShape(extra: hitExtra))
         }
         .buttonStyle(SidePressStyle())
     }
@@ -322,6 +371,8 @@ private struct BPMWindowContent: View {
     @ObservedObject var state: EditorState
     /// キーボードが出ているとき (縦が足りないので、入力欄とボタンの間をつめる)
     let compact: Bool
+    @Environment(\.designScale) private var designScale
+    @Environment(\.editorCompact) private var phoneCompact
     @State private var selected = 0
     @State private var beatText: String
     @State private var bpmText: String
@@ -334,6 +385,9 @@ private struct BPMWindowContent: View {
         let first = state.chart.times.first.map { String(format: "%.3f", $0.bpm) } ?? ""
         self._bpmText = State(initialValue: first)
     }
+
+    /// iPhone のとき、入力欄とボタンの当たり判定を広げる量 (iPad は 0)
+    private var hitExtra: CGFloat { SideWindow.hitExtra(scale: designScale, phoneCompact: phoneCompact) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -363,7 +417,7 @@ private struct BPMWindowContent: View {
             .frame(maxHeight: .infinity)
 
             // 本家: Beat と BPM の行の間は 56pt、BPM の入力欄と Add / Remove の間は 64pt、ボタンの下は 35pt
-            VStack(spacing: 12) {
+            VStack(spacing: SideWindow.formSpacing(hitExtra: hitExtra)) {
                 SideFormRow(label: "Beat") {
                     HStack(spacing: 8) {
                         SideSmallButton(title: "現在位置") {
@@ -390,6 +444,7 @@ private struct BPMWindowContent: View {
                 }
                 .padding(.top, compact ? 0 : 52)
             }
+            .environment(\.sideHitExtra, hitExtra)
             .padding(.trailing, SideWindow.formTrailingExtra)
             .padding(.top, 10)
             .padding(.bottom, compact ? 15 : 35)
@@ -403,6 +458,8 @@ private struct EffectWindowContent: View {
     @ObservedObject var state: EditorState
     let compact: Bool
     @Environment(\.panelFontBoost) private var fontBoost
+    @Environment(\.designScale) private var designScale
+    @Environment(\.editorCompact) private var phoneCompact
     @State private var selected = -1
     @State private var beatText: String
     @State private var kind: EffectPoint.Kind = .scroll
@@ -413,6 +470,9 @@ private struct EffectWindowContent: View {
         self.compact = compact
         self._beatText = State(initialValue: state.snapBeat(state.currentBeat()).label)
     }
+
+    /// iPhone のとき、入力欄とボタンの当たり判定を広げる量 (iPad は 0)
+    private var hitExtra: CGFloat { SideWindow.hitExtra(scale: designScale, phoneCompact: phoneCompact) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -456,7 +516,7 @@ private struct EffectWindowContent: View {
             }
             .frame(maxHeight: .infinity)
 
-            VStack(spacing: 12) {
+            VStack(spacing: SideWindow.formSpacing(hitExtra: hitExtra)) {
                 SideFormRow(label: "Beat") {
                     HStack(spacing: 8) {
                         SideSmallButton(title: "現在位置") {
@@ -506,6 +566,7 @@ private struct EffectWindowContent: View {
                     }
                 }
             }
+            .environment(\.sideHitExtra, hitExtra)
             .padding(.trailing, SideWindow.formTrailingExtra)
             .padding(.top, 10)
             .padding(.bottom, compact ? 15 : 35)
