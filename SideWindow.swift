@@ -85,6 +85,10 @@ struct SidePanelLayer: View {
             }
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
+        // この層が自分でキーボードを避けている間は、画面全体を持ち上げる KeyboardLifter を止める (二重に上がるため)
+        .onAppear { KeyboardLifter.shared.sidePanelOpen = state.sidePanel != nil }
+        .onChange(of: state.sidePanel != nil) { open in KeyboardLifter.shared.sidePanelOpen = open }
+        .onDisappear { KeyboardLifter.shared.sidePanelOpen = false }
         .allowsHitTesting(state.sidePanel != nil)
     }
 }

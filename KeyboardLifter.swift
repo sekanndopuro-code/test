@@ -17,6 +17,18 @@ final class KeyboardLifter {
     /// 入力欄の上端を、画面の上から最低これだけ空ける (pt)。持ち上げすぎて欄が画面の外へ出るのを防ぐ
     var topMargin: CGFloat = 20
 
+    /// 右ウィンドウ (BPM / Effect / Information / SETTING) が開いているか (SidePanelLayer が更新する)。
+    /// 右ウィンドウは自分で下端をキーボードの上へ上げて入力欄を避けている (SidePanelLayer)。
+    /// そこへ画面全体の持ち上げまで重ねると二重に上がって、窓が画面の上へ飛び出す (iPad で起きていた)。
+    /// なので、開いているあいだはここでは持ち上げない
+    var sidePanelOpen = false {
+        didSet {
+            // 開いたときだけ、掛かっている持ち上げを戻す。閉じるときは何もしない
+            // (閉じる最中は入力欄がまだ残っていて、取り直すと逆に持ち上げてしまうため)
+            if sidePanelOpen && !oldValue { update(duration: 0.25) }
+        }
+    }
+
     private var started = false
     private var keyboardFrame: CGRect = .zero // 画面座標。キーボードが隠れているときは .zero
 
@@ -77,6 +89,8 @@ final class KeyboardLifter {
 
     /// 持ち上げる量 (pt)。0 〜 キーボードの高さ
     private func targetLift(window: UIWindow, root: UIView, current: CGFloat) -> CGFloat {
+        // 右ウィンドウが開いているあいだは、ウィンドウ側がキーボードを避けるので持ち上げない (二重持ち上げの防止)
+        guard !sidePanelOpen else { return 0 }
         // キーボードが無い / 浮いている (画面の下に付いていない) ときは持ち上げない
         let kb = window.convert(keyboardFrame, from: window.screen.coordinateSpace)
         let H = window.bounds.height
