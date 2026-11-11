@@ -310,11 +310,14 @@ private struct SideButton: View {
 
     var body: some View {
         Button(action: action) {
+            // 長いラベルは「…」で切らずに折り返す (高さは最低 44pt。短いラベルは今までどおり 1 行・44pt)
             Text(title)
                 .font(PanelFont.label(26, boost: fontBoost))
                 .foregroundColor(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 44)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, minHeight: 44)
                 .overlay(Rectangle().stroke(Color.white, lineWidth: 2))
                 .contentShape(SideHitShape(extra: hitExtra))
         }
