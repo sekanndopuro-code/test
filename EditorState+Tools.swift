@@ -897,37 +897,52 @@ extension EditorState {
         showToast("\(clip.count) 個を貼り付けました")
     }
 
+    /// x がグリッド線の上にあるか (gridLineX と同じ丸め方で比べる)
+    private func isOnGridLine(_ x: Int) -> Bool {
+        gridLineX(nearestGridIndex(Double(x))) == x
+    }
+
     /// レーンの真ん中 (x=127.5) を軸にした、中心 x の左右反転。
     /// レーンは x=0...255 なので、鏡の軸は 127.5 (x' = 255 - x)。以前は 127 (254 - x) を軸にしていて、反転後が 1 ずれていた。
-    /// グリッド有効で、反転前の中心がグリッド線の上にあったときは、反転後も **グリッド線 (j → gridLines - j) の上** に置く
+    /// onGrid (選んだ点がすべてグリッド線の上にあるとき) は、反転後も **グリッド線 (j → gridLines - j) の上** に置く
     /// (255 - x の丸めで、線から 1 ずれることがないように。gridLineX は「置く」「動かす」ときと同じ丸め方)。
-    /// グリッド線の上にないノーツ (Grid align オフで置いたもの等) は、そのまま 255 - x
-    private func flippedX(_ x: Int) -> Int {
-        if gridAlign && gridLines >= 1 {
-            let j = nearestGridIndex(Double(x))
-            if gridLineX(j) == x {
-                return gridLineX(gridLines - j)
-            }
+    /// onGrid でないときは、そのまま 255 - x
+    private func flippedX(_ x: Int, onGrid: Bool) -> Int {
+        if onGrid {
+            return gridLineX(gridLines - nearestGridIndex(Double(x)))
         }
         return 255 - x
     }
 
     /// レーンの真ん中 (x=127.5) を軸に左右反転。選択中のノーツだけが対象。
     /// 選択が無いときは何もしない (全ノーツの反転は、大きい譜面で処理落ちするため行わない)。
-    /// スライドは、始点と各 seg の中心を1点ずつ反転して、seg の相対 x を入れ直す (グリッド線の上にあった点は、反転後もグリッド線の上)
+    /// スライドは、始点と各 seg の中心を1点ずつ反転して、seg の相対 x を入れ直す。
+    ///
+    /// グリッド線に合わせて反転するのは、**選んだ点 (始点と seg) がすべてグリッド線の上にあるとき** だけ。
+    /// 1 点でも線から外れていれば (プラグインが 1px 刻みで置いたスライド / ウィップなど)、全部 255 - x の純粋な鏡像にする。
+    /// 点ごとに決めていると、1px 刻みの列のうち、たまたま線の上にあった 1 点 (レーン中央の x=128 など) だけが
+    /// 「線の鏡像」へ飛んで、鏡像から 1 ずれていた (グリッド線が 127.5 のような半端な位置にあるため)
     func flipHorizontal() {
         let targets = selectedIndices()
         if targets.isEmpty {
             showToast("ノーツが選択されていません。反転するノーツを選択してください")
             return
         }
+        var onGrid = gridAlign && gridLines >= 1
+        if onGrid {
+            search: for i in targets {
+                let n = chart.notes[i]
+                if !isOnGridLine(n.x) { onGrid = false; break search }
+                for s in n.segs where !isOnGridLine(n.x + s.x) { onGrid = false; break search }
+            }
+        }
         pushUndo()
         for i in targets {
             let headX = chart.notes[i].x
-            let newHead = flippedX(headX)
+            let newHead = flippedX(headX, onGrid: onGrid)
             for j in chart.notes[i].segs.indices {
                 let absX = headX + chart.notes[i].segs[j].x      // seg の絶対 x (seg.x は始点からの相対値)
-                chart.notes[i].segs[j].x = flippedX(absX) - newHead
+                chart.notes[i].segs[j].x = flippedX(absX, onGrid: onGrid) - newHead
             }
             chart.notes[i].x = newHead
         }
