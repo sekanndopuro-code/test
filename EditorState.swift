@@ -256,8 +256,9 @@ final class EditorState: ObservableObject {
     @Published var stripWidth: CGFloat = UIAdjust.stripWidthDefault {
         didSet { UserDefaults.standard.set(Double(stripWidth), forKey: "editor.stripWidth") }
     }
-    /// 右ボタン列の幅 (設計 pt)。58 が従来どおり。広げると、アイコンが比例して大きくなる (縦に収まる範囲まで)
-    @Published var rightPanelWidth: CGFloat = UIAdjust.panelWidthDefault {
+    /// 右ボタン列の幅 (設計 pt)。保存した幅が無いときは、iPad で 58 (従来どおり)、iPhone で 82 (本家の iPhone に合わせた幅)。
+    /// 広げると、アイコンが比例して大きくなる (縦に収まる範囲まで。比例の基準は 58)
+    @Published var rightPanelWidth: CGFloat = UIAdjust.panelWidthInitial {
         didSet { UserDefaults.standard.set(Double(rightPanelWidth), forKey: "editor.rightPanelWidth") }
     }
 

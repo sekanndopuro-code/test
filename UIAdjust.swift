@@ -10,19 +10,28 @@ import UIKit
 //       ノッチ / ダイナミックアイランド (横画面では左端・上下中央) とは重ならない:
 //       −/＋ は島より上に収まる大きさまで、FX は島に掛かる位置になるときだけ、島を跨いで下へ移る。
 //       それ以上は大きくならない (そこが限界)
-//   ・右ボタン列の左端をドラッグ → 列の幅が広がる (`EditorState.rightPanelWidth`。従来は 58pt)。
+//   ・右ボタン列の左端をドラッグ → 列の幅が広がる (`EditorState.rightPanelWidth`。iPad は 58pt、iPhone は 82pt が初めの幅)。
 //       アイコンが幅に比例して大きくなる。ただし、縦に収まらなくなったり、アイコン同士の間隔
-//       (アイコンの縁から縁まで) が従来より狭くなる大きさにはならない (そこが限界。`RightPanel.iconScaleLimit`)
-//   ・「完了」で通常の画面に戻る。「リセット」で従来の幅 (145pt / 58pt) に戻す
+//       (アイコンの縁から縁まで) が従来より狭くなる大きさにはならない (そこが限界。`RightPanel.iconScaleLimit`)。
+//       角が直角の画面 (iPhone SE など。`DisplayShape`) は、列の上下に角丸ぶんの余白を空けないので、限界が広い
+//   ・「完了」で通常の画面に戻る。「リセット」で初めの幅 (帯 145pt / 右ボタン列 58pt (iPhone は 82pt)) に戻す
 //   決めた幅は保存される (次回起動時も同じ)。UI調整モードそのものは保存しない (開くたびにオフ)
 
 enum UIAdjust {
     /// 左の帯の幅 (設計 pt)。従来は 145。上限は従来の 3 倍 (レーンの最低幅が先に足りなくなるときは、そこまで)
     static let stripWidthDefault: CGFloat = 145
     static let stripWidthMax: CGFloat = 145 * 3
-    /// 右ボタン列の幅 (設計 pt)。従来は 58
+    /// 右ボタン列の幅 (設計 pt)。従来は 58 (本家の iPad)。アイコンの拡大率の基準 (幅 ÷ 58) もこれ
     static let panelWidthDefault: CGFloat = 58
     static let panelWidthMax: CGFloat = 58 * 3
+    /// iPhone など小さい画面での、右ボタン列の初期の幅 (設計 pt)。
+    /// 本家を iPhone で画面収録した画像から実測: 高さ 942px の画面で列の幅が 約 94px → 94 ÷ 942 × 820 ≒ 82。
+    /// (iPad の 58 のままだと、画面が小さい iPhone では、列もアイコンも本家より細くなる)
+    static let panelWidthPhone: CGFloat = 82
+    /// 保存した幅が無いときの初期の幅と、「リセット」で戻る幅。iPhone は panelWidthPhone、それ以外は従来の 58
+    static var panelWidthInitial: CGFloat {
+        DisplayShape.isPhoneLike ? panelWidthPhone : panelWidthDefault
+    }
     /// レーンに最低限残す幅 (設計 pt)。Adv. メニューを開いても、これだけは残るように上限を決める
     static let minLaneWidth: CGFloat = 360
 
@@ -32,7 +41,9 @@ enum UIAdjust {
         return max(stripWidthDefault, min(stripWidthMax, room))
     }
 
-    /// 右ボタン列の幅の上限。アイコンがそれ以上大きくならない幅 (通常の列が縦に収まる限界) より、広げても意味が無い
+    /// 右ボタン列の幅の上限。アイコンがそれ以上大きくならない幅 (通常の列が縦に収まる限界) より、広げても意味が無い。
+    /// 角が直角の画面 (iPhone SE など) では、列の上下に角丸ぶんの余白 (RightPanel.compactEdgeExtra) を空けないので、
+    /// そのぶん縦に収まる限界が上がり、上限も広くなる (iPhone で 約 88pt → 約 108pt)
     static func maxPanelWidth(designWidth: CGFloat, stripWidth: CGFloat, advWidth: CGFloat,
                               height: CGFloat, compact: Bool) -> CGFloat {
         let room = designWidth - stripWidth - SeekPanel.totalWidth - advWidth - minLaneWidth
@@ -56,10 +67,51 @@ extension EditorState {
         uiAdjustMode = false
     }
 
-    /// 帯と右ボタン列の幅を、従来の大きさ (145pt / 58pt) に戻す
+    /// 帯と右ボタン列の幅を、初めの大きさに戻す (帯は 145pt。右ボタン列は iPad で 58pt、iPhone で 82pt)
     func resetUIAdjust() {
         stripWidth = UIAdjust.stripWidthDefault
-        rightPanelWidth = UIAdjust.panelWidthDefault
+        rightPanelWidth = UIAdjust.panelWidthInitial
+    }
+}
+
+// MARK: - 画面の形 (角が丸いか / 直角か)
+
+/// 画面の形。iPhone SE のようなホームボタンの機種は、画面の角が直角で、横画面でも安全領域が上下左右とも 0。
+/// 角が丸い機種 (Face ID の iPhone) は、横画面で左右 (ノッチ / 島の側 約 59pt) と下 (ホームバー 約 21pt) に安全領域がある。
+/// 角が直角な画面に、角丸の機種に合わせた余白を空けても、画面が窮屈になるだけなので、
+/// 角丸ぶんの余白 (右ボタン列の上下 = RightPanel.compactEdgeExtra) は、角が丸い機種だけに入れる
+enum DisplayShape {
+    /// iPhone (iPad の iPhone 表示プレビューも含む) か
+    static var isPhoneLike: Bool {
+        if PhonePreview.isAvailable {
+            return previewDevice() != nil
+        }
+        return UIDevice.current.userInterfaceIdiom == .phone
+    }
+
+    /// 画面の角が丸いか。判別できないときは、これまでどおり「丸い」(余白を空ける) にする
+    static var hasRoundedCorners: Bool {
+        if PhonePreview.isAvailable {
+            // iPad。プレビューで選んだ機種の角の丸みに従う (iPhone SE は直角)
+            guard let device = previewDevice() else { return true }
+            return device.cornerRadius > 0
+        }
+        guard let insets = keyWindowInsets() else { return true }
+        return max(insets.left, insets.right, insets.bottom) > 0
+    }
+
+    /// iPad の上で iPhone 表示プレビューに選んでいる機種 (オフなら nil)
+    private static func previewDevice() -> PhonePreviewDevice? {
+        let raw = UserDefaults.standard.string(forKey: PhonePreview.deviceKey) ?? ""
+        guard let device = PhonePreviewDevice(rawValue: raw), device.size != nil else { return nil }
+        return device
+    }
+
+    private static func keyWindowInsets() -> UIEdgeInsets? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let windows = scenes.flatMap { $0.windows }
+        let window = windows.first(where: { $0.isKeyWindow }) ?? windows.first
+        return window?.safeAreaInsets
     }
 }
 
