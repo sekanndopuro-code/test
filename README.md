@@ -21,7 +21,7 @@
 | Renderers.swift | レーン・縦タイムライン・シークバーの描画 (Canvas) |
 | SeekDensity.swift | シークバー (再生ボタンの下) のノーツ密度ヒストグラムの計算 (120 区間 / 20 段階)。描画は `Renderers.swift` の `SeekRenderer` |
 | EditorView.swift | 画面レイアウト・右ボタン列・ポップアップ |
-| UIAdjust.swift | **UI調整モード** (SETTING)。画面構成だけを編集するモードの画面 (`UIAdjustLayer`)、左の帯の上のズーム (−/＋) / FX ボタンの大きさと位置 (`StripButtonLayout`)、ノッチ / ダイナミックアイランドの範囲 (`NotchGuard`)、画面の角が丸いか直角か (`DisplayShape`)、幅の上限 (`UIAdjust`)。下の「UI調整モード」参照 |
+| UIAdjust.swift | **UI調整モード** (SETTING)。画面構成だけを編集するモードの画面 (`UIAdjustLayer`)、左の帯の上のズーム (−/＋) / FX ボタンの大きさと位置 (`StripButtonLayout`)、ノッチ / ダイナミックアイランドの範囲 (`NotchGuard`)、画面の角の丸みの推定と、右ボタン列の上下の余白 (`DisplayShape`)、幅の上限 (`UIAdjust`)。下の「UI調整モード」参照 |
 | Sheets.swift | `Beat.parse` (拍の入力) だけ。META のシートはやめて、右ボタン列 + 右ウィンドウになった (下の「META / SETTING」) |
 | EditorState+Meta.swift | **META の動き**: 列を開く / 閉じる (`openMetaMenu` / `closeMetaMenu`)、More の mcz 共有 (`shareMCZNow` + 共有シート `MCZSharer`)、Review の tap 同士の重なり / 近すぎ探し (`reviewChart`)、Quit (`quitEditor`) |
 | MetaMenuIcons.swift | META の列のアイコン (Information = `InfoIcon` / Review = `ReviewIcon` / Quit = `PowerIcon`)。Back と More は EDIT 中と同じ |
@@ -58,7 +58,7 @@
     - 島の有無は、実機は画面左右の安全領域の大きさ (島 約59pt 以上 / 旧ノッチ 約44〜50pt / 無し 0)、iPad の iPhone 表示プレビューは選んだ機種で決める。島の無い機種 (iPhone SE・iPad) では、FX は「Zoom n」の下のまま
   - **右ボタン列**: 左端の持ち手を左へドラッグすると、列の幅が広がり (`EditorState.rightPanelWidth`。初めの幅は iPad で 58pt、**iPhone で 82pt** = 本家を iPhone で画面収録した画像から実測。保存した幅があればそちらを使う)、**アイコンが幅に比例して大きくなる** (`PanelButton` の `panelIconScale`。比例の基準は 58pt)。レーンは、広がったぶんだけ細くなる
     - **限界** (`RightPanel.iconScaleLimit`): アイコンの縁から縁までのすき間を従来のまま保ち、並ぶ数ぶんが画面の高さに収まる大きさまで。それ以上は、列を広げてもアイコンは大きくならない (持ち手は、通常の列の限界で止まる。限界では持ち手が橙色になる)
-    - **角が直角の画面** (iPhone SE など。`DisplayShape.hasRoundedCorners` が false = 横画面でも画面の左右・下の安全領域が全部 0) では、列の上下に角丸ぶんの余白 (`RightPanel.compactEdgeExtra` = 52pt) を空けない。iPhone で、通常の列の限界が約 150% (幅 約 88pt) → 約 187% (約 108pt)、EDIT 中が 100% → 約 111% に広がる。角が丸い機種は、これまでどおり余白を空ける。iPad の iPhone 表示プレビューは、選んだ機種で決める (iPhone SE だけ直角)
+    - **列の上下の余白は、画面の角の丸みに合わせる** (`DisplayShape.edgeMargin`)。角の丸みは機種で違う (iPhone X〜11 で約 39〜41pt、12 mini 44pt、12 / 12 Pro 47pt、12 Pro Max 53pt、新しい Pro 系は 55pt 以上、iPhone SE などは直角)。実機では丸みそのものは取れないので、**横画面の左右の安全領域 (ノッチ / 島の側。X 系 44pt・12〜14 で 47〜50pt・島の機種 59〜62pt) から半径を推定**する (`DisplayShape.radius(forSideInset:)`。同じ安全領域で半径が違う機種は、角に掛からないよう大きいほうに寄せてある)。余白は 半径 × 0.46 (実寸 pt) を設計 pt に直したもの (iPhone 16 Pro で従来と同じ 約 52pt。X 系で 約 38〜42pt、16 Pro 系で 約 53〜58pt)。**安全領域が上下左右とも 0 の機種 (iPhone SE など) は直角として 0**。画面が取れず推定できないときは、従来の 52pt (`RightPanel.compactEdgeExtra`)。余白が小さい機種ほど、縦に収まる限界が上がって、列の限界が広がる (通常の列で、16 Pro 系 約 85pt・X 系 約 92pt・直角の画面 約 108pt。EDIT 中は直角の画面だけ 100% → 約 111%)。iPad の iPhone 表示プレビューは、選んだ機種の安全領域 (SE 0 / 16 は 59 / 16 Pro・Pro Max は 62) で同じ計算をする
     - **EDIT 中はアイコンが 9 + 2 個あって、従来の間隔がすでに縦いっぱい**なので、通常の列 (6 + 2 個。角が丸い iPhone で約 150%、iPad で約 187%) よりずっと小さい (角が丸い iPhone で 100% = 大きくならない、iPad で約 111%)。列の幅は EDIT に入っても変わらない (レーンが動かないように) ので、EDIT 中は幅が広いままアイコンだけが上限の大きさになる。札には、通常の列と EDIT 中の倍率を両方出している
   - 決めた幅は保存される (`UserDefaults` の `editor.stripWidth` / `editor.rightPanelWidth`)。メニューや BPM / Effect のウィンドウ、More メニューの位置は、列の幅に追従する
 

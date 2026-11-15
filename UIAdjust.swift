@@ -13,7 +13,8 @@ import UIKit
 //   ・右ボタン列の左端をドラッグ → 列の幅が広がる (`EditorState.rightPanelWidth`。iPad は 58pt、iPhone は 82pt が初めの幅)。
 //       アイコンが幅に比例して大きくなる。ただし、縦に収まらなくなったり、アイコン同士の間隔
 //       (アイコンの縁から縁まで) が従来より狭くなる大きさにはならない (そこが限界。`RightPanel.iconScaleLimit`)。
-//       角が直角の画面 (iPhone SE など。`DisplayShape`) は、列の上下に角丸ぶんの余白を空けないので、限界が広い
+//       列の上下には、画面の角の丸みに合わせた余白を空ける (`DisplayShape.edgeMargin`。丸みが小さい機種ほど小さく、
+//       直角の画面 (iPhone SE など) は 0)。そのぶん、丸みが小さい機種ほど限界が広い
 //   ・「完了」で通常の画面に戻る。「リセット」で初めの幅 (帯 145pt / 右ボタン列 58pt (iPhone は 82pt)) に戻す
 //   決めた幅は保存される (次回起動時も同じ)。UI調整モードそのものは保存しない (開くたびにオフ)
 
@@ -42,8 +43,8 @@ enum UIAdjust {
     }
 
     /// 右ボタン列の幅の上限。アイコンがそれ以上大きくならない幅 (通常の列が縦に収まる限界) より、広げても意味が無い。
-    /// 角が直角の画面 (iPhone SE など) では、列の上下に角丸ぶんの余白 (RightPanel.compactEdgeExtra) を空けないので、
-    /// そのぶん縦に収まる限界が上がり、上限も広くなる (iPhone で 約 88pt → 約 108pt)
+    /// 列の上下に空ける角丸ぶんの余白 (DisplayShape.edgeMargin) は、角の丸みが小さい機種ほど小さく、直角の画面 (iPhone SE など) では 0 なので、
+    /// そのぶん縦に収まる限界が上がり、上限も広くなる (iPhone 16 Pro 系で 約 85pt、X 系で 約 92pt、直角の画面で 約 108pt。初めの 82pt は、どの機種でも収まる)
     static func maxPanelWidth(designWidth: CGFloat, stripWidth: CGFloat, advWidth: CGFloat,
                               height: CGFloat, compact: Bool) -> CGFloat {
         let room = designWidth - stripWidth - SeekPanel.totalWidth - advWidth - minLaneWidth
@@ -76,11 +77,20 @@ extension EditorState {
 
 // MARK: - 画面の形 (角が丸いか / 直角か)
 
-/// 画面の形。iPhone SE のようなホームボタンの機種は、画面の角が直角で、横画面でも安全領域が上下左右とも 0。
-/// 角が丸い機種 (Face ID の iPhone) は、横画面で左右 (ノッチ / 島の側 約 59pt) と下 (ホームバー 約 21pt) に安全領域がある。
-/// 角が直角な画面に、角丸の機種に合わせた余白を空けても、画面が窮屈になるだけなので、
-/// 角丸ぶんの余白 (右ボタン列の上下 = RightPanel.compactEdgeExtra) は、角が丸い機種だけに入れる
+/// 画面の形 (角の丸み)。角の丸みの大きさは機種で違う (iPhone X〜11 で約 39pt、12 mini で 44pt、12 / 12 Pro で 47pt、
+/// 12 Pro Max で 53pt、新しい Pro 系は 55pt 以上)。iPhone SE のようなホームボタンの機種は直角で、横画面でも安全領域が上下左右とも 0。
+///
+/// 実機では、角の丸みそのものは公開 API で取れないので、横画面の左右の安全領域 (ノッチ / 島の側。
+/// X 系 44pt・12〜14 で 47〜50pt・島の機種 59〜62pt) から推定する (`radius(forSideInset:)`)。
+/// 右ボタン列の上下に空ける角丸ぶんの余白は、この半径に比例させる (`edgeMargin`)。直角の画面には空けない。
+/// 推定できないとき (画面が取れない・左右の安全領域が読めない) は、これまでどおり RightPanel.compactEdgeExtra (52pt) にする
 enum DisplayShape {
+    /// 余白の基準にした半径 (実寸 pt)。推定できないときの半径でもある (これまでの 52pt は、この半径の機種に合わせた値)
+    static let referenceRadius: CGFloat = 55
+    /// 角丸ぶんの余白 (実寸 pt) ÷ 半径 (実寸 pt)。半径 55pt・画面の高さ 402pt (iPhone 16 Pro) で、設計 pt の 52 になる値
+    /// (52 × 402 ÷ 820 ÷ 55 ≒ 0.46)。この比で、半径が小さい機種は余白も小さく、大きい機種は大きくなる
+    private static let marginPerRadius: CGFloat = 0.46
+
     /// iPhone (iPad の iPhone 表示プレビューも含む) か
     static var isPhoneLike: Bool {
         if PhonePreview.isAvailable {
@@ -89,15 +99,43 @@ enum DisplayShape {
         return UIDevice.current.userInterfaceIdiom == .phone
     }
 
-    /// 画面の角が丸いか。判別できないときは、これまでどおり「丸い」(余白を空ける) にする
-    static var hasRoundedCorners: Bool {
+    /// 画面の角の丸み (実寸 pt の推定)。直角の画面は 0。推定できないときは referenceRadius
+    static var cornerRadius: CGFloat {
         if PhonePreview.isAvailable {
-            // iPad。プレビューで選んだ機種の角の丸みに従う (iPhone SE は直角)
-            guard let device = previewDevice() else { return true }
-            return device.cornerRadius > 0
+            // iPad。プレビューで選んだ機種の、実機の安全領域の大きさから推定する (iPhone SE は直角)
+            guard let device = previewDevice() else { return referenceRadius }
+            switch device {
+            case .off, .se:                     return 0
+            case .iphone16:                     return radius(forSideInset: 59)
+            case .iphone16Pro, .iphone16ProMax: return radius(forSideInset: 62)
+            }
         }
-        guard let insets = keyWindowInsets() else { return true }
-        return max(insets.left, insets.right, insets.bottom) > 0
+        guard let insets = keyWindow()?.safeAreaInsets else { return referenceRadius }
+        let side = max(insets.left, insets.right)
+        if side <= 0 && insets.bottom <= 0 { return 0 }     // 安全領域が全部 0 = 角が直角の機種
+        return radius(forSideInset: side)
+    }
+
+    /// 横画面の左右の安全領域 (ノッチ / 島の側) の大きさから、角の丸み (実寸 pt) を見積もる。
+    /// 同じ安全領域でも半径が違う機種があるので (47pt は 12 / 13 / 14 の 47.33pt と、Pro Max / Plus の 53.33pt)、
+    /// 角に掛かるよりは余白が余るほうがよいので、大きいほうの半径に寄せてある。
+    /// 新しい機種が増えても、一番上の段が安全領域の大きさに追従する
+    static func radius(forSideInset inset: CGFloat) -> CGFloat {
+        if inset < 40 { return referenceRadius }        // 読めない / 想定外
+        if inset < 46 { return 41.5 }                   // iPhone X・XS・XR・11 系 (安全領域 44pt。半径 39〜41.5pt)
+        if inset < 55 { return 53.5 }                   // iPhone 12〜14 系 (47〜50pt。半径 44〜53.3pt)
+        if inset < 61 { return 55 }                     // 島の機種 (14 Pro・15・16 など。59pt)
+        return max(62, inset)                           // 16 Pro 以降 (62pt)
+    }
+
+    /// 右ボタン列の上下に、角丸ぶん空ける余白 (設計 pt)。直角の画面は 0。
+    /// 実寸の余白 = 半径 × marginPerRadius を、設計 pt (画面の高さ ÷ 820 倍されて表示される) に直す。
+    /// 画面の高さが取れないときは、これまでの RightPanel.compactEdgeExtra
+    static var edgeMargin: CGFloat {
+        let r = cornerRadius
+        guard r > 0 else { return 0 }
+        guard let h = screenHeight(), h > 0 else { return RightPanel.compactEdgeExtra }
+        return marginPerRadius * r * DesignScreen.height / h
     }
 
     /// iPad の上で iPhone 表示プレビューに選んでいる機種 (オフなら nil)
@@ -107,11 +145,17 @@ enum DisplayShape {
         return device
     }
 
-    private static func keyWindowInsets() -> UIEdgeInsets? {
+    /// 横画面での画面の高さ (実寸 pt)。DesignCanvas が倍率 (高さ ÷ 820) を決めるときの高さと同じ
+    private static func screenHeight() -> CGFloat? {
+        if PhonePreview.isAvailable { return previewDevice()?.size?.height }
+        guard let bounds = keyWindow()?.bounds else { return nil }
+        return min(bounds.width, bounds.height)
+    }
+
+    private static func keyWindow() -> UIWindow? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let windows = scenes.flatMap { $0.windows }
-        let window = windows.first(where: { $0.isKeyWindow }) ?? windows.first
-        return window?.safeAreaInsets
+        return windows.first(where: { $0.isKeyWindow }) ?? windows.first
     }
 }
 
