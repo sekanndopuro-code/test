@@ -698,14 +698,15 @@ struct RightPanel: View {
     /// コンパクト表示 (iPhone) での上下の追加の空き (設計 pt)。
     /// 画面の角丸の範囲に、最初と最後のアイコンが掛からないようにする。
     /// 最初のアイコンの中心は 45pt (実寸 約22pt) しか離れておらず、鉛筆 (EDIT) などが角で切れていた。
-    /// 値は一番角丸の大きい iPhone 16 Pro 系 (実寸 半径 55pt、iPhone 16 は 47pt) 基準:
+    /// 値は半径 55pt の機種 (iPhone 16 Pro 系の画面。高さ 402pt) 基準:
     /// 最初のアイコンの中心が実寸 約46pt の高さに来て、アイコンの右端寄りでも角丸の弧より下に収まる。
-    /// 角が直角の画面 (iPhone SE など。DisplayShape.hasRoundedCorners が false) では、空けても画面が窮屈になるだけなので入れない
+    /// 角の丸みは機種で違うので、実際の余白は半径に比例させる (DisplayShape.edgeMargin。直角の画面は 0)。
+    /// この値は、半径を推定できないとき (DisplayShape が画面を取れないとき) のままの余白
     static let compactEdgeExtra: CGFloat = 52
 
-    /// 上下の空き (コンパクト表示で、画面の角が丸いときは、角丸ぶん広い)
+    /// 上下の空き (コンパクト表示では、画面の角の丸みに合わせて、角丸ぶん広い)
     static func edgeInset(compact: Bool) -> CGFloat {
-        edgeInset + (compact && DisplayShape.hasRoundedCorners ? compactEdgeExtra : 0)
+        edgeInset + (compact ? DisplayShape.edgeMargin : 0)
     }
 
     /// アイコンの中心どうしの間隔。本家の間隔を基本にして、入りきらないとき (EDIT 中のボタンが多いとき・小さい画面) だけ詰める。
