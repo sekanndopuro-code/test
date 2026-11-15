@@ -964,6 +964,11 @@ private struct SettingWindowContent: View {
                       value: $state.smallTextScale, range: EditorState.smallTextScaleRange, step: 0.05,
                       onEditingChanged: nil)
             note("SETTING の説明文や Adv. メニューの文字など、小さく書かれた文字の拡大率です (iPhone 表示のときだけ効きます)。100% 〜 300% まで変えられます。")
+            SideDivider()
+            sliderRow(title: "メニューの文字の大きさ", text: percent(state.menuScale),
+                      value: $state.menuScale, range: EditorState.menuScaleRange, step: 0.05,
+                      onEditingChanged: nil)
+            note("LFB (分割)・再生速度のメニューと、EDIT の More (•••) のメニューの大きさです。文字に合わせて、アイコンと枠も同じ倍率で大きくなります (iPad でも iPhone でも効きます)。100% 〜 200% まで。メニューが画面の縦からはみ出さないよう、項目の多い LFB (分割) は 150% 付近が上限になります。")
         }
     }
 

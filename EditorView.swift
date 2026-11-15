@@ -1161,17 +1161,22 @@ struct EditorView: View {
     private var popupLayer: some View {
         GeometryReader { proxy in
             let isMore = state.popup == .more
+            // SETTING の「メニューの文字の大きさ」。画面からはみ出さないよう、メニューごとに上限を掛けた倍率
+            let k = popupScale(screenHeight: proxy.size.height)
             ZStack(alignment: isMore ? .topTrailing : .bottomTrailing) {
                 if state.popup != .none {
                     Color.black.opacity(0.001)
                         .contentShape(Rectangle())
                         .onTapGesture { state.popup = .none }
                     popupBody
+                        // 文字・アイコン・枠ぜんぶを同じ倍率で大きくする。右端 (ボタン列側) と、再生速度 / 分割は下端、More は上端を
+                        // 固定したまま、左と上 (More は下) へ広がる。当たり判定も見た目どおりに広がる
+                        .scaleEffect(k, anchor: isMore ? .topTrailing : .bottomTrailing)
                         .padding(.trailing, state.rightPanelWidth + RightPanel.sideGap)
                         // 本家は、再生速度も分割も、メニューの下端が画面の下端のすぐ上にそろう。
                         // More だけは上から: 上端が、More ボタンの中心より 263pt 上 (自作は More ボタンが本家より下なので、その分メニューも下がる)
                         .padding(isMore ? Edge.Set.top : Edge.Set.bottom,
-                                 isMore ? moreMenuTop(height: proxy.size.height) : RightPanel.popupBottomInset)
+                                 isMore ? moreMenuTop(height: proxy.size.height, scale: k) : RightPanel.popupBottomInset)
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
@@ -1265,13 +1270,38 @@ struct EditorView: View {
     private static let moreTopAboveButton: CGFloat = 263
     private static let moreRowCount = 9
 
+    /// 今開いているメニューの倍率 (SETTING の「メニューの文字の大きさ」= state.menuScale)。
+    /// 拡大したメニューが画面の縦 (設計画面の高さ) からはみ出すときは、収まる最大の倍率まで下げる。
+    /// 項目の多い LFB (分割: 10 行) は、約 150% が上限になる。1 倍より小さくはしない
+    private func popupScale(screenHeight: CGFloat) -> CGFloat {
+        let want = CGFloat(state.menuScale)
+        let listHeight = { (rows: Int) -> CGFloat in CGFloat(rows) * Self.popupRowHeight + Self.popupPad * 2 }
+        let base: CGFloat
+        let room: CGFloat
+        switch state.popup {
+        case .speed:
+            base = listHeight(EditorState.speeds.count)
+            room = screenHeight - RightPanel.popupBottomInset - 4
+        case .divide:
+            base = listHeight(EditorState.divides.count + 1)          // + 「入力…」
+            room = screenHeight - RightPanel.popupBottomInset - 4
+        case .more:
+            base = Self.moreRowHeight * CGFloat(Self.moreRowCount) + Self.morePad * 2
+            room = screenHeight - 8
+        case .none:
+            return 1
+        }
+        return max(1, min(want, room / base))
+    }
+
     /// More メニューの上端の高さ (画面の上端から)。画面の下にはみ出すときだけ、はみ出さない位置まで上げる
-    private func moreMenuTop(height: CGFloat) -> CGFloat {
+    /// (scale: メニューを拡大している倍率。拡大したぶん、下へ長くなる)
+    private func moreMenuTop(height: CGFloat, scale: CGFloat = 1) -> CGFloat {
         // EDIT 中のアイコンの拡大率 (UI調整モードで列を広げたとき。EDIT 中は縦に収まる上限が低い)
         let iconScale = RightPanel.effectiveIconScale(requested: state.rightPanelWidth / RightPanel.width,
                                                       forHeight: height, editing: true, compact: compact)
         let top = RightPanel.moreCenterY(forHeight: height, compact: compact, iconScale: iconScale) - Self.moreTopAboveButton
-        let menuHeight = Self.moreRowHeight * CGFloat(Self.moreRowCount) + Self.morePad * 2
+        let menuHeight = (Self.moreRowHeight * CGFloat(Self.moreRowCount) + Self.morePad * 2) * scale
         return max(4, min(top, height - menuHeight - 4))
     }
 

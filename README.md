@@ -51,6 +51,7 @@
 ## UI調整モード / 小さい文字 300% (SETTING)
 
 - **小さい文字の大きさ**: 100% 〜 **300%** (以前は 200% まで。初期値は 150% のまま。`EditorState.smallTextScaleRange`)。iPhone 表示のときだけ効く (iPad は 1 倍)。Adv. メニューのヘッダーは、150% を超えて大きくしたときだけ文字に合わせて高さが広がる (`AdvPanel.headerScale`)
+- **メニューの文字の大きさ** (SETTING の「小さい文字の大きさ」の下。100% 〜 200%、初期値 100% = 従来どおり。保存される: UserDefaults `editor.menuScale`。`EditorState.menuScale`): LFB (分割)・再生速度のメニューと、EDIT の More (•••) のメニューを、文字・アイコン・枠・行の高さぜんぶ同じ倍率で大きくする (iPad でも iPhone でも効く)。`EditorView.popupLayer` が、メニュー全体に `scaleEffect` を掛ける (ボタン列側の右端を固定。再生速度 / 分割は下端、More は上端も固定したまま広がり、当たり判定も見た目どおりに広がる)。画面の縦からはみ出すときは、そのメニューだけ倍率を下げる (`EditorView.popupScale`。項目の多い LFB の 10 行は約 150% が上限。More は約 190%)。Grid settings のダイアログ (`GridSettingsDialog`) には効かない
 - **UI調整モード** (SETTING のチェックボックス。保存はしない = 開くたびにオフ):
   - オンにすると SETTING が閉じて、**譜面の編集・再生・ボタンは全部効かなくなり** (一番上の層 `UIAdjustLayer` が画面全体のタッチを止める)、画面構成だけを編集するモードになる。画面の上の札の **「完了」** で戻る / **「リセット」** で初めの幅 (帯 145pt、右ボタン列は iPad 58pt・iPhone 82pt) に戻す
   - **左の帯**: 右端の持ち手 (青い縦線) を右へドラッグすると、帯の幅が広がる (`EditorState.stripWidth`。従来は 145pt、上限は 3 倍 or レーンの最低幅 360pt が残るまで)。**ズーム (−/＋) と FX ボタン、帯の中の拍番号・目盛り・現在位置の三角も、幅に比例して大きくなる** (`StripRenderer` の `k` / `StripButtonLayout`)

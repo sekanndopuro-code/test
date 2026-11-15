@@ -248,6 +248,15 @@ final class EditorState: ObservableObject {
     /// 実際に使う拡大率 (コンパクト表示でないときは 1)
     var smallTextBoost: CGFloat { compactLayout ? CGFloat(smallTextScale) : 1 }
 
+    // LFB (分割) / 再生速度 / More のメニューの大きさ (SETTING の「メニューの文字の大きさ」)。
+    // 文字・アイコン・枠・行の高さをぜんぶ同じ倍率で大きくする (文字だけ大きくすると枠からはみ出すため)。
+    // iPad でも iPhone でも効く。100% = 従来どおり。次回起動時も保存される。
+    // 画面の縦からはみ出すときは、そのメニューだけ自動で倍率を下げる (EditorView.popupScale。項目の多い LFB は 150% 付近が上限)
+    static let menuScaleRange = 1.0...2.0
+    @Published var menuScale: Double = 1.0 {
+        didSet { UserDefaults.standard.set(menuScale, forKey: "editor.menuScale") }
+    }
+
     // MARK: UI調整モード (SETTING の「UI調整モード」。画面構成だけを編集するモード。UIAdjust.swift)
     //   オン: 譜面の編集・再生などは一切できなくなり、左の帯の右端 / 右ボタン列の左端をドラッグして幅を変えられる。
     //   保存はしない (開くたびにオフ)。決めた幅 (stripWidth / rightPanelWidth) は次回起動時も保存される
@@ -493,6 +502,9 @@ final class EditorState: ObservableObject {
         }
         if let v = ud.object(forKey: "editor.smallTextScale") as? Double {
             self.smallTextScale = min(max(v, Self.smallTextScaleRange.lowerBound), Self.smallTextScaleRange.upperBound)
+        }
+        if let v = ud.object(forKey: "editor.menuScale") as? Double {
+            self.menuScale = min(max(v, Self.menuScaleRange.lowerBound), Self.menuScaleRange.upperBound)
         }
         if let v = ud.object(forKey: "editor.stripWidth") as? Double {
             self.stripWidth = min(max(CGFloat(v), UIAdjust.stripWidthDefault), UIAdjust.stripWidthMax)
