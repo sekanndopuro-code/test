@@ -92,6 +92,60 @@ extension EditorState {
         return min(gridLines, max(1, Int((Double(widthUnits) / cell).rounded())))
     }
 
+    // MARK: - Note ツール: 同じ拍のタップを避けて置く
+
+    /// Note ツール (タップ) を置くとき、同じ拍にすでにあるタップと **一部でも被る** なら、1 マス空けて避けた中心 x を返す。
+    /// - 被らなければ x をそのまま返す (近くにあっても、被っていなければ動かさない)
+    /// - 避ける先は、いちばん近い置ける位置。左右が同じ距離なら、指を置いた側 (被った相手の中心から見て右か左か)。
+    ///   グリッド有効時は、snapNote と同じくグリッド線の上
+    /// - レーンの枠の中に空きを作れないときは nil (置かない)。枠は snapNote と同じ考え方で、
+    ///   「はみ出せる」がオフなら端が 0...255 に収まること、オンなら中心が 0...255 にあること
+    /// - 避ける相手は「同じ拍の、スライドでも wipe でもないタップ」(Review の数え方と同じ。端は x ± w / 2)
+    /// - 「1 マス」は Grid lines の 1 マス = 255 ÷ Grid lines (Grid align がオフでも同じ)
+    func tapXAvoidingOverlap(beat: Beat, x: Int, w: Int) -> Int? {
+        let v = beat.value
+        var list: [(l: Double, r: Double)] = []
+        for i in notesOverlapping(lo: v - 1e-9, hi: v + 1e-9) {
+            let e = chart.notes[i]
+            guard e.beat == beat, !e.isSlide, !e.isWipe else { continue }
+            let h = Double(e.w) / 2
+            list.append((Double(e.x) - h, Double(e.x) + h))
+        }
+        let taken = list
+        let half = Double(w) / 2
+        let myL = Double(x) - half
+        let myR = Double(x) + half
+        // 一部でも被っている相手 (端どうしが触れるだけで、面積が重ならないものは「被る」に入れない)
+        guard let hit = taken.first(where: { myL < $0.r && myR > $0.l }) else { return x }
+
+        let gridOn = gridAlign && gridLines >= 1
+        let cell = 255.0 / Double(max(1, gridLines))
+        // 空けるべき間隔 (レーンの座標)。グリッド有効時は、x と w を整数に丸めて保存するので、グリッド上でちょうど 1 マス空けても
+        // 実際の間隔は最大 1.5 ほど縮む。その分だけ許す (ただし 1 は下回らない = Review の「近すぎ」(1 未満) に掛からない)
+        let need = gridOn ? max(1.0, cell - min(1.5, cell * 0.4)) : max(1.0, cell)
+        func isClear(_ cx: Int) -> Bool {
+            let l = Double(cx) - half
+            let r = Double(cx) + half
+            return taken.allSatisfy { l - $0.r >= need || $0.l - r >= need }
+        }
+        let range: ClosedRange<Int> = allowNoteOverflow ? 0...255 : laneCenterRange(width: w)
+        let rightFirst = Double(x) >= (hit.l + hit.r) / 2
+        func nearest(in cs: [Int]) -> Int? {
+            cs.filter { range.contains($0) && isClear($0) }.min { a, b in
+                let da = abs(a - x)
+                let db = abs(b - x)
+                return da != db ? da < db : (rightFirst ? a > b : a < b)
+            }
+        }
+
+        let centers: [Int] = gridOn ? (0...gridLines).map { gridLineX($0) } : Array(range)
+        if let c = nearest(in: centers) { return c }
+        // グリッド線の上には置けなくても、端が枠ぴったりの位置なら空きを作れることがある
+        // (snapNote も、端が枠を越えるときは、グリッド吸着をやめて枠ぴったりに止める)
+        if gridOn && !allowNoteOverflow { return nearest(in: [range.lowerBound, range.upperBound]) }
+        return nil
+    }
+
     // MARK: - レーン操作 (編集モード)
 
     func laneDrag(start: CGPoint, current: CGPoint, size: CGSize, ended: Bool) {
@@ -115,7 +169,13 @@ extension EditorState {
             // 指を置いている間は何も描かない (半透明のゴーストも出さない)。指を離した時に初めてノーツが置かれる
             if ghost != nil { ghost = nil }
             if ended {
-                addNote(Note(beat: b, x: p.x, w: p.w, type: tool == .wipe ? 4 : nil))
+                var x = p.x
+                if tool == .note {
+                    // タップは、同じ拍のタップと一部でも被るなら、1 マス空けて避けて置く。枠の中に空きを作れないときは置かない
+                    guard let ax = tapXAvoidingOverlap(beat: b, x: p.x, w: p.w) else { return }
+                    x = ax
+                }
+                addNote(Note(beat: b, x: x, w: p.w, type: tool == .wipe ? 4 : nil))
             }
 
         case .slide:
