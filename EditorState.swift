@@ -91,6 +91,9 @@ struct LaneGeo {
     var ppb: Double           // 1拍あたりのピクセル
     /// nil = 通常の表示。FX 表示のときだけ入る (py が effect を反映した位置を返す。beatOf は通常のまま = FX 表示では使わない)
     var fx: FXWarp? = nil
+    /// タップ / ウィップの棒の縦幅の倍率 (SETTING の「ノーツの縦幅」。1.0 = 従来どおり)。
+    /// 見た目 (LaneRenderer) と当たり判定 (EditorState.noteHit) の両方が、この値を見る。スライドの点・リボンには効かない
+    var noteScale: CGFloat = 1.0
 
     // 本家 (iPad Air 4) の縦線を実測した値: レーンの左端 = ビューの左端 + 25.2pt、右端 = ビューの右端 - 10.2pt (幅 837.6pt)。
     // (ビューの幅 873pt = 画面 1180 - 左の帯 145 - シークバーと時刻 104 - 右のボタン列 58)
@@ -247,6 +250,14 @@ final class EditorState: ObservableObject {
     }
     /// 実際に使う拡大率 (コンパクト表示でないときは 1)
     var smallTextBoost: CGFloat { compactLayout ? CGFloat(smallTextScale) : 1 }
+
+    // タップ / ウィップの縦幅 (SETTING の「ノーツの縦幅」)。見た目の高さと、触れる範囲 (当たり判定) の高さの両方に掛かる倍率。
+    // 100% = 従来どおり、最大 240%。iPhone などで棒が細くて触りにくいときに伸ばす。棒の下端は拍の線のすぐ上に保ったまま、上へ伸びる。
+    // スライドの始点・seg の点・リボンには効かない。次回起動時も保存される
+    static let noteHeightScaleRange = 1.0...2.4
+    @Published var noteHeightScale: Double = 1.0 {
+        didSet { UserDefaults.standard.set(noteHeightScale, forKey: "editor.noteHeightScale") }
+    }
 
     // LFB (分割) / 再生速度 / More のメニューの大きさ (SETTING の「メニューの文字の大きさ」)。
     // 文字・アイコン・枠・行の高さをぜんぶ同じ倍率で大きくする (文字だけ大きくすると枠からはみ出すため)。
@@ -506,6 +517,9 @@ final class EditorState: ObservableObject {
         if let v = ud.object(forKey: "editor.menuScale") as? Double {
             self.menuScale = min(max(v, Self.menuScaleRange.lowerBound), Self.menuScaleRange.upperBound)
         }
+        if let v = ud.object(forKey: "editor.noteHeightScale") as? Double {
+            self.noteHeightScale = min(max(v, Self.noteHeightScaleRange.lowerBound), Self.noteHeightScaleRange.upperBound)
+        }
         if let v = ud.object(forKey: "editor.stripWidth") as? Double {
             self.stripWidth = min(max(CGFloat(v), UIAdjust.stripWidthDefault), UIAdjust.stripWidthMax)
         }
@@ -676,6 +690,7 @@ final class EditorState: ObservableObject {
 
     func geo(_ size: CGSize) -> LaneGeo {
         var g = LaneGeo(W: size.width, H: size.height, viewBeat: currentBeat(), ppb: Double(size.height) / visibleBeats)
+        g.noteScale = CGFloat(noteHeightScale)
         if fxMode { g.fx = FXWarp(map: fxEffectMap, time: timeMap, nowSec: currentSec()) }
         return g
     }

@@ -68,8 +68,10 @@ extension LaneRenderer {
     static func fxRanges(_ g: LaneGeo, _ f: FXWarp, totalSec: Double, margin: CGFloat = 24) -> [FXRange] {
         let pps = g.fxPxPerSec(f)
         guard pps.isFinite, pps > 0 else { return [] }
-        let pLo = f.pNow - Double(g.H - g.playY + margin) / pps
-        let pHi = f.pNow + Double(g.playY + margin) / pps
+        // 「ノーツの縦幅」を伸ばすと、画面の外にある拍の線の棒も、上へ伸びて画面に掛かる。そのぶん余白を広げる (100% のときは 24pt のまま)
+        let m = max(margin, barTopReach(scale: g.noteScale))
+        let pLo = f.pNow - Double(g.H - g.playY + m) / pps
+        let pHi = f.pNow + Double(g.playY + m) / pps
         let tMin = -1.0
         let tMax = totalSec + 30            // scroll 0 の区間は、時刻の範囲が果てしなく長くなるので、曲の終わりの少し先で切る
         var out: [FXRange] = []
@@ -168,14 +170,16 @@ extension LaneRenderer {
             let n = notes[i]
             let t = f.time.sec(atBeat: n.beat.value)
             if t < keep - 1e-4 { continue }
-            let y = yOf(f.map.p(t)) - barLift
+            let sc = g.noteScale       // SETTING の「ノーツの縦幅」(通常の表示と同じ)
+            let y = barCenterY(lineY: yOf(f.map.p(t)), isWipe: n.isWipe, scale: sc)
             if y < -24 || y > g.H + 24 { continue }
             let hw = CGFloat(n.w) / 255.0 * g.trackW / 2.0
             let cx = g.px(Double(n.x))
             if n.isWipe {
-                drawWipe(&c, xL: cx - hw, xR: cx + hw, yMid: y, selected: false)
+                drawWipe(&c, xL: cx - hw, xR: cx + hw, yMid: y, selected: false, scale: sc)
             } else {
-                drawTap(&c, rect: CGRect(x: cx - hw, y: y - tapH / 2, width: hw * 2, height: tapH), selected: false)
+                let h = tapH * sc
+                drawTap(&c, rect: CGRect(x: cx - hw, y: y - h / 2, width: hw * 2, height: h), selected: false)
             }
             bars += 1
         }

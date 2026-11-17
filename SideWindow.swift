@@ -951,6 +951,8 @@ private struct SettingWindowContent: View {
         VStack(alignment: .leading, spacing: 16) {
             textSizeRows
             SideDivider()
+            noteHeightRow
+            SideDivider()
             uiAdjustRow
             SideDivider()
             advAndClipRows
@@ -969,6 +971,16 @@ private struct SettingWindowContent: View {
                       value: $state.menuScale, range: EditorState.menuScaleRange, step: 0.05,
                       onEditingChanged: nil)
             note("LFB (分割)・再生速度のメニューと、EDIT の More (•••) のメニューの大きさです。文字に合わせて、アイコンと枠も同じ倍率で大きくなります (iPad でも iPhone でも効きます)。100% 〜 200% まで。メニューが画面の縦からはみ出さないよう、項目の多い LFB (分割) は 150% 付近が上限になります。")
+        }
+    }
+
+    /// ノーツの縦幅 (100% 〜 240%、保存される)。タップ / ウィップの棒の見た目の高さと、触れる範囲 (当たり判定) の高さが、同じ倍率で変わる
+    private var noteHeightRow: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            sliderRow(title: "ノーツの縦幅", text: percent(state.noteHeightScale),
+                      value: $state.noteHeightScale, range: EditorState.noteHeightScaleRange, step: 0.05,
+                      onEditingChanged: nil)
+            note("タップとウィップの縦の太さを変えます。見た目と、触れて選べる範囲の縦幅が、同じ倍率で広がります (100% が従来どおりで、240% まで)。iPhone でノーツに触りにくいときに大きくしてください。棒の下端は拍の線の上に乗ったまま、上へ伸びます。スライドの点・リボンは変わりません。")
         }
     }
 
