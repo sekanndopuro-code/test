@@ -721,8 +721,10 @@ extension EditorState {
         var found = 0
         var added = 0
         for n in chart.notes {
-            // タップ / ウィップは、描かれている棒の真ん中 (拍の線より barLift 上) で判定する。スライドは始点の点の位置
-            let yHead = g.py(n.beat.value) - (n.isSlide ? 0 : LaneRenderer.barLift)
+            // タップ / ウィップは、描かれている棒の真ん中 (「ノーツの縦幅」の倍率も反映) で判定する。スライドは始点の点の位置
+            let yHead = n.isSlide
+                ? g.py(n.beat.value)
+                : LaneRenderer.barCenterY(lineY: g.py(n.beat.value), isWipe: n.isWipe, scale: g.noteScale)
             var hit = inside(CGPoint(x: g.px(Double(n.x)), y: yHead))
             if !hit {
                 for s in n.segs where inside(CGPoint(x: g.px(Double(n.x + s.x)), y: g.py(n.beat.value + s.beat.value))) {
@@ -821,8 +823,10 @@ extension EditorState {
         }
         // 触れた高さの前後 (棒の持ち上げ・当たり判定の幅・点の半径を足した分) に掛かるノーツだけを調べる。
         // 重なっているときは、後ろにあるもの (上に描かれているもの) を優先する (以前と同じ)
+        // 「ノーツの縦幅」を伸ばすと、棒の真ん中が上へ動き、当たり判定の幅も広がる。
+        // 拍の線から触れた点までの最大の距離 = barLift + (棒の伸び) + 14 × 倍率。100% で 22pt、240% で約 50pt。余白込みで、倍率が 1 増えるごとに 20pt 広げる
         let b = g.beatOf(p.y)
-        let m = (32.0 + Double(LaneRenderer.barLift)) / ppb
+        let m = (32.0 + Double(LaneRenderer.barLift) + 20.0 * Double(g.noteScale - 1)) / ppb
         for i in notesOverlapping(lo: b - m, hi: b + m).reversed() where noteHit(chart.notes[i], at: p, g: g) {
             return i
         }
@@ -837,9 +841,12 @@ extension EditorState {
         let minHitW: CGFloat = 8
         let hw = max(CGFloat(n.w), minHitW) / 255.0 * g.trackW / 2.0
         // タップ / ウィップの棒は、拍の線より barLift だけ上に描かれる (LaneRenderer.barLift)。当たり判定も棒に合わせる。
-        // スライドの始点には棒が無いので、点の位置 (拍の線の上) のまま
-        let yBar = n.isSlide ? y0 : y0 - LaneRenderer.barLift
-        if abs(p.y - yBar) <= 14 && abs(p.x - cx) <= hw + 6 { return true }
+        // SETTING の「ノーツの縦幅」(g.noteScale) は、棒の見た目と、この縦の当たり判定 (真ん中から上下に 14pt × 倍率) に掛かる。
+        // 当たり判定の真ん中は、見た目の棒の真ん中 (LaneRenderer.barCenterY)。
+        // スライドの始点には棒が無いので、点の位置 (拍の線の上) のまま、倍率も掛けない
+        let yBar = n.isSlide ? y0 : LaneRenderer.barCenterY(lineY: y0, isWipe: n.isWipe, scale: g.noteScale)
+        let halfY = n.isSlide ? LaneRenderer.barHitHalfH : LaneRenderer.barHitHalfH * g.noteScale
+        if abs(p.y - yBar) <= halfY && abs(p.x - cx) <= hw + 6 { return true }
         if n.isSlide {
             var pts: [CGPoint] = [CGPoint(x: cx, y: y0)]
             for s in n.segs {

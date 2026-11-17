@@ -52,6 +52,11 @@
 
 - **小さい文字の大きさ**: 100% 〜 **300%** (以前は 200% まで。初期値は 150% のまま。`EditorState.smallTextScaleRange`)。iPhone 表示のときだけ効く (iPad は 1 倍)。Adv. メニューのヘッダーは、150% を超えて大きくしたときだけ文字に合わせて高さが広がる (`AdvPanel.headerScale`)
 - **メニューの文字の大きさ** (SETTING の「小さい文字の大きさ」の下。100% 〜 200%、初期値 100% = 従来どおり。保存される: UserDefaults `editor.menuScale`。`EditorState.menuScale`): LFB (分割)・再生速度のメニューと、EDIT の More (•••) のメニューを、文字・アイコン・枠・行の高さぜんぶ同じ倍率で大きくする (iPad でも iPhone でも効く)。`EditorView.popupLayer` が、メニュー全体に `scaleEffect` を掛ける (ボタン列側の右端を固定。再生速度 / 分割は下端、More は上端も固定したまま広がり、当たり判定も見た目どおりに広がる)。画面の縦からはみ出すときは、そのメニューだけ倍率を下げる (`EditorView.popupScale`。項目の多い LFB の 10 行は約 150% が上限。More は約 190%)。Grid settings のダイアログ (`GridSettingsDialog`) には効かない
+- **ノーツの縦幅** (SETTING の「メニューの文字の大きさ」の下のスライダー。100% 〜 **240%**、5% 刻み、初期値 100% = 従来どおり。保存される: UserDefaults `editor.noteHeightScale`。`EditorState.noteHeightScale` / `noteHeightScaleRange`): iPhone でタップ / ウィップに触りにくいときのために、**タップとウィップの棒の見た目の縦幅と、触れて選べる範囲 (当たり判定) の縦幅を、同じ倍率で**広げる。`EditorState.geo(_:)` が倍率を `LaneGeo.noteScale` に入れ、描画 (`LaneRenderer.drawNotes` / FX 表示の `drawFXNotes`)・当たり判定 (`EditorState.noteHit` / `hitNote`)・投げ縄選択 (`selectInLasso`) が、同じ `LaneRenderer.barCenterY` で棒の位置をそろえる
+  - 見た目: タップは高さ 11.5pt、ウィップは 12pt (どちらも 100% のとき) に倍率を掛ける。**棒の下端 (拍の線のすぐ上) は動かさず、上へ伸びる**。ウィップは「<」「>」の矢印の縦も伸びる (幅と端のとがりの深さは変えない)。240% のときタップは約 27.6pt
+  - 当たり判定: 棒の真ん中から上下に 14pt (100% のとき) × 倍率。240% で上下に 33.6pt (全体で約 67pt)。横は従来どおり (幅 + 6pt)
+  - 効かないもの: スライドの始点・seg の点・リボン (見た目も当たり判定も従来どおり)。テストプレイ (`GameView`) のノーツの太さと判定 (x と時刻だけで判定するので、縦の当たり判定は無い)
+  - 画面の外にある拍の線の棒が、伸びて画面に掛かるぶん、`hitNote` の絞り込み幅と、FX 表示の `fxRanges` の余白は、倍率に合わせて広がる (100% のときは従来と同じ)。通常表示の `visibleNoteIndices` の余白 (40pt) は、240% の棒の張り出し (約 33pt) まで収まるので、そのまま
 - **UI調整モード** (SETTING のチェックボックス。保存はしない = 開くたびにオフ):
   - オンにすると SETTING が閉じて、**譜面の編集・再生・ボタンは全部効かなくなり** (一番上の層 `UIAdjustLayer` が画面全体のタッチを止める)、画面構成だけを編集するモードになる。画面の上の札の **「完了」** で戻る / **「リセット」** で初めの幅 (帯 145pt、右ボタン列は iPad 58pt・iPhone 82pt) に戻す
   - **左の帯**: 右端の持ち手 (青い縦線) を右へドラッグすると、帯の幅が広がる (`EditorState.stripWidth`。従来は 145pt、上限は 3 倍 or レーンの最低幅 360pt が残るまで)。**ズーム (−/＋) と FX ボタン、帯の中の拍番号・目盛り・現在位置の三角も、幅に比例して大きくなる** (`StripRenderer` の `k` / `StripButtonLayout`)

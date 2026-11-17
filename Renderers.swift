@@ -456,17 +456,20 @@ enum LaneRenderer {
             }
         }
         // 2) タップ / ウィップの棒 (スライドの始点は、drawSlideHeadBar が true のときだけ)
+        //    縦幅は SETTING の「ノーツの縦幅」(g.noteScale、100% 〜 240%)。棒の下端は拍の線の上に乗せたまま、上へ伸びる
+        let sc = g.noteScale
         for n in notes {
             if n.isSlide && !drawSlideHeadBar { continue }
-            let y = g.py(n.beat.value) - barLift
+            let y = barCenterY(lineY: g.py(n.beat.value), isWipe: n.isWipe, scale: sc)
             if y < -24 || y > g.H + 24 { continue }
             let hw = CGFloat(n.w) / 255.0 * g.trackW / 2.0
             let cx = g.px(Double(n.x))
             let isSel = !selected.isEmpty && selected.contains(n.id)
             if n.isWipe {
-                drawWipe(&c, xL: cx - hw, xR: cx + hw, yMid: y, selected: isSel)
+                drawWipe(&c, xL: cx - hw, xR: cx + hw, yMid: y, selected: isSel, scale: sc)
             } else {
-                let rect = CGRect(x: cx - hw, y: y - tapH / 2, width: hw * 2, height: tapH)
+                let h = tapH * sc
+                let rect = CGRect(x: cx - hw, y: y - h / 2, width: hw * 2, height: h)
                 drawTap(&c, rect: rect, selected: isSel)
             }
         }
@@ -476,8 +479,27 @@ enum LaneRenderer {
         stampDots(&c, selDots, dotImages.selected)
     }
 
-    /// タップの棒の高さ (pt)。本家の実測 約 12pt (縁 1.5 + 帯 1.5 + 芯 5 + 帯 1.5 + 縁 1.5 のぶん)
+    /// タップの棒の高さ (pt)。本家の実測 約 12pt (縁 1.5 + 帯 1.5 + 芯 5 + 帯 1.5 + 縁 1.5 のぶん)。100% (倍率 1.0) のときの値
     static let tapH: CGFloat = 11.5
+    /// ウィップの棒の高さの半分 (pt)。100% のときの値 (棒の高さ 12pt)
+    static let wipeHalfH: CGFloat = 6.0
+    /// タップ / ウィップの当たり判定の、棒の真ん中から上下それぞれの幅 (pt)。100% のときの値 (SETTING の「ノーツの縦幅」で倍率が掛かる)
+    static let barHitHalfH: CGFloat = 14
+
+    /// 棒の高さの半分 (pt)。100% のときの値
+    static func barHalfHeight(isWipe: Bool) -> CGFloat { isWipe ? wipeHalfH : tapH / 2 }
+
+    /// タップ / ウィップの棒の真ん中の y。lineY = そのノーツの拍の線の y、scale = 「ノーツの縦幅」の倍率 (1.0 〜 2.4)。
+    /// 100% のときは lineY − barLift。倍率を上げても棒の下端 (拍の線のすぐ上) は動かさず、上へ伸ばす。
+    /// 見た目 (drawNotes / drawFXNotes) と、当たり判定 (EditorState.noteHit)・投げ縄の選択は、必ずこれで棒の位置をそろえる
+    static func barCenterY(lineY: CGFloat, isWipe: Bool, scale: CGFloat) -> CGFloat {
+        lineY - barLift - barHalfHeight(isWipe: isWipe) * (scale - 1)
+    }
+
+    /// 拍の線から、棒 (縁のにじみ込み) の上端までの高さの最大 (pt)。画面の外にある線の棒が、どこまで画面に掛かるかを決める
+    static func barTopReach(scale: CGFloat) -> CGFloat {
+        barLift + wipeHalfH * (2 * scale - 1) + 2
+    }
 
     /// タップ: 明るい水色の縁 → 濃い青緑の帯 → 白に近い水色の芯 (角は丸い)。外側に弱い水色のにじみ
     static func drawTap(_ c: inout GraphicsContext, rect: CGRect, selected: Bool) {
@@ -495,12 +517,15 @@ enum LaneRenderer {
     }
 
     /// ウィップ: 左右の端がとがった六角形の棒 (黄色の縁 → オリーブ色の帯 → 淡い黄色の芯) の、さらに外側に「<」「>」の矢印
-    static func drawWipe(_ c: inout GraphicsContext, xL: CGFloat, xR: CGFloat, yMid: CGFloat, selected: Bool) {
+    /// scale = 「ノーツの縦幅」の倍率 (1.0 = 従来どおり)。高さと「<」「>」の矢印の縦だけが伸びる (幅・端のとがりの深さは変えない)
+    static func drawWipe(_ c: inout GraphicsContext, xL: CGFloat, xR: CGFloat, yMid: CGFloat, selected: Bool,
+                         scale: CGFloat = 1) {
         let outer = selected ? Color.selWipeOuter : Color.wipeOuter
         let mid = selected ? Color.selWipeMid : Color.wipeMid
         let core = selected ? Color.selWipeCore : Color.wipeCore
         let glow = selected ? Color.selWipeGlow : Color.wipeGlow
-        let h: CGFloat = 6.0   // 棒の高さ 12pt の半分
+        let h = wipeHalfH * scale   // 棒の高さの半分 (100% で 6pt = 高さ 12pt)
+        let arrowH = 4.5 * scale    // 矢印の縦の半分
         let cap: CGFloat = 4.0 // 外側の矢印ぶん (ノーツの端 = 矢印の先)
         let bx0 = xL + cap
         let bx1 = xR - cap
@@ -518,13 +543,13 @@ enum LaneRenderer {
         c.fill(wipePath(xL: bx0, xR: bx1, yMid: yMid, h: h, t: t, delta: 2.0), with: .color(mid))
         c.fill(wipePath(xL: bx0, xR: bx1, yMid: yMid, h: h, t: t, delta: 3.5), with: .color(core))
         var left = Path()
-        left.move(to: CGPoint(x: xL + 3.2, y: yMid - 4.5))
+        left.move(to: CGPoint(x: xL + 3.2, y: yMid - arrowH))
         left.addLine(to: CGPoint(x: xL + 0.8, y: yMid))
-        left.addLine(to: CGPoint(x: xL + 3.2, y: yMid + 4.5))
+        left.addLine(to: CGPoint(x: xL + 3.2, y: yMid + arrowH))
         var right = Path()
-        right.move(to: CGPoint(x: xR - 3.2, y: yMid - 4.5))
+        right.move(to: CGPoint(x: xR - 3.2, y: yMid - arrowH))
         right.addLine(to: CGPoint(x: xR - 0.8, y: yMid))
-        right.addLine(to: CGPoint(x: xR - 3.2, y: yMid + 4.5))
+        right.addLine(to: CGPoint(x: xR - 3.2, y: yMid + arrowH))
         let style = StrokeStyle(lineWidth: 1.6, lineCap: .butt, lineJoin: .miter)
         c.stroke(left, with: .color(outer), style: style)
         c.stroke(right, with: .color(outer), style: style)
