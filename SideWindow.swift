@@ -363,6 +363,9 @@ private struct SideChoice: View {
             Text(title)
                 .font(PanelFont.label(22, boost: fontBoost))
                 .foregroundColor(selected ? Color.panelBlue : Color.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)          // 「sample-normal」のような長い名前も、半分の幅に収める
+                .padding(.horizontal, 4)
                 .frame(maxWidth: .infinity)
                 .frame(height: 44)
                 .overlay(Rectangle().stroke(selected ? Color.panelBlue : Color.white, lineWidth: 2))
@@ -776,6 +779,11 @@ private struct SideDivider: View {
 private struct SettingWindowContent: View {
     @ObservedObject var state: EditorState
     @Environment(\.panelFontBoost) private var fontBoost
+    @Environment(\.designScale) private var designScale
+    @Environment(\.editorCompact) private var phoneCompact
+
+    /// iPhone のとき、ノーツサウンドの種類ボタンの当たり判定を広げる量 (iPad は 0)
+    private var hitExtra: CGFloat { SideWindow.hitExtra(scale: designScale, phoneCompact: phoneCompact) }
 
     // SwiftUI の VStack は 1 つのブロックに 10 個までしか並べられないので、まとまりごとに分けてある
     var body: some View {
@@ -805,7 +813,7 @@ private struct SettingWindowContent: View {
         }
     }
 
-    /// 曲の音量 / ノーツサウンドの音量
+    /// 曲の音量 / ノーツサウンドの音量 / ノーツサウンドの種類
     private var volumeRows: some View {
         VStack(alignment: .leading, spacing: 16) {
             sliderRow(title: "曲の音量", text: percent(state.musicVolume),
@@ -817,7 +825,38 @@ private struct SettingWindowContent: View {
                 if !editing { KeySound.shared.playNow() }
             }
 
-            note("ノーツサウンドは、再生中にノーツが再生ラインに触れる瞬間と、テストプレイで叩いた瞬間に鳴ります。0% で消せます。")
+            noteSoundRows
+        }
+    }
+
+    /// ノーツサウンドの種類 (hit / hit-1 / hit-2 / sample-normal)。選んでいるものが水色 (保存される)。
+    /// 押した時に1回鳴らして、音を確かめられる
+    private var noteSoundRows: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("ノーツサウンドの種類")
+                .font(PanelFont.label(21, boost: fontBoost))
+                .foregroundColor(.white)
+
+            VStack(spacing: SideWindow.formSpacing(hitExtra: hitExtra)) {
+                HStack(spacing: 16) {
+                    soundChoice(.hit)
+                    soundChoice(.hit1)
+                }
+                HStack(spacing: 16) {
+                    soundChoice(.hit2)
+                    soundChoice(.sampleNormal)
+                }
+            }
+            .environment(\.sideHitExtra, hitExtra)
+
+            note("ノーツサウンドは、再生中にノーツが再生ラインに触れる瞬間と、テストプレイで叩いた瞬間に鳴ります。0% で消せます。ノーツが同時に来たときは、個数が多いほど大きな音で鳴ります (\(KeySound.maxChord) 個以上は同じ大きさ)。")
+        }
+    }
+
+    private func soundChoice(_ kind: NoteSoundKind) -> some View {
+        SideChoice(title: kind.title, selected: state.noteSound == kind) {
+            state.noteSound = kind
+            KeySound.shared.playNow()
         }
     }
 

@@ -2,14 +2,34 @@ import Foundation
 import AVFoundation
 import QuartzCore
 
+/// ノーツサウンドの種類 (SETTING の「ノーツサウンドの種類」)。
+/// rawValue は元の音声ファイル名で、SETTING のボタンの名前と、保存 (UserDefaults) の値にそのまま使う。
+/// 波形は KeySoundData にある。種類を足すときは、ここに case を足し、KeySoundData にも波形を足す。
+enum NoteSoundKind: String, CaseIterable {
+    case hit = "hit"
+    case hit1 = "hit-1"
+    case hit2 = "hit-2"
+    case sampleNormal = "sample-normal"
+
+    /// 初めて起動したとき (保存された選択がないとき) の音
+    static let defaultKind: NoteSoundKind = .sampleNormal
+
+    /// SETTING のボタンに出す名前
+    var title: String { rawValue }
+}
+
 /// ノーツ音(キー音)。
-/// KeySoundData.swift に埋め込んだ波形 (44.1kHz モノラル / 約55ms) を起動時に読み込んで鳴らす。
-/// 波形が読めなかったときだけ、従来の「高い鈴のような音(6.6kHz)を20msに潰した音」をコードで合成して代わりに鳴らす。
-/// 音声ファイルは使わない (Swift Playgrounds でも、.swift をコピーするだけで動くように)。
+/// KeySoundData.swift に埋め込んだ 4 種類の波形 (NoteSoundKind) のうち、選ばれている 1 つを鳴らす。音声ファイルは使わない
+/// (Swift Playgrounds でも、.swift をコピーするだけで動くように)。
 ///
+/// - select(_:) : 鳴らす種類を切り替える (SETTING の「ノーツサウンドの種類」)
 /// - playNow() : すぐ鳴らす (テストプレイの打鍵・SETTINGの試聴)
-/// - play(atTime:) : CACurrentMediaTime() と同じ時間軸の時刻に鳴らす (エディタ再生中の先行予約)
+/// - play(atTime:count:) : CACurrentMediaTime() と同じ時間軸の時刻に鳴らす (エディタ再生中の先行予約)
 /// - cancelScheduled(): 予約済みの音を全部捨てる (ポーズ・シーク時)
+///
+/// 同時にノーツが来たとき (同時押し) は、その個数ぶん音が大きくなる。
+/// 同じ波形を重ねて鳴らすのではなく、個数ごとに大きさを変えた波形を最初から作っておき (buffers)、
+/// 1 つの声 (ノード) でそれを鳴らす。大きくした波形のうち、1.0 を越えそうな山はなめらかに丸めてある (softLimit) ので、割れない。
 ///
 /// すべてメインスレッドから呼ぶこと。
 ///
@@ -20,25 +40,33 @@ import QuartzCore
 final class KeySound {
     static let shared = KeySound()
 
+    /// ほどいた波形 (左右)。モノラルの音は、左右が同じ配列を指す
+    private struct DecodedWave {
+        let left: [Float]
+        let right: [Float]
+    }
+
     private let engine = AVAudioEngine()
     private var nodes: [AVAudioPlayerNode] = []
     private var cursor = 0
-    private var buffer: AVAudioPCMBuffer?
+    private var format: AVAudioFormat?              // 全部のノード・波形で共通 (44.1kHz ステレオ)
+    private var buffers: [AVAudioPCMBuffer] = []    // buffers[n - 1] = ノーツが n 個同時のときの音 (n = 1...maxChord)
+    private var waves: [NoteSoundKind: DecodedWave] = [:]   // base64 からほどいた波形 (切り替えるたびに読み直さないため)
+    private var kind: NoteSoundKind = .defaultKind
     private var configured = false
     private var pendingUntil: [Double] = []   // ノードごとの「先行予約した音が鳴り終わる時刻」(CACurrentMediaTime と同じ時間軸)
-    private var bufferDur = 0.02              // キー音1発の長さ (秒)。波形を読んだときに実際の長さへ更新する
-    private static let synthDur = 0.02        // フォールバック (コード合成) の長さ (秒)
+    private var bufferDur = 0.1               // キー音1発の長さ (秒)。波形を読んだときに実際の長さへ更新する
 
     private var observing = false
     private var needsRebuild = false          // 出力先が変わった → 次に鳴らす前につなぎ直す
 
+    // playNow() の「ほぼ同時」の判定 (テストプレイで、複数の指・複数のノーツをほぼ同時に捌いたとき)
+    private var chordStart = -1.0             // 今のかたまりの最初の音を鳴らした時刻
+    private var chordCount = 0                // 今のかたまりに入っている音の数 (0 = まだ無い)
+    private var chordNode = 0                 // 今のかたまりを鳴らしているノード
+
     /// 最後にエンジンの起動に失敗した理由 (空なら正常)。鳴らないときの診断用 (SETTING に出して使える)
     private(set) var lastError = ""
-
-    /// 波形の音量を稼ぐための軽い歪み (tanh)。0 = 使わない (自然な音。初期値)。
-    /// 本家より音が小さく感じるときだけ 1.0〜3.0 くらいに上げる (大きいほど音量は上がるが、音は歪んで硬くなる)。
-    /// 目安: 1.0 で +約1.5dB / 2.0 で +約4dB / 3.0 で +約6dB。ピークの大きさは変わらない (割れない)。
-    private static let softClipDrive: Float = 0
 
     /// 0...1 (SETTING の「ノーツサウンド」)
     var volume: Float = 0.8 {
@@ -47,7 +75,27 @@ final class KeySound {
         }
     }
 
-    private static let voices = 8   // 同時に鳴らせる数 (ラウンドロビン)
+    /// 同時に鳴らせる数 (ラウンドロビン)。いちばん長い音 (約 250ms) でも、1 秒に 60 発までは詰まらない
+    private static let voices = 16
+
+    // MARK: 同時ノーツで音が大きくなる決まり
+
+    /// 大きくなるのはここまで (これ以上の同時数は、この個数と同じ大きさ)
+    static let maxChord = 6
+    /// n 個同時のときの大きさ = n の chordExponent 乗 (振幅の倍率)。
+    /// 1.0 なら、同じ音を n 個重ねたのと同じ (2 個で +6dB)。小さいほど控えめ。
+    /// 0.75 のときは、2 個で ×1.68 (+4.5dB) / 3 個で ×2.28 (+7.2dB) / 4 個で ×2.83 (+9.0dB) / 6 個で ×3.83 (+11.7dB)
+    private static let chordExponent: Float = 0.75
+    /// 大きくした波形の、ここまでは手を加えない (0...1)。これより上の山を、1.0 に近づけながらなめらかに丸める
+    private static let limiterKnee: Float = 0.6
+    /// playNow() で、最初の音から何秒以内に来た音を「同時」とみなすか (同じタッチイベント・同じフレームの中の差を吸収する)
+    private static let chordWindow = 0.02
+
+    /// ノーツが n 個同時のときの、元の音に掛ける倍率 (n = 1 は 1.0)
+    static func chordGain(_ n: Int) -> Float {
+        let k = min(max(n, 1), maxChord)
+        return pow(Float(k), chordExponent)
+    }
 
     private init() {}
 
@@ -58,16 +106,25 @@ final class KeySound {
         _ = ensureRunning()
     }
 
+    /// 鳴らす種類を切り替える。エンジンを止めずに、波形だけ差し替える (すでに予約した音は、前の種類のまま鳴る)
+    func select(_ newKind: NoteSoundKind) {
+        if newKind == kind && !buffers.isEmpty { return }
+        kind = newKind
+        if configured { loadBuffers() }     // 準備前なら、configureIfNeeded が今の kind で読む
+    }
+
     private func configureIfNeeded() {
         if configured { return }
         // エンジンを組む前にセッションを起こす。
         // (先に組むと、出力側の形式が「セッションを起こす前のもの」で決まってしまい、
         //  イヤホン接続中だと起動に失敗することがある)
         AudioSessionSetup.activate()
-        guard let fmt = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1),
-              let buf = KeySound.makeSampleBuffer(format: fmt) ?? KeySound.makeBuffer(format: fmt) else { return }
-        buffer = buf
-        bufferDur = Double(buf.frameLength) / fmt.sampleRate
+        guard let fmt = AVAudioFormat(standardFormatWithSampleRate: KeySoundData.sampleRate, channels: 2) else { return }
+        format = fmt
+        guard loadBuffers() else {
+            format = nil
+            return
+        }
         for _ in 0..<KeySound.voices {
             let n = AVAudioPlayerNode()
             engine.attach(n)
@@ -78,6 +135,26 @@ final class KeySound {
         engine.mainMixerNode.outputVolume = min(max(volume, 0), 1)
         configured = true
         observe()
+    }
+
+    /// 今の種類の音を、同時ノーツ数 1...maxChord ぶん作って buffers に入れる。作れなかったら buffers は今のまま
+    @discardableResult
+    private func loadBuffers() -> Bool {
+        guard let fmt = format, let wave = decodedWave(kind) else {
+            lastError = "ノーツサウンドの波形を読めませんでした (\(kind.rawValue))"
+            return false
+        }
+        var made: [AVAudioPCMBuffer] = []
+        for n in 1...KeySound.maxChord {
+            guard let b = KeySound.makeBuffer(wave: wave, chord: n, format: fmt) else {
+                lastError = "ノーツサウンドの波形を作れませんでした (\(kind.rawValue))"
+                return false
+            }
+            made.append(b)
+        }
+        buffers = made
+        bufferDur = Double(made[0].frameLength) / fmt.sampleRate
+        return true
     }
 
     /// 出力先の変更・エンジンの設定変更・メディアサービスのリセットを受け取る
@@ -101,7 +178,7 @@ final class KeySound {
         let out = engine.outputNode.outputFormat(forBus: 0)
         engine.connect(engine.mainMixerNode, to: engine.outputNode,
                        format: (out.sampleRate > 0 && out.channelCount > 0) ? out : nil)
-        if let f = buffer?.format {
+        if let f = format {
             for n in nodes { engine.connect(n, to: engine.mainMixerNode, format: f) }
         }
     }
@@ -138,16 +215,29 @@ final class KeySound {
 
     // MARK: - 鳴らす
 
+    /// すぐ鳴らす。ほぼ同時 (chordWindow 以内) に続けて呼ばれたら、同じノードで、個数ぶん大きい音に差し替える
+    /// (足し算で重ねないので、音が割れず、重なり方のズレも出ない)
     func playNow() {
-        guard volume > 0.001, ensureRunning(), let buf = buffer else { return }
-        let n = nodes[cursor]
-        cursor = (cursor + 1) % nodes.count
-        n.scheduleBuffer(buf, at: nil, options: .interrupts, completionHandler: nil)
+        guard volume > 0.001, ensureRunning(), !buffers.isEmpty else { return }
+        let now = CACurrentMediaTime()
+        if chordCount > 0, now - chordStart < KeySound.chordWindow {
+            if chordCount >= KeySound.maxChord { return }     // これ以上は大きくならない
+            chordCount += 1
+        } else {
+            chordStart = now
+            chordCount = 1
+            chordNode = cursor
+            cursor = (cursor + 1) % nodes.count
+        }
+        let idx = min(chordCount, buffers.count) - 1
+        nodes[chordNode].scheduleBuffer(buffers[idx], at: nil, options: .interrupts, completionHandler: nil)
     }
 
     /// time: CACurrentMediaTime() と同じ時間軸(秒)。すでに過ぎていたらすぐ鳴らす
-    func play(atTime time: Double) {
-        guard volume > 0.001, ensureRunning(), let buf = buffer else { return }
+    /// count: その時刻に同時に来るノーツの数 (多いほど大きい音で鳴る)
+    func play(atTime time: Double, count: Int = 1) {
+        guard volume > 0.001, ensureRunning(), !buffers.isEmpty else { return }
+        let buf = buffers[min(max(count, 1), buffers.count) - 1]
         let idx = cursor
         let n = nodes[idx]
         cursor = (cursor + 1) % nodes.count
@@ -162,7 +252,7 @@ final class KeySound {
 
     /// 予約済み(まだ鳴っていない)の音を捨てる。
     /// AVAudioPlayerNode.stop() は1回ごとにオーディオスレッドの完了待ちで数十ms止まることがあるため、
-    /// 「まだ鳴っていない予約を持つノード」だけを止める (以前は8ノード全部を stop + play していた)。
+    /// 「まだ鳴っていない予約を持つノード」だけを止める (以前は全ノードを stop + play していた)。
     /// 止めたノードを再生状態に戻すのは次の ensureRunning() (= 次に鳴らす時 / prepare()) に任せる。
     func cancelScheduled() {
         guard configured else { return }
@@ -176,63 +266,68 @@ final class KeySound {
 
     // MARK: - 音の用意
 
-    /// 埋め込みの波形 (KeySoundData: 16bit PCM の base64) を読み込む。読めなければ nil (→ makeBuffer の合成音になる)
-    private static func makeSampleBuffer(format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        guard format.sampleRate == KeySoundData.sampleRate,
-              format.channelCount == 1,
-              let data = Data(base64Encoded: KeySoundData.pcm16Base64, options: .ignoreUnknownCharacters)
+    /// 埋め込みの波形 (KeySoundData: 16bit PCM の base64) をほどく。読めなければ nil。一度ほどいたものは覚えておく
+    private func decodedWave(_ k: NoteSoundKind) -> DecodedWave? {
+        if let w = waves[k] { return w }
+        let src = KeySoundData.wave(for: k)
+        let channels = src.channels
+        guard channels == 1 || channels == 2,
+              let data = Data(base64Encoded: src.pcm16Base64, options: .ignoreUnknownCharacters)
         else { return nil }
-        let count = data.count / 2
-        guard count > 0,
-              let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
-              let ch = buf.floatChannelData?[0] else { return nil }
-        buf.frameLength = AVAudioFrameCount(count)
         let bytes = [UInt8](data)
-        let drive = KeySound.softClipDrive
-        let peak = KeySoundData.peak
-        let norm: Float = drive > 0 ? tanh(drive) : 1
-        for i in 0..<count {
-            let lo = UInt16(bytes[2 * i])
-            let hi = UInt16(bytes[2 * i + 1]) << 8
-            var s = Float(Int16(bitPattern: lo | hi)) / 32768
-            if drive > 0 { s = tanh(drive * s / peak) / norm * peak }
-            ch[i] = s
+        let frames = bytes.count / (2 * channels)
+        guard frames > 0 else { return nil }
+        var left = [Float](repeating: 0, count: frames)
+        var right = left
+        for f in 0..<frames {
+            left[f] = KeySound.sample16(bytes, f * channels)
+            if channels == 2 {
+                right[f] = KeySound.sample16(bytes, f * channels + 1)
+            }
+        }
+        if channels == 1 { right = left }
+        let w = DecodedWave(left: left, right: right)
+        waves[k] = w
+        return w
+    }
+
+    /// bytes の i 番目の 16bit (リトルエンディアン) を -1...1 にする
+    private static func sample16(_ bytes: [UInt8], _ i: Int) -> Float {
+        let lo = UInt16(bytes[2 * i])
+        let hi = UInt16(bytes[2 * i + 1]) << 8
+        return Float(Int16(bitPattern: lo | hi)) / 32768
+    }
+
+    /// 波形に chordGain(n) を掛けたバッファを作る (n = 1 は元の音のまま)
+    private static func makeBuffer(wave: DecodedWave, chord n: Int, format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let frames = wave.left.count
+        guard frames > 0, wave.right.count == frames, format.channelCount == 2,
+              let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
+              let ch = buf.floatChannelData else { return nil }
+        buf.frameLength = AVAudioFrameCount(frames)
+        let gain = chordGain(n)
+        let l = ch[0]
+        let r = ch[1]
+        for i in 0..<frames {
+            l[i] = scaled(wave.left[i], gain)
+            r[i] = scaled(wave.right[i], gain)
         }
         return buf
     }
 
-    /// (フォールバック) 鈴らしい非整数倍の部分音を3つ重ね、立ち上がりに短いノイズを足し、tanhで軽く潰す
-    private static func makeBuffer(format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        let sr = format.sampleRate
-        let dur = KeySound.synthDur           // 全長 (秒)
-        let count = Int(sr * dur)
-        guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
-              let ch = buf.floatChannelData?[0] else { return nil }
-        buf.frameLength = AVAudioFrameCount(count)
-        let base = 6600.0                     // 鈴の高さ (Hz)
-        let drive = 100.0                     // 潰し具合 (大きいほど「ギュッ」と詰まる)
-        // (周波数比, 振幅, 減衰の時定数[秒])
-        let partials: [(Double, Double, Double)] = [
-            (1.00, 1.00, 0.012),
-            (2.76, 0.50, 0.008),
-            (5.40, 0.22, 0.005)
-        ]
-        let norm = tanh(drive)
-        var seed: UInt32 = 12345              // ノイズは毎回同じ並びにする
-        for i in 0..<count {
-            let t = Double(i) / sr
-            var s = 0.0
-            for p in partials {
-                s += p.1 * sin(2.0 * Double.pi * base * p.0 * t) * exp(-t / p.2)
-            }
-            seed = seed &* 1664525 &+ 1013904223
-            let noise = Double(seed) / 4294967295.0 * 2.0 - 1.0
-            s += 0.30 * noise * exp(-t / 0.0012)
-            s *= min(1.0, t / 0.0004)         // 0.4msの立ち上がり (プチ音防止)
-            let tail = dur - t
-            if tail < 0.008 { s *= tail / 0.008 }   // 最後の8msでフェードアウト
-            ch[i] = Float(tanh(drive * s) / norm * 0.9)
-        }
-        return buf
+    /// 倍率を掛ける。大きくするとき (gain > 1) だけ、1.0 を越えそうな山を丸める
+    private static func scaled(_ x: Float, _ gain: Float) -> Float {
+        if gain <= 1 { return x * gain }
+        return softLimit(x * gain)
+    }
+
+    /// limiterKnee までは何もしない。それより上は、1.0 に近づけながら (越えずに) なめらかに丸める。
+    /// つなぎ目で傾きが連続している (tanh の根元の傾きが 1) ので、急に歪みが始まらない
+    private static func softLimit(_ x: Float) -> Float {
+        let a = abs(x)
+        let k = limiterKnee
+        if a <= k { return x }
+        let y = k + (1 - k) * tanh((a - k) / (1 - k))
+        return x < 0 ? -y : y
     }
 }

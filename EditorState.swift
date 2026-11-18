@@ -229,6 +229,12 @@ final class EditorState: ObservableObject {
             applyVolumes()
         }
     }
+    @Published var noteSound: NoteSoundKind = .defaultKind {   // ノーツサウンドの種類 (hit / hit-1 / hit-2 / sample-normal)
+        didSet {
+            UserDefaults.standard.set(noteSound.rawValue, forKey: "editor.noteSound")
+            KeySound.shared.select(noteSound)
+        }
+    }
 
     // 長押しで選択解除 (ツール未選択のとき、レーンを押し続けると選択中のノーツが全部解除される)。次回起動時も保存される
     static let holdRange = 1.0...5.0
@@ -416,6 +422,7 @@ final class EditorState: ObservableObject {
 
     // MARK: キー音の予約 (再生中のみ使う。@Published にしない = 描画中に触っても安全)
     private var keyTimes: [Double] = []      // ノーツ先頭の譜面時刻(秒)。昇順・同時刻は1つにまとめる
+    private var keyCounts: [Int] = []        // keyTimes と同じ並び。その時刻に同時に来るノーツの数 (多いほどキー音が大きくなる)
     private var keyDirty = true              // 譜面を触ったら true → 次の tick で作り直す
     private var keyDone = -1.0               // この譜面時刻までのキー音は予約済み
     private var warmWork: DispatchWorkItem?
@@ -494,6 +501,7 @@ final class EditorState: ObservableObject {
         let ud = UserDefaults.standard
         if let v = ud.object(forKey: "editor.musicVolume") as? Double { self.musicVolume = min(max(v, 0), 1) }
         if let v = ud.object(forKey: "editor.noteVolume") as? Double { self.noteVolume = min(max(v, 0), 1) }
+        if let s = ud.string(forKey: "editor.noteSound"), let k = NoteSoundKind(rawValue: s) { self.noteSound = k }
         if let v = ud.object(forKey: "editor.bgDim") as? Double { self.bgDim = min(max(v, 0), 0.95) }
         if let v = ud.object(forKey: "editor.sharpStretch") as? Bool { self.sharpStretch = v }
         if let v = ud.object(forKey: "editor.allowUnorderedSeg") as? Bool {
@@ -532,6 +540,7 @@ final class EditorState: ObservableObject {
         if let v = ud.object(forKey: "editor.clipNotesToTrack") as? Bool { self.clipNotesToTrack = v }
         prepareEngineAudio()
         applyVolumes()
+        KeySound.shared.select(noteSound)       // init の中で代入したぶんは didSet が動かないので、ここで渡す
         KeySound.shared.prepare()
         scheduleWarm()
         if ignoredBeatCount > 0 {
@@ -1358,12 +1367,19 @@ final class EditorState: ObservableObject {
         }
         out.sort()
         var uniq: [Double] = []
+        var counts: [Int] = []
         uniq.reserveCapacity(out.count)
+        counts.reserveCapacity(out.count)
         for t in out {
-            if let last = uniq.last, t - last < 0.001 { continue }   // 同時押しは1発にまとめる
+            if let last = uniq.last, t - last < 0.001 {   // 同時押しは1発にまとめる (個数は数えておき、多いほど大きい音で鳴らす)
+                counts[counts.count - 1] += 1
+                continue
+            }
             uniq.append(t)
+            counts.append(1)
         }
         keyTimes = uniq
+        keyCounts = counts
         keyDirty = false
     }
 
@@ -1409,7 +1425,7 @@ final class EditorState: ObservableObject {
                 host = startWall + (t - startSec) / rate
             }
             if host > now - 0.08 {                  // 大きく遅れてしまった分は捨てる
-                KeySound.shared.play(atTime: host)
+                KeySound.shared.play(atTime: host, count: keyCounts[i])
             }
             i += 1
         }
