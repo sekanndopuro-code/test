@@ -37,6 +37,8 @@
 | Effects.swift | effect (scroll / jump) から「表示位置 P(t)」を決める `EffectMap` (テストプレイと、エディタの **FX 表示** の見た目だけが変わる。判定は変わらない) |
 | EditorState+FX.swift | **FX 表示 (擬似テストプレイ)** の ON / OFF (`toggleFX` / `setFX`)、FX 表示で使う `EffectMap` の使い回し (`fxEffectMap`)、編集モードを抜ける `leaveEdit` |
 | RenderersFX.swift | **FX 表示のレーン描画** (`LaneRenderer.drawFX`)。seg の丸なし・scroll / jump 反映・判定を過ぎたものは出さない・jump で飛んだリボンは画面に切り詰める |
+| AudioVisualDSP.swift | **波形 / スペクトログラムの計算** (Foundation だけ。SwiftUI に触れない)。波形の山の高さの表 (mipmap。2000 → 500 → 125 → 31.25 個/秒の 4 段) を作る `computeWaveform`、FFT (1024 点・ハン窓・1 秒に 100 行 / 10 分を超える曲は 60 行・横 256 画素) でタイル (512 行 × 256 画素の RGBA) にする `computeSpectrogram` (コアの数だけ並べて動かす・中止できる)、画面に貼る位置を決める `spectrogramPlacements` / `waveformLines`。Web 版 (`audioVisualWorker.ts` / `LaneAudioVisuals.ts`) と同じ計算。下の「波形 / スペクトログラム (SETTING)」参照 |
+| AudioVisuals.swift | **波形 / スペクトログラムの入れ物と描画**。`AudioVisualCache` (SETTING でオンにしたときだけ、背景スレッドで 1 回計算して持つ。`EditorState.audioVisuals`)、`LaneRenderer.drawAudioVisuals` (レーンの背景として貼る / 引く。通常の表示も FX 表示も) |
 | PluginPanel.swift | **Adv. メニュー** (`AdvPanel`: プラグイン一覧・読み込みボタン・出力欄) と、プラグインが出すダイアログ (`PluginDialogLayer`) |
 | PluginStore.swift | プラグイン一覧 (`PluginStore.shared`)。内蔵 + 読み込んだもの (`Documents/Plugins/` にフォルダごと保存・次回起動時に自動で再読み込み。Files アプリから足した / 消したものは、アプリに戻ったときと Adv. を開いたときに `reload()` で読み直す。前の版の `Documents/MalodySlideEditor/Plugins/` にあったものは、起動時に移す)。.lua / .zip / 画像の取り込みもここ |
 | PluginFilePicker.swift | 「ファイル」アプリを開くピッカー (UIKit の `UIDocumentPickerViewController` を、いちばん手前の画面から直接出す。ファイルの複数選択 `present` と、フォルダを選ぶ `presentFolder`) と、「写真」アプリを開くピッカー (`PluginPhotoPicker` / `PHPickerViewController`。`ReadBytesSelect` の `'photo'`) |
@@ -393,6 +395,12 @@ BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.inform
     + 軽さ: 描くのは CALayer だけで、SwiftUI の再描画は起こさない。輪の動きは Core Animation が描くので、アプリ側は毎フレーム何もしない。層は使い回す。オフのときはジェスチャも層も画面から外す
     + 他の操作に影響しない: タッチを見るだけのジェスチャで、他のジェスチャを止めない・遅らせない・タッチを奪わない。複数の指も出る。テストプレイが出ている間はエディタ側を外す (二重表示を避ける)
     + 関連コード: `TouchEffect.swift` (`TouchEffectInstaller` / `TouchEffectOverlay` / `TouchObserver`)、`EditorView.swift` の `.background(TouchEffectInstaller(...))`、`EditorState.touchEffect`、`SideWindow.swift` の `touchEffectRow`
+  * **波形を表示 / スペクトログラムを表示** (チェックボックス 2 つ。どちらも初期値オフ。保存される: UserDefaults `editor.showWaveform` / `editor.showSpectrogram`。`EditorState.showWaveform` / `showSpectrogram`。補足の説明文は付けていない = `checkRow` の `note` は省略できる)。オンにすると、レーンの背景 (拍の線・ノーツより下) に、読み込んでいる曲の **波形** (水色の、中心線について左右対称な横線) / **スペクトログラム** (横 = 周波数が左から右へ低 → 高、色 = 大きさ。黒 → 藍 → 赤 → だいだい → 金) が見える。両方オンにもできる。Web 版と同じ見た目・同じ計算 (`AudioVisualDSP.swift` / `AudioVisuals.swift`)
+    + 読み込みは時間が掛かってよい・読んだあとは軽い: **オンにした最初の 1 回だけ**、曲 (`SongPCM`) を背景スレッド (QoS utility) で計算する。計算中も画面は止まらず、終わるまでは何も出ない。0.18 秒を超えて掛かるときだけ「スペクトログラムを計算中...」→「スペクトログラムの準備ができました」の札が出る。終わったあとは、毎フレーム **表を読むだけ** (FFT などは一切しない): 波形 = 画面の拡大率に合う粗さの表から横線 (約 550 本) を 1 つの `Path` にして 1 回で stroke / スペクトログラム = 画面に掛かるタイル 2〜3 枚を貼る。オフのときは何も計算せず、何も描かない。一度計算した結果は、オフにしても、エディタを閉じるまで持っている (オンに戻すとすぐ出る)。前回オンのまま終了したときは、次に曲を開いたときに自動で計算を始める
+    + 計算の目安 (PC・1 コア・44.1kHz ステレオで測定): 最適化あり (ipa) で、3 分の曲 = 波形 約 20ms / スペクトログラム 約 0.25 秒、10 分 = 約 0.9 秒。最適化なし (Playgrounds 相当) でも 3 分 = 約 1.3 秒。コアが複数あれば、行ごとに並べて動かすので、さらに速い。メモリはスペクトログラムが 1 分あたり約 6MB (3 分 = 18MB / 10 分 = 61MB。10 分を超える曲は 1 秒 60 行にして増えすぎを抑える)。計算の途中でエディタを閉じると、計算も止まる
+    + 位置合わせ: 譜面の時刻 t の曲の位置は **t − オフセット** (オフセットを変えると、波形もずれる)。見える範囲を、BPM が変わる所で区間に分け (区間の中は時刻と高さが比例する)、その直線の上に曲を並べるので、どの BPM でも拍の線とずれない。FX 表示は、scroll / jump が変わる所でも区間を分け、**逆走する区間は上下を反転して貼る**。scroll 0 の区間 (全部が 1 か所に重なる) は描かない
+    + 色の範囲は、曲全体の明るさの 99.85% 点を基準に自動で決める (小さい音の曲でも、暗くなりすぎない)。左右の音は平均して 1 本にする。スペクトログラムは透明度 0.9 で重ねる
+    + 関連コード: `AudioVisualDSP.swift` (計算・位置)、`AudioVisuals.swift` (`AudioVisualCache` / `LaneRenderer.drawAudioVisuals`)、`Renderers.swift` の `LaneRenderer.draw` と `RenderersFX.swift` の `drawFX` (拍の線より前に `drawAudioVisuals` を呼ぶ)、`EditorState.swift` (`showWaveform` / `showSpectrogram` / `audioVisuals`)、`SideWindow.swift` の `audioVisualRows`
 - キー音が鳴るタイミング
   - エディタ再生中: ノーツ先頭が再生ライン(シアンの横棒)に触れる瞬間。同時押し(1ms以内)は1発にまとめ、まとめた個数 (`keyCounts`) だけ大きい音で鳴らす
   - テストプレイ: tap / wipe / スライド始点を捌いた瞬間 (`GameCore.onHit`)。ほぼ同時 (最初の音から 20ms 以内) に捌いた分は、個数ぶん大きい音に差し替える (`KeySound.chordWindow`)

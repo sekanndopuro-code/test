@@ -38,6 +38,8 @@ extension LaneRenderer {
         var c = ctx
         // 左の番号欄の地 (通常の表示と同じ)
         c.fill(Path(CGRect(x: 0, y: 0, width: g.trackL, height: g.H)), with: .color(Color.timePanel))
+        // 波形 / スペクトログラム (通常の表示と同じ。scroll / jump も反映して並べる。AudioVisuals.swift)
+        drawAudioVisuals(&c, g, state)
         drawVLines(&c, g, lines: state.gridLines)
 
         let ranges = fxRanges(g, f, totalSec: state.totalSec)

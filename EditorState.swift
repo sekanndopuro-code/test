@@ -247,6 +247,24 @@ final class EditorState: ObservableObject {
         didSet { UserDefaults.standard.set(touchEffect, forKey: "editor.touchEffect") }
     }
 
+    // 波形 / スペクトログラムをレーンの背景に重ねて表示するか (AudioVisuals.swift / AudioVisualDSP.swift)。次回起動時も保存される。初期値はオフ。
+    // オンにした最初の 1 回だけ、曲を背景で計算する (時間が掛かってよい。画面は止まらない)。終わったあとは、できあがった表を読むだけなので軽い。
+    // オフのときは、何も計算しないし、何も描かない
+    @Published var showWaveform = false {
+        didSet {
+            UserDefaults.standard.set(showWaveform, forKey: "editor.showWaveform")
+            audioVisuals.ensureWaveform(showWaveform)
+        }
+    }
+    @Published var showSpectrogram = false {
+        didSet {
+            UserDefaults.standard.set(showSpectrogram, forKey: "editor.showSpectrogram")
+            audioVisuals.ensureSpectrogram(showSpectrogram)
+        }
+    }
+    /// 波形 / スペクトログラムの計算が終わるたびに増える (Canvas を描き直させるための目印)
+    @Published private(set) var audioVisualRevision = 0
+
     // 小さい文字の拡大率 (SETTING の説明文・Adv. メニューの文字など、.system 直書きの小さい文字用)。
     // コンパクト表示 (iPhone) のときだけ効く (iPad では 1 倍 = 従来どおり)。次回起動時も保存される
     // 上限は 300% (以前は 200%)。初期値は変えていない (150%)
@@ -372,6 +390,7 @@ final class EditorState: ObservableObject {
 
     // MARK: ファイル
     let song: SongPCM?                  // 開くときに 1 回だけ展開した曲 (エディタの再生・テストプレイ・曲の長さが、これを共有する)
+    let audioVisuals: AudioVisualCache  // 曲から作った波形・スペクトログラム (SETTING でオンにしたときだけ計算する)
     let mcURL: URL
     let mcName: String
     let oggData: Data?
@@ -488,6 +507,7 @@ final class EditorState: ObservableObject {
         self.mcURL = mcURL
         self.mcName = mcName
         self.song = song
+        self.audioVisuals = AudioVisualCache(song: song)
         self.oggData = oggData
         self.oggFileName = oggFileName
         self.bgData = bgData
@@ -538,6 +558,13 @@ final class EditorState: ObservableObject {
             self.advPanelWidth = min(max(v, Self.advPanelWidthRange.lowerBound), Self.advPanelWidthRange.upperBound)
         }
         if let v = ud.object(forKey: "editor.clipNotesToTrack") as? Bool { self.clipNotesToTrack = v }
+        if let v = ud.object(forKey: "editor.showWaveform") as? Bool { self.showWaveform = v }
+        if let v = ud.object(forKey: "editor.showSpectrogram") as? Bool { self.showSpectrogram = v }
+        audioVisuals.onReady = { [weak self] in self?.audioVisualRevision += 1 }
+        audioVisuals.onStatus = { [weak self] s in self?.showToast(s) }
+        // init の中で代入したぶんは didSet が動かないので、前回オンにしていたものの計算は、ここで始める
+        audioVisuals.ensureWaveform(showWaveform)
+        audioVisuals.ensureSpectrogram(showSpectrogram)
         prepareEngineAudio()
         applyVolumes()
         KeySound.shared.select(noteSound)       // init の中で代入したぶんは didSet が動かないので、ここで渡す

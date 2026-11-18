@@ -802,6 +802,8 @@ private struct SettingWindowContent: View {
                     touchEffectRow
                     Group {
                         SideDivider()
+                        audioVisualRows
+                        SideDivider()
                         displayRows
                         playInfoText
                     }
@@ -984,6 +986,15 @@ private struct SettingWindowContent: View {
                  isOn: $state.touchEffect)
     }
 
+    /// 波形 / スペクトログラムをレーンの背景に重ねる (保存される。初期値オフ)。オンにした最初の 1 回だけ曲を計算する (AudioVisuals.swift)
+    private var audioVisualRows: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            checkRow(title: "波形を表示", isOn: $state.showWaveform)
+            SideDivider()
+            checkRow(title: "スペクトログラムを表示", isOn: $state.showSpectrogram)
+        }
+    }
+
     /// 表示の調整 (主に iPhone 向け): 小さい文字の拡大率 / UI調整モード / Adv. メニューの幅 / ノーツの切り取り。どれも保存される
     /// (VStack の 1 ブロックは 10 個までなので、まとまりごとに分けてある)
     private var displayRows: some View {
@@ -1062,7 +1073,7 @@ private struct SettingWindowContent: View {
     }
 
     /// 白い縁取りの四角 (BPM / Effect の入力欄と同じ線) のチェックボックス。オンのときは水色のチェック
-    private func checkRow(title: String, note noteText: String, isOn: Binding<Bool>) -> some View {
+    private func checkRow(title: String, note noteText: String? = nil, isOn: Binding<Bool>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
                 isOn.wrappedValue.toggle()
@@ -1088,7 +1099,9 @@ private struct SettingWindowContent: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            note(noteText)
+            if let noteText = noteText {
+                note(noteText)
+            }
         }
     }
 }

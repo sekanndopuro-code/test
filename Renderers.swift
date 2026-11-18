@@ -76,6 +76,8 @@ enum LaneRenderer {
         // 背景は塗らない (EditorBackground の背景画像を透かす)
         // 左の番号欄だけは、時刻表示から続く明るいパネルを敷く (本家と同じ)
         c.fill(Path(CGRect(x: 0, y: 0, width: g.trackL, height: g.H)), with: .color(Color.timePanel))
+        // 波形 / スペクトログラム (SETTING でオンのとき。拍の線・ノーツより下の層。AudioVisuals.swift)
+        drawAudioVisuals(&c, g, state)
         drawVLines(&c, g, lines: state.gridLines)
         drawHLines(&c, g, den: state.snapDen)
         drawBPM(&c, g, state)
