@@ -6,7 +6,8 @@ import PhotosUI
 //
 // SwiftUI の .fileImporter は、同じ画面の外側 (RootView) にも .fileImporter があると、開かないことがある。
 // そこで、UIKit の書類ピッカー (UIDocumentPickerViewController) を、いちばん手前の画面から直接出す。
-//   ・複数のファイルをまとめて選べる (.lua / .zip / 画像 など。種類は問わない)
+//   ・複数のファイルをまとめて選べる (.lua / .zip / 画像 など。種類は問わない)。ファイルアプリの画面の右上の「選択」を押すと、チェックを付けて複数選べる
+//   ・フォルダごと選ぶこともできる (presentFolder)
 //   ・asCopy: true なので、選んだファイルはアプリの一時フォルダにコピーされて渡される (そのまま読める)
 
 final class PluginFilePicker: NSObject, UIDocumentPickerDelegate {
@@ -28,6 +29,24 @@ final class PluginFilePicker: NSObject, UIDocumentPickerDelegate {
         current = me
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.item], asCopy: true)
         picker.allowsMultipleSelection = multiple
+        picker.delegate = me
+        top.present(picker, animated: true)
+    }
+
+    /// ファイルアプリを「フォルダを選ぶ」状態で開く (複数のフォルダも選べる)。
+    /// フォルダの中の .lua / .zip / 画像を、まとめて取り込むために使う (PluginStore.importFiles がフォルダを展開する)。
+    /// フォルダはコピーされず、その場で開く形で渡される (中身を読むには startAccessingSecurityScopedResource が要る)。
+    static func presentFolder(cancelled: (() -> Void)? = nil, completion: @escaping ([URL]) -> Void) {
+        guard let top = topViewController() else {
+            cancelled?()
+            return
+        }
+        let me = PluginFilePicker()
+        me.completion = completion
+        me.cancelled = cancelled
+        current = me
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.folder])
+        picker.allowsMultipleSelection = true
         picker.delegate = me
         top.present(picker, animated: true)
     }

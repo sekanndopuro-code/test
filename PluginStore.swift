@@ -9,6 +9,8 @@ import UIKit
 //         Files アプリで .lua / フォルダを入れたり消したりしたら、アプリに戻ったとき・Adv. を開いたときに一覧を読み直す (reload)
 //       - .lua を選ぶ → Plugins/<ファイル名>/ に保存。一緒に選んだ画像などもそこに入る
 //       - .zip を選ぶ → 中身を Plugins/<zip の名前>/ に展開する (.lua と画像など。Malody V のプラグインの配り方)
+//       - フォルダを選ぶ → 中の .lua / .zip / 画像 (サブフォルダも) を、フォルダの並びのまま Plugins/<フォルダ名>/ に入れる
+//       - 画像だけを選ぶ → Plugins/ の直下に入れる。どのプラグインからも探せる共通の置き場 (PluginImageCache が、.lua のフォルダに無いときここまで探す)
 //       - プラグインが読む画像 (AddSprite の画像・PluginIcon) は、その .lua と同じフォルダから探す
 //   ・読み込むときと起動時に、プラグインのトップレベルを一度実行して PluginName などの情報を取り出す (譜面には触らない)
 
@@ -118,6 +120,7 @@ final class PluginStore: ObservableObject {
     /// Plugins フォルダの中身を読み直す (Files アプリで .lua やフォルダを足した / 消したあと)。
     /// 内蔵プラグインはそのまま。中身が変わっていないものは、検査の結果を使い回す (毎回 Lua を動かさない)
     func reload() {
+        PluginImageCache.shared.reset()         // 画像を Files アプリで足した / 消したあとに、読み直せるように
         var old: [String: PluginItem] = [:]
         for it in items where !it.isBuiltin { old[it.id] = it }
         var user: [PluginItem] = []
@@ -215,18 +218,77 @@ final class PluginStore: ObservableObject {
         let data: Data
     }
 
-    /// 選んだファイル (.lua / .zip / 画像など) を取り込む。検査に通ったプラグインだけ一覧に加えて、アプリ内に保存する。
+    /// フォルダを選んだときに読む、画像の拡張子
+    private static let folderImageExts: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif", "tif", "tiff"]
+    /// フォルダ 1 つから読むファイルの数の上限 (間違えて大きなフォルダを選んでも固まらないように)
+    private static let folderFileLimit = 300
+
+    /// フォルダの中 (サブフォルダも) の .lua / .zip / 画像を読む。files の path は、フォルダの中での相対パス
+    private static func readFolder(_ folder: URL) -> (files: [(path: String, data: Data)], zips: [ImportFile], problems: [String]) {
+        var files: [(path: String, data: Data)] = []
+        var zips: [ImportFile] = []
+        var problems: [String] = []
+        let fm = FileManager.default
+        guard let en = fm.enumerator(at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+            return (files, zips, [folder.lastPathComponent + ": 開けませんでした"])
+        }
+        let base = folder.standardizedFileURL.path + "/"
+        var count = 0
+        for case let u as URL in en {
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: u.path, isDirectory: &isDir), isDir.boolValue { continue }
+            let ext = u.pathExtension.lowercased()
+            if ext != "lua" && ext != "zip" && !folderImageExts.contains(ext) { continue }
+            if count >= folderFileLimit {
+                problems.append(folder.lastPathComponent + ": ファイルが多いので、途中の \(folderFileLimit) 個までにしました")
+                break
+            }
+            guard let data = try? Data(contentsOf: u) else {
+                problems.append(u.lastPathComponent + ": 読み込めませんでした")
+                continue
+            }
+            count += 1
+            if ext == "zip" {
+                zips.append(ImportFile(name: u.lastPathComponent, data: data))
+                continue
+            }
+            let p = u.standardizedFileURL.path
+            let rel = p.hasPrefix(base) ? String(p.dropFirst(base.count)) : u.lastPathComponent
+            files.append((path: rel, data: data))
+        }
+        return (files, zips, problems)
+    }
+
+    /// 選んだファイル / フォルダ (.lua / .zip / 画像など) を取り込む。検査に通ったプラグインだけ一覧に加えて、アプリ内に保存する。
+    ///   ・.lua と画像を一緒に選んだ → 最初の .lua の名前のフォルダに、まとめて入れる
+    ///   ・フォルダを選んだ → 中身をフォルダの並びのまま、そのフォルダ名の下に入れる
+    ///   ・画像だけを選んだ → Plugins フォルダの直下に入れる (どのプラグインからも使える)。.lua を先に入れて、画像をあとから足してもよい
     /// completion には、結果の説明文 (画面に出す) を渡す
     func importFiles(_ urls: [URL], completion: @escaping (String) -> Void) {
         var luaFiles: [ImportFile] = []
         var otherFiles: [ImportFile] = []
         var zipFiles: [ImportFile] = []
+        var folderPackages: [(folder: String, files: [(path: String, data: Data)])] = []
         var problems: [String] = []
 
         for url in urls {
             let scoped = url.startAccessingSecurityScopedResource()
             defer {
                 if scoped { url.stopAccessingSecurityScopedResource() }
+            }
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                // フォルダ: 中の .lua / 画像を 1 つの束にする。中の .zip は、選んだ zip と同じように展開する
+                let r = PluginStore.readFolder(url)
+                if !r.files.isEmpty {
+                    folderPackages.append((folder: PluginStore.safeName(url.lastPathComponent), files: r.files))
+                }
+                zipFiles.append(contentsOf: r.zips)
+                problems.append(contentsOf: r.problems)
+                if r.files.isEmpty && r.zips.isEmpty && r.problems.isEmpty {
+                    problems.append(url.lastPathComponent + ": .lua も画像も見つかりませんでした")
+                }
+                continue
             }
             guard let data = try? Data(contentsOf: url) else {
                 problems.append(url.lastPathComponent + ": 読み込めませんでした")
@@ -240,8 +302,38 @@ final class PluginStore: ObservableObject {
             }
         }
 
+        // 画像 (など) だけを選んだとき: プラグインのフォルダが決まらないので、Plugins フォルダの直下に入れる。
+        // PluginImageCache は、.lua のフォルダに画像が無ければ、ここまで探す
+        if luaFiles.isEmpty && zipFiles.isEmpty && folderPackages.isEmpty && !otherFiles.isEmpty {
+            let fm = FileManager.default
+            try? fm.createDirectory(at: PluginStore.directory, withIntermediateDirectories: true)
+            var saved: [String] = []
+            for f in otherFiles {
+                let dest = PluginStore.directory.appendingPathComponent(PluginStore.safeName(f.name))
+                do {
+                    try f.data.write(to: dest, options: .atomic)
+                    saved.append(f.name)
+                } catch {
+                    problems.append(f.name + ": 保存できませんでした")
+                }
+            }
+            PluginImageCache.shared.reset()
+            var lines: [String] = []
+            if !saved.isEmpty {
+                lines.append("画像を追加しました (どのプラグインからも使えます):")
+                for s in saved { lines.append("・" + s) }
+            }
+            if !problems.isEmpty {
+                if !lines.isEmpty { lines.append("") }
+                lines.append("追加できなかったファイル:")
+                for p in problems { lines.append("・" + p) }
+            }
+            completion(lines.isEmpty ? "追加するファイルがありません" : lines.joined(separator: "\n"))
+            return
+        }
+
         // 取り込むファイルの束: (フォルダ名, 中のファイル)
-        var packages: [(folder: String, files: [(path: String, data: Data)])] = []
+        var packages: [(folder: String, files: [(path: String, data: Data)])] = folderPackages
         if !luaFiles.isEmpty {
             // .lua を直接選んだとき: 最初の .lua の名前のフォルダに、選んだ .lua と画像などをまとめて入れる
             var files: [(path: String, data: Data)] = []
@@ -249,8 +341,6 @@ final class PluginStore: ObservableObject {
             for f in otherFiles { files.append((path: f.name, data: f.data)) }
             let folder = PluginStore.safeName((luaFiles[0].name as NSString).deletingPathExtension)
             packages.append((folder: folder, files: files))
-        } else if !otherFiles.isEmpty && zipFiles.isEmpty {
-            problems.append("lua ファイルが選ばれていません (画像だけは追加できません)")
         }
 
         // zip は1つずつ解凍する (別スレッド)
@@ -309,6 +399,8 @@ final class PluginStore: ObservableObject {
                 if dest.pathExtension.lowercased() == "lua" { luaURLs.append(dest) }
             }
         }
+
+        PluginImageCache.shared.reset()         // 画像が増えた / 入れ替わったので、覚えている画像と「見つからなかった」記録を捨てる
 
         var candidates: [PluginItem] = []
         for url in luaURLs {

@@ -912,6 +912,16 @@ final class PluginBridge {
                     let d = (arr[2] as? NSNumber)?.doubleValue ?? 1
                     st.pluginSprites[idx].beat = d > 0 ? m + n / d : m
                 }
+            case "EndBeat":
+                // 範囲の反対側の端。拍の表なら画像を Beat〜EndBeat に引き伸ばす / nil (拍ではない値) なら解除して、画像の縦横比のままに戻す
+                if let arr = value as? [Any], arr.count >= 3 {
+                    let m = (arr[0] as? NSNumber)?.doubleValue ?? 0
+                    let n = (arr[1] as? NSNumber)?.doubleValue ?? 0
+                    let d = (arr[2] as? NSNumber)?.doubleValue ?? 1
+                    st.pluginSprites[idx].endBeat = d > 0 ? m + n / d : m
+                } else {
+                    st.pluginSprites[idx].endBeat = nil
+                }
             case "X":
                 if let d = (value as? NSNumber)?.doubleValue { st.pluginSprites[idx].x = d }
             case "Width":

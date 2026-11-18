@@ -15,30 +15,57 @@ struct PluginSprite: Identifiable {
     let id: String               // AddSprite に渡した名前
     var image: String            // 画像のファイル名
     var dir: URL?                // 画像のあるフォルダ
-    var beat: Double = 0         // 縦の位置 (中心)
+    var beat: Double = 0         // 縦の位置 (中心)。EndBeat があるときは、範囲の片端
+    var endBeat: Double? = nil   // 範囲の反対側の端。入れると、画像を Beat から EndBeat まで縦に引き伸ばして描く (選択範囲の表示用)。nil なら高さは画像の縦横比のまま
     var x: Double = 50           // 横の位置 (中心。レーン幅に対する %)
-    var width: Double = 10       // 幅 (レーン幅に対する %)。高さは画像の縦横比のまま
+    var width: Double = 10       // 幅 (レーン幅に対する %)。高さは画像の縦横比のまま (EndBeat があるときは Beat〜EndBeat の間)
     var visible: Bool = true
 }
 
 /// プラグインのフォルダにある画像の読み込み (読み込んだものは覚えておく)
+///   ・探す順番: その .lua があるフォルダ → 1つ上のフォルダ → … → Plugins フォルダの直下。
+///     画像だけを後から (別々に) 取り込んでも、Plugins フォルダの直下に入るので、どのプラグインからも見つかる
+///   ・「見つからなかった」ことも覚えている (描画のたびにディスクを探さないため)。
+///     そのため、プラグイン / 画像を取り込んだあとや Plugins フォルダを読み直したあとには、必ず reset() で忘れさせる
 final class PluginImageCache {
     static let shared = PluginImageCache()
 
     private var cache: [String: UIImage] = [:]
     private var missing = Set<String>()
 
+    /// 覚えている画像と「見つからなかった」記録を全部捨てる (次に描くとき読み直す)
+    func reset() {
+        cache.removeAll()
+        missing.removeAll()
+    }
+
+    /// 画像を探すフォルダの並び (dir → 親 → … → Plugins フォルダ)。Plugins の外にあるフォルダは dir だけ
+    private func searchDirs(from dir: URL) -> [URL] {
+        var out: [URL] = [dir]
+        let root = PluginStore.directory.standardizedFileURL.path
+        var cur = dir.standardizedFileURL
+        var guardCount = 0
+        while cur.path.hasPrefix(root + "/") && guardCount < 16 {
+            cur = cur.deletingLastPathComponent()
+            out.append(cur)
+            guardCount += 1
+        }
+        return out
+    }
+
     func image(dir: URL?, name: String) -> UIImage? {
         guard let dir = dir, !name.isEmpty else { return nil }
         let file = (name as NSString).lastPathComponent          // フォルダをさかのぼる指定 (../) は使わせない
-        let path = dir.appendingPathComponent(file).path
-        if let c = cache[path] { return c }
-        if missing.contains(path) { return nil }
-        if let ui = UIImage(contentsOfFile: path) {
-            cache[path] = ui
-            return ui
+        let key = dir.path + "|" + file
+        if let c = cache[key] { return c }
+        if missing.contains(key) { return nil }
+        for d in searchDirs(from: dir) {
+            if let ui = UIImage(contentsOfFile: d.appendingPathComponent(file).path) {
+                cache[key] = ui
+                return ui
+            }
         }
-        missing.insert(path)
+        missing.insert(key)
         return nil
     }
 }

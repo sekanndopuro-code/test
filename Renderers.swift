@@ -304,12 +304,28 @@ enum LaneRenderer {
     }
 
     /// プラグインが AddSprite で出した画像 (操作型プラグインのつまみなど) を、レーンの上に描く。
-    /// 横の位置 X と幅 Width は、レーン幅 (ノーツが並ぶ幅) に対する %。縦の位置は Beat。高さは画像の縦横比のまま
+    /// 横の位置 X と幅 Width は、レーン幅 (ノーツが並ぶ幅) に対する %。縦の位置は Beat。高さは画像の縦横比のまま。
+    /// EndBeat があるときは、画像を Beat から EndBeat まで縦に引き伸ばす (選択範囲の表示用。Beat と EndBeat はどちらが大きくてもよい)
     static func drawSprites(_ c: inout GraphicsContext, _ g: LaneGeo, _ state: EditorState) {
         guard state.editing, !state.pluginSprites.isEmpty else { return }
         for sp in state.pluginSprites where sp.visible {
             guard let ui = PluginImageCache.shared.image(dir: sp.dir, name: sp.image) else { continue }
             let w = g.trackW * CGFloat(sp.width / 100.0)
+            if let eb = sp.endBeat {
+                let ya = g.py(sp.beat)
+                let yb = g.py(eb)
+                var top = min(ya, yb)
+                var bottom = max(ya, yb)
+                if bottom < 0 || top > g.H { continue }
+                // とても長い範囲でも、画面の上下 1 画面ぶんより外は描かない (描く矩形が巨大にならないように)
+                if bottom - top > g.H * 6 {
+                    top = max(top, -g.H * 2)
+                    bottom = min(bottom, g.H * 3)
+                }
+                let rx = g.trackL + g.trackW * CGFloat(sp.x / 100.0) - w / 2.0
+                c.draw(Image(uiImage: ui), in: CGRect(x: rx, y: top, width: w, height: max(bottom - top, 1)))
+                continue
+            }
             let aspect: CGFloat = ui.size.width > 0 ? ui.size.height / ui.size.width : 1.0
             let h = w * aspect
             let cx = g.trackL + g.trackW * CGFloat(sp.x / 100.0)

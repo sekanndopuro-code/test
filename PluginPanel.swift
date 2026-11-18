@@ -4,7 +4,8 @@ import SwiftUI
 //   ・EDIT 中の右パネルにある「Adv.」を押すと開く。レーンは右端を固定したまま、左端が右へ動いて横に縮み、
 //     再生ボタン(シークバー)とレーンの間にこのメニューが現れる
 //   ・プラグインは縦にスクロールして並ぶ。押すとそのプラグインの Run() を実行する
-//   ・一番下の「プラグイン(lua)を読み込む」で、.lua ファイルを追加できる (複数選択可・次回起動時も残る)
+//   ・一番下の「プラグイン(lua)を読み込む」で、.lua / .zip / 画像を追加できる (複数選択可・次回起動時も残る)。
+//     「フォルダごと読み込む」は、フォルダの中の .lua と画像をまとめて入れる (1 つずつ選ばなくてよい)
 
 struct AdvPanel: View {
     /// メニューを開いたときの幅の初期値 (レーンはこの分だけ細くなる)。
@@ -183,10 +184,23 @@ struct AdvPanel: View {
     }
 
     private var importButton: some View {
-        Button {
-            openFilePicker()
-        } label: {
-            Text("プラグイン(lua)を読み込む")
+        VStack(spacing: 6) {
+            importButtonLabel("プラグイン(lua)を読み込む") { openFilePicker() }
+            importButtonLabel("フォルダごと読み込む") { openFolderPicker() }
+            Text("ファイルは右上の「選択」を押すと、複数まとめて選べます。画像だけを後から足すこともできます")
+                .font(.system(size: 9 * min(textBoost, 1.5)))
+                .foregroundColor(Color.white.opacity(0.45))
+                .multilineTextAlignment(.leading)
+                .lineLimit(4)
+                .minimumScaleFactor(0.6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(8)
+    }
+
+    private func importButtonLabel(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
                 .font(.system(size: 12 * textBoost, weight: .semibold))
                 .multilineTextAlignment(.center)
                 .foregroundColor(Color.laneCyan)
@@ -197,12 +211,21 @@ struct AdvPanel: View {
         }
         .buttonStyle(.plain)
         .disabled(state.pluginRunning)
-        .padding(8)
     }
 
     /// 「ファイル」アプリを開いて、プラグイン (.lua / .zip / 画像) を選ばせる
     private func openFilePicker() {
         PluginFilePicker.present { urls in
+            if urls.isEmpty { return }
+            store.importFiles(urls) { summary in
+                state.pluginDialog = PluginDialog(kind: .message, title: "プラグインの読み込み", message: summary)
+            }
+        }
+    }
+
+    /// 「ファイル」アプリでフォルダを選ばせて、中の .lua / .zip / 画像をまとめて取り込む
+    private func openFolderPicker() {
+        PluginFilePicker.presentFolder { urls in
             if urls.isEmpty { return }
             store.importFiles(urls) { summary in
                 state.pluginDialog = PluginDialog(kind: .message, title: "プラグインの読み込み", message: summary)

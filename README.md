@@ -39,7 +39,7 @@
 | RenderersFX.swift | **FX 表示のレーン描画** (`LaneRenderer.drawFX`)。seg の丸なし・scroll / jump 反映・判定を過ぎたものは出さない・jump で飛んだリボンは画面に切り詰める |
 | PluginPanel.swift | **Adv. メニュー** (`AdvPanel`: プラグイン一覧・読み込みボタン・出力欄) と、プラグインが出すダイアログ (`PluginDialogLayer`) |
 | PluginStore.swift | プラグイン一覧 (`PluginStore.shared`)。内蔵 + 読み込んだもの (`Documents/Plugins/` にフォルダごと保存・次回起動時に自動で再読み込み。Files アプリから足した / 消したものは、アプリに戻ったときと Adv. を開いたときに `reload()` で読み直す。前の版の `Documents/MalodySlideEditor/Plugins/` にあったものは、起動時に移す)。.lua / .zip / 画像の取り込みもここ |
-| PluginFilePicker.swift | 「ファイル」アプリを開くピッカー (UIKit の `UIDocumentPickerViewController` を、いちばん手前の画面から直接出す) と、「写真」アプリを開くピッカー (`PluginPhotoPicker` / `PHPickerViewController`。`ReadBytesSelect` の `'photo'`) |
+| PluginFilePicker.swift | 「ファイル」アプリを開くピッカー (UIKit の `UIDocumentPickerViewController` を、いちばん手前の画面から直接出す。ファイルの複数選択 `present` と、フォルダを選ぶ `presentFolder`) と、「写真」アプリを開くピッカー (`PluginPhotoPicker` / `PHPickerViewController`。`ReadBytesSelect` の `'photo'`) |
 | PluginImagePreview.swift | **画像プレビューのダイアログ** (`Editor:ShowImagePreview`)。画像を 256 × (長さ × 分割数) に引き伸ばして白黒にした結果を、長さ / 分割数 / しきい値 / 反転 を変えながら見る画面 (`PluginImagePreviewCard`)。白黒化は `DecodeImage` と同じ関数 (`PluginImageTools`) |
 | PluginSession.swift | **操作型プラグイン (PluginType 2)** の実行 (`PluginSession`)、レーンの上に出す画像 (`PluginSprite`)、画像の読み込み (`PluginImageCache`) |
 | PluginBridge.swift | Lua → エディタの橋渡し。`Editor:〇〇()` の中身 (ノーツ・BPM・effect・スプライト・クリック位置) はここ |
@@ -250,8 +250,10 @@ EDIT の右ボタン列、**Order の下・More の上**に **Adv.** (λ) があ
 - **開き方**: Adv. を押すと、レーンの**右端を固定したまま左端が右へ動いて横に縮み**、再生ボタン (シークバー) とレーンの間にプラグインのメニュー (幅 196pt、`AdvPanel.width`) が出る。もう一度 Adv. を押す (またはメニュー右上の ✕ / Back) と閉じる
 - **プラグインは縦にスクロール**する (`ScrollView` + `LazyVStack`)。何百個並んでも使える
 - **実行**: 並んでいるプラグインを押すと、その `Run()` を実行する。実行中は別スレッドで動くので画面は固まらず、メニュー右上の**停止**で止められる (Lua のループの途中で止まる)
-- **プラグイン(lua)を読み込む**: メニューの一番下のボタンで「ファイル」アプリが開く。**.lua / .zip / 画像を、複数まとめて**選べる
-  - `.zip` (Malody V のプラグインの配り方: .lua + 画像) は、中身を `Plugins/<zip の名前>/` に展開する。`.lua` は `Plugins/<ファイル名>/` に入れ、一緒に選んだ画像もそこに入る。画像 (`PluginIcon` や `AddSprite` の画像) は、その .lua と同じフォルダから探す
+- **プラグイン(lua)を読み込む**: メニューの一番下のボタンで「ファイル」アプリが開く。**.lua / .zip / 画像を、複数まとめて**選べる (ファイルアプリの画面の右上の「選択」を押すと、チェックを付けて複数選べる)
+  - **フォルダごと読み込む** (その下のボタン): フォルダを選ぶと、中の .lua / .zip / 画像 (サブフォルダも。1 フォルダ 300 ファイルまで) を、フォルダの並びのまま `Plugins/<フォルダ名>/` に入れる。1 つずつ選ばなくてよい
+  - **画像だけを選んだとき**: `Plugins/` の直下に入れる (どのプラグインからも使える共通の置き場)。.lua を先に入れてから、画像をあとで足してもよい (以前は「画像だけは追加できません」になっていた)
+  - `.zip` (Malody V のプラグインの配り方: .lua + 画像) は、中身を `Plugins/<zip の名前>/` に展開する。`.lua` は `Plugins/<ファイル名>/` に入れ、一緒に選んだ画像もそこに入る。画像 (`PluginIcon` や `AddSprite` の画像) は、その .lua と同じフォルダから探し、無ければ1つ上のフォルダ → … → `Plugins/` の直下の順に探す (`PluginImageCache`)。取り込んだあと・Files アプリから戻ったあと・Adv. を開いたときに、「見つからなかった」記録は捨てて探し直す
   - 読み込むときにプラグインの先頭 (`PluginName` / `PluginMode` / `PluginType` / `PluginRequire` / `PluginIcon`) を読む。構文エラーのファイルや、`Run()` も `OnActive()` も無いファイルは追加せず、理由を表示する
   - 保存されたものは、次回起動時も並ぶ。**長押し → 削除**で消せる (内蔵は消せない)。そのフォルダに .lua が無くなったら、画像ごと消える
   - ファイルアプリを SwiftUI の `.fileImporter` ではなく UIKit のピッカーで開くのは、外側の画面 (RootView) にも `.fileImporter` があると、内側のものが開かないことがあるため
@@ -273,7 +275,7 @@ EDIT の右ボタン列、**Order の下・More の上**に **Adv.** (λ) があ
 - **使い方 (GizaSlide の例)**: スライドを1本選ぶ → Adv. で GizaSlide を押す (ON) → レーンの真ん中に**つまみ**が出る → つまみを横にドラッグすると、スライドがギザギザの形になる → もう一度押す (OFF) か、別のツール・Back でつまみが消えて終わる
 - **イベント**: アクティブの間、レーンのタッチが次のように渡る。`OnActive` (押した瞬間) / `OnDeactive` (終わるとき) / `OnClick` (動かさずに離した) / `OnDragStart` (動かし始め。位置は指を置いたところ) / `OnDragMove` (動くたび) / `OnDragEnd` (離したとき)。プラグインに無いイベントは何もしない
 - **位置**: イベントの中で `Editor:GetClickX()` (レーン上の x: 0〜255)、`GetClickBeat()` (いまの分割に合わせた拍)、`GetClickBeatFree()` (合わせない拍) が、触れている位置を返す
-- **スプライト**: `Editor:AddSprite(名前, 画像のファイル名)` で、レーンの上に画像を出す。戻り値のモジュールの `.Beat` (縦の位置の拍) / `.X` (中心の横位置。レーン幅に対する %) / `.Width` (幅。レーン幅に対する %。高さは画像の縦横比のまま) を書き換えると、すぐ画面に反映される。同じ名前で `AddSprite` をもう一度呼ぶと、新しい画像を作らずに同じモジュールを使う。`RemoveModule(名前)` で消す。`FindModule(名前)` で探せる。アクティブが終わると、残っていても消える
+- **スプライト**: `Editor:AddSprite(名前, 画像のファイル名)` で、レーンの上に画像を出す。戻り値のモジュールの `.Beat` (縦の位置の拍) / `.X` (中心の横位置。レーン幅に対する %) / `.Width` (幅。レーン幅に対する %。高さは画像の縦横比のまま) を書き換えると、すぐ画面に反映される。**`.EndBeat`** (拍の表) も入れると、画像を `.Beat` から `.EndBeat` まで縦に引き伸ばして描く (選択範囲の表示用。どちらの拍が大きくてもよい。`Delete_Effects.lua` の黄色い範囲など)。同じ名前で `AddSprite` をもう一度呼ぶと、新しい画像を作らずに同じモジュールを使う。`RemoveModule(名前)` で消す。`FindModule(名前)` で探せる。アクティブが終わると、残っていても消える
 - **Undo**: 1回のドラッグ (または1回のクリック) = Undo 1回分
 - **メインスレッドで動く**: 1つのイベントは短く終わるので、タッチ処理の中で、そのまま実行する (書き換えの途中が一瞬映ることがない)。1つのイベントは2秒まで (超えると止める)。そのかわり、操作型の中では `ShowMessage` は表示だけして待たず、`GetUserInput` は使えない (nil が返る)。エラーは画面の下に表示される
 - 実装: `PluginSession` (エンジンを起動・イベントを1つずつ呼ぶ) / `EditorState.pluginTouch` (タッチの振り分け) / `EditTool.plugin` / `Renderers.drawSprites` (画像の描画)
