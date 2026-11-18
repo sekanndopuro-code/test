@@ -14,8 +14,8 @@
 | MCZImporter.swift | mcz を展開して `Documents/MalodySlideEditor/<mcz名>/` へ全部書き出す (`MCZImporter.unpack`)。譜面を選ぶ画面に出す version / creator もここで読む |
 | AudioController.swift | **曲を開くときに 1 回だけ PCM に展開する `SongPCM`** (ogg は ipa では stb_vorbis、Playgrounds では自前デコーダー。ogg 以外は AVAudioFile)。エディタの再生・テストプレイ・曲の長さが、この同じ PCM を共有する。`SongPCMSource` (PCM を `PCMSource` として読む薄い入れ物) と、オーディオセッションの起こし方 `AudioSessionSetup` もここ。以前あった AVAudioPlayer と WebKit (WKWebView) でのデコードは無くした |
 | stb_vorbis.c / StbVorbisBridge.c / StbVorbisBridge.h | **ogg Vorbis を読む C のライブラリ (stb_vorbis v1.22。公開ドメイン / MIT) と、Swift への橋渡し**。`stb_vorbis.c` は nothings/stb のコミット `2c980bb59875b0d32144a71867fbdebb2f77cd20` をそのまま置いてあり、書き換えていない。`StbVorbisBridge.c` の `msd_vorbis_decode()` が ogg を丸ごと Float の左右に展開する。**ipa のビルドだけで使う** (`project.yml` の `SWIFT_OBJC_BRIDGING_HEADER` と `HAVE_STB_VORBIS`)。Playgrounds (`Package.swift`) では除外してあり、Swift 側は `#if HAVE_STB_VORBIS` で従来の自前 ogg デコーダーに切り替わる |
-| KeySound.swift | ノーツ音(キー音)。`KeySoundData` の波形を読み込んで鳴らす (読めなかったときだけ、鈴くらいの高さの短い音をコードで合成して代わりに鳴らす) |
-| KeySoundData.swift | ノーツ音の波形データ (44.1kHz モノラル 16bit PCM を base64 にしたもの。約55ms) |
+| KeySound.swift | ノーツ音(キー音)。`NoteSoundKind` (hit / hit-1 / hit-2 / sample-normal) のうち選ばれた 1 つの波形 (`KeySoundData`) を鳴らす。ノーツが同時に来たときは、個数ぶん大きい音で鳴らす |
+| KeySoundData.swift | ノーツ音 4 種類の波形データ (44.1kHz 16bit PCM を base64 にしたもの。モノラル / ステレオ。長さは約 55〜245ms) |
 | EditorState.swift | 状態・再生クロック・Undo・オートセーブ・エクスポート |
 | EditorState+Tools.swift | ノーツ配置/削除/範囲コピー/反転/Slide<->Wipe/BPM/effect/seg編集 / **Grid align の吸着** (`snapNote` = 置くとき、`applyCenteredMove` = 動かすとき) |
 | Renderers.swift | レーン・縦タイムライン・シークバーの描画 (Canvas) |
@@ -367,7 +367,7 @@ BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.inform
   - **Review** (自作。More の下、Quit の上。アイコンは正方形の中に小さい正方形 = `ReviewIcon`): 通常ノーツ (tap) 同士の重なり / 近すぎ探し (`EditorState.reviewChart`)。**同じ拍** の tap と tap で、**端と端 (x ± w/2) の間隔が 1 マス未満** のところを探す。ここでいう 1 マスは Grid lines の 1 マスではなく、**レーンの座標 (0〜255) の 1 単位** (256 分割の 1 マス)。Grid lines の設定には左右されない。完全に重なっている・一部だけ重なっている・ぴったり接している (間隔 0)・1 マスに届かず空いている、のすべてを見つける (w が奇数だと端が .5 になるので、間隔 0.5 も見つかる。間隔がちょうど 1 なら見つけない)。調べるのは tap どうしだけで、tap と wipe、tap とスライドの始点・seg、wipe 同士、スライド同士は、重なっていても調べない。見つかったら、再生中なら止めて、いちばん早い拍へ飛ぶ (複数あっても時系列で最初の 1 か所。直さずにもう一度押すと、同じところへ飛ぶ)。META の列は開いたまま。見つからなければ、画面の上に半透明の黒い札「0 issue found」が一瞬だけ出て勝手に消える (`ReviewNoticeLayer`。Grid settings と同じ濃さ・縁・形を縮めたもの。0.08 秒で出て、0.4 秒見せて、0.22 秒で消える)
   - **Quit**: 押した瞬間に、再生を止めて・保存して・エディタを閉じてファイル選択へ戻る (`EditorState.quitEditor`)。確認ダイアログは出さない (保存してから閉じるので、編集は失われない)
   - **Back**: いつもの列 (EDIT / BPM / EFFECT / TEST / META / SETTING) に戻る
-- **SETTING**: 右ウィンドウ (`SettingWindowContent`)。項目は、これまでの SETTING と同じ (曲の音量 / ノーツサウンドの音量 / 背景画像の暗さ / 立ち上がりをはっきりさせる / beatが時系列順でないsegを置くのを許可する / slide modifyでのsegの移動で縦方向の移動を許可する / 現在位置を分割(LFB)の線にスナップする / 長押しで選択解除)。文字・縁取り・選んでいる色 (`Color.panelBlue`) を他の右ウィンドウにそろえ、縦にスクロールできる。チェックボックスは白い縁取りの四角
+- **SETTING**: 右ウィンドウ (`SettingWindowContent`)。項目は、これまでの SETTING と同じ (曲の音量 / ノーツサウンドの音量 / ノーツサウンドの種類 / 背景画像の暗さ / 立ち上がりをはっきりさせる / beatが時系列順でないsegを置くのを許可する / slide modifyでのsegの移動で縦方向の移動を許可する / 現在位置を分割(LFB)の線にスナップする / 長押しで選択解除)。文字・縁取り・選んでいる色 (`Color.panelBlue`) を他の右ウィンドウにそろえ、縦にスクロールできる。チェックボックスは白い縁取りの四角
 
 ## レーンからノーツをはみ出せる (SETTING のチェックボックス)
 
@@ -384,6 +384,7 @@ BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.inform
 ## SETTING / キー音
 - 右ボタン列の META の下の **SETTING** で、BPM list / Effect list と同じ右ウィンドウが開く (閉じるのは、ウィンドウより左を触ったとき。中身は「META / SETTING」を参照)
   - 曲の音量 / ノーツサウンドの音量 (0〜100%、5%刻み)。値は次回起動時も保存される (UserDefaults: `editor.musicVolume` / `editor.noteVolume`)
+  - **ノーツサウンドの種類**: `hit` / `hit-1` / `hit-2` / `sample-normal` の 4 つから選ぶ (2×2 のボタン。選んでいるものが水色。初期値は `sample-normal`)。押すと 1 発鳴って確かめられる。次回起動時も保存される (UserDefaults: `editor.noteSound`。値は音の名前そのまま)。再生中に切り替えると、次に予約するノーツから新しい音になる (すでに予約した 0.25 秒ぶんは前の音のまま)
   - 曲を再生したまま開いて、音量を調整できる (開いても再生は止まらない。ウィンドウより左を触ると閉じる)
   - ノーツサウンドのスライダーは、指を離した時に1発鳴って音量を確かめられる。0% でキー音オフ
   * **タッチエフェクト** (チェックボックス、初期値オフ。保存される: UserDefaults `editor.touchEffect`)。オンのとき、画面のどこを触っても、触れた所に白い輪 (直径 90pt・0.3 秒で 0.5 倍 → 1.5 倍に広がって透明になる) が出て、触れている間は赤い半透明の丸 (直径 56pt) が指についてくる。テストプレイ (`GameView.showDot` / `spawnRing`) と同じ見た目・大きさ・色
@@ -391,12 +392,16 @@ BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.inform
     + 他の操作に影響しない: タッチを見るだけのジェスチャで、他のジェスチャを止めない・遅らせない・タッチを奪わない。複数の指も出る。テストプレイが出ている間はエディタ側を外す (二重表示を避ける)
     + 関連コード: `TouchEffect.swift` (`TouchEffectInstaller` / `TouchEffectOverlay` / `TouchObserver`)、`EditorView.swift` の `.background(TouchEffectInstaller(...))`、`EditorState.touchEffect`、`SideWindow.swift` の `touchEffectRow`
 - キー音が鳴るタイミング
-  - エディタ再生中: ノーツ先頭が再生ライン(シアンの横棒)に触れる瞬間。同時押し(1ms以内)は1発にまとめる
-  - テストプレイ: tap / wipe / スライド始点を捌いた瞬間 (`GameCore.onHit`)
+  - エディタ再生中: ノーツ先頭が再生ライン(シアンの横棒)に触れる瞬間。同時押し(1ms以内)は1発にまとめ、まとめた個数 (`keyCounts`) だけ大きい音で鳴らす
+  - テストプレイ: tap / wipe / スライド始点を捌いた瞬間 (`GameCore.onHit`)。ほぼ同時 (最初の音から 20ms 以内) に捌いた分は、個数ぶん大きい音に差し替える (`KeySound.chordWindow`)
   - 再生中のキー音は「鳴る時刻を指定して先行予約」(0.25秒先まで)。フレームレートに依存せず、曲と同じ時計から予約する (下の「再生クロック」参照)
-- キー音の音色を変えたいとき: `KeySoundData.pcm16Base64` を、同じ形式 (44.1kHz / モノラル / 16bit PCM / リトルエンディアン) の base64 に置き換える。長さは波形から自動で決まる
-  * 現在の波形は、画面収録した音 (AAC) の前後を切り、末尾の急な切れ目を 12ms のフェードにして、真のピーク -1 dBTP に音量をそろえたもの。自然な音なので、以前のコード合成音 (tanh で矩形波近くまで潰していた) より **約 10dB 小さく聞こえる**。音量が足りないときは、曲の音量を下げるか、`KeySound.softClipDrive` を 1.0〜3.0 にする (+1.5〜+6dB。音は少し硬くなる。0 = 自然な音)
-  * 波形が読めなかったときのフォールバック (従来のコード合成音) は `KeySound.makeBuffer`。`base`(高さ Hz) = 6600 / `drive`(潰し具合) = 100 / `dur`(長さ) = 0.02
+- **同時ノーツで音が大きくなる決まり** (`KeySound.chordGain`): n 個同時のときの大きさ = 元の音 × n^0.75 (2 個で +4.5dB / 3 個で +7.2dB / 4 個で +9.0dB / 6 個で +11.7dB)。`KeySound.maxChord` (= 6) 個以上は同じ大きさ。
+  * 同じ波形を重ねて鳴らすのではなく、個数 1〜6 ぶんの「大きくした波形」を、種類を選んだ時に作っておき (`KeySound.buffers`)、1 つの声で鳴らす。1.0 を越えそうな山は、`limiterKnee` (0.6) から上をなめらかに丸める (`softLimit`) ので、割れない。1 個のときは元の波形のまま
+  * 大きさの増え方は `KeySound.chordExponent` (1.0 なら、同じ音を n 個重ねたのと同じ。小さいほど控えめ)、上限は `maxChord` で変えられる
+- キー音の音色を変えたい / 足したいとき: `KeySoundData` の波形 (`Wave`: channels = 1 または 2 / 44.1kHz / 16bit PCM / リトルエンディアン / ステレオは L, R 交互) を、同じ形式の base64 に置き換える。足すときは `NoteSoundKind` (KeySound.swift) に case を足し、`KeySoundData.wave(for:)` と SETTING のボタン (`noteSoundRows`) にも足す。長さは波形から自動で決まる
+  * 今の 4 つは、添付された ogg (hit.ogg / hit-1.ogg / hit-2.ogg / sample-normal.ogg) を 16bit PCM にほどき、無音の末尾を切って、末尾を 8ms のフェードにしたもの。音量・音色はそのまま (音量はそろえていない。波形の山は hit 約 -8dB / hit-1 約 -2dB (右) / hit-2 約 -5.5dB (右) / sample-normal 約 -0.5dB)
+  * sample-normal は、左右の差が -47dB しかないのでモノラルで持っている (hit は元からモノラル。hit-1 / hit-2 はステレオのまま)
+  * 以前の音 (画面収録した別の音ゲーの音と、そのフォールバックのコード合成音、`KeySound.softClipDrive`) は無くなった
 
 ## 再生ボタンの反応速度
 - 再生ボタンを押してから動き出すまでの余裕は `EditorState.playLead` (現在 0.05 秒)。短いほど反応が速いが、短すぎると曲の頭出しがずれる
