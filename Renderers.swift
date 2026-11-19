@@ -140,7 +140,7 @@ enum LaneRenderer {
         let t1 = Int(ceil(b1 * Double(d)))
         if t1 < t0 || t1 - t0 > 800 { return }
         for t in t0...t1 {
-            if t < 0 { continue }
+            if t < 0 && !g.showNegativeBeats { continue }       // マイナスの拍は、範囲の制限がオフのときだけ描く
             let b = Double(t) / Double(d)
             if within && (b < b0 || b > b1) { continue }
             let y = g.py(b)
@@ -164,7 +164,7 @@ enum LaneRenderer {
                            mid: ClosedRange<Double>? = nil, size: CGFloat = 20.5) {
         // 0拍始まり (mcファイルの値と同じ)
         // 番号 N は、N 拍目と N+1 拍目の線の真ん中に置く (本家と同じ)。下の端に半分見えている番号も出すため、1つ手前から数える
-        let b0 = max(0, Int(floor(lo)) - 1)
+        let b0 = g.showNegativeBeats ? Int(floor(lo)) - 1 : max(0, Int(floor(lo)) - 1)
         let b1 = Int(ceil(hi))
         if b1 < b0 || b1 - b0 > 200 { return }
         var step = 1
@@ -719,7 +719,7 @@ enum StripRenderer {
         let t1 = Int(ceil(b1 * Double(d)))
         if t1 >= t0 && t1 - t0 < 1500 {
             for t in t0...t1 {
-                if t < 0 { continue }
+                if t < 0 && state.clampToSongLength { continue }    // マイナスの拍は、範囲の制限がオフのときだけ描く
                 let b = Double(t) / Double(d)
                 let yy = y(b)
                 let rem = ((t % d) + d) % d
@@ -737,7 +737,7 @@ enum StripRenderer {
         // コンパクト表示 (iPhone) では少し大きくし、間引きの間隔も文字の大きさに合わせる
         var step = 1
         while ppb * Double(step) < (state.compactLayout ? 34 : 28) * Double(k) { step *= 2 }
-        let lb0 = max(0, Int(floor(b0)) - 1)
+        let lb0 = state.clampToSongLength ? max(0, Int(floor(b0)) - 1) : Int(floor(b0)) - 1
         let lb1 = Int(ceil(b1))
         if lb1 >= lb0 && lb1 - lb0 < 2000 {
             for b in lb0...lb1 where b % step == 0 {
@@ -849,7 +849,9 @@ enum SeekRenderer {
         }
 
         // 再生位置 (本家は 白い線 + 両端の橙色の縦棒。ヒストグラムの手前)
-        let yp = y(state.currentSec())
+        // 制限オフで、再生ラインが曲の外 (マイナス / 曲の終わりより先) にいるときは、バーの両端に止めて描く
+        let curSec = state.currentSec()
+        let yp = y(state.clampToSongLength ? curSec : min(max(0, curSec), total))
         let lineRect = CGRect(x: ox, y: yp - playLineH / 2, width: right - ox, height: playLineH)
         c.fill(Path(lineRect), with: .color(Color.white))
         underSide.append(lineRect)

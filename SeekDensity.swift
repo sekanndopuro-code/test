@@ -16,8 +16,9 @@ enum SeekDensity {
     static let levelCap = 20
 
     /// 区間ごとのノーツ数 (上限を掛ける前)。[0] = 曲の頭 (画面では下) … [binCount - 1] = 曲の末 (画面では上)。
-    /// totalSec の外 (マイナスの時刻 / 曲より後ろ) のノーツは数えない
-    static func counts(notes: [Note], timeMap: TimeMap, totalSec: Double) -> [Int] {
+    /// totalSec の外 (マイナスの時刻 / 曲より後ろ) のノーツは数えない。
+    /// clampOutside = true (SETTING の「範囲の制限」をオフにしたとき) は、外のノーツも捨てずに、いちばん近い端の棒 (曲の頭 / 曲の末) に数える
+    static func counts(notes: [Note], timeMap: TimeMap, totalSec: Double, clampOutside: Bool = false) -> [Int] {
         var out = [Int](repeating: 0, count: binCount)
         guard totalSec > 0 else { return out }
         let scale = Double(binCount) / totalSec
@@ -25,8 +26,13 @@ enum SeekDensity {
 
         func add(_ beat: Double) {
             guard beat.isFinite else { return }
-            let sec = timeMap.sec(atBeat: beat)
-            guard sec.isFinite, sec >= 0, sec <= totalSec else { return }
+            var sec = timeMap.sec(atBeat: beat)
+            guard sec.isFinite else { return }
+            if clampOutside {
+                sec = min(max(0, sec), totalSec)
+            } else {
+                guard sec >= 0, sec <= totalSec else { return }
+            }
             var k = Int(sec * scale)
             if k > last { k = last }
             out[k] += 1
