@@ -94,6 +94,9 @@ struct LaneGeo {
     /// タップ / ウィップの棒の縦幅の倍率 (SETTING の「ノーツの縦幅」。1.0 = 従来どおり)。
     /// 見た目 (LaneRenderer) と当たり判定 (EditorState.noteHit) の両方が、この値を見る。スライドの点・リボンには効かない
     var noteScale: CGFloat = 1.0
+    /// マイナスの拍にも、分割線と拍の番号を描くか (SETTING の「範囲の制限」をオフにしたとき true)。
+    /// false (初期値) のときは、0 拍より前には何も描かない (これまでどおり)
+    var showNegativeBeats = false
 
     // 本家 (iPad Air 4) の縦線を実測した値: レーンの左端 = ビューの左端 + 25.2pt、右端 = ビューの右端 - 10.2pt (幅 837.6pt)。
     // (ビューの幅 873pt = 画面 1180 - 左の帯 145 - シークバーと時刻 104 - 右のボタン列 58)
@@ -369,6 +372,30 @@ final class EditorState: ObservableObject {
         didSet { UserDefaults.standard.set(snapViewToLFB, forKey: "editor.snapViewToLFB") }
     }
 
+    // 曲の長さ + 60 秒 (音源が無いときは 3 時間) を基準にした「範囲の制限」を使うか。次回起動時も保存される。初期値はオン (これまでの動き)
+    //   オン: ・基準より遠い点 (絶対値。マイナス側も) と有限でない値は、曲の長さ (totalSec / maxBeat) の計算から除く
+    //         ・再生ライン (現在位置) は 0 〜 maxBeat の中だけを動く
+    //         ・シークバーのノーツ密度は、0 〜 totalSec の外のノーツを数えない
+    //   オフ: ・遠い点も曲の長さの計算に含める (有限でない値だけは、計算が壊れるので常に除く)
+    //         ・再生ラインは 0 より前 (マイナスの拍) にも、maxBeat より先にも動かせる (安全のため ±hardBeatLimit 拍まで)
+    //         ・シークバーの密度は、範囲の外のノーツを両端の棒に寄せて数える
+    //   オンに戻したときは、いまの位置を 0 〜 maxBeat に収め直す。データそのものは、どちらでも書き換えない
+    @Published var clampToSongLength = true {
+        didSet {
+            UserDefaults.standard.set(clampToSongLength, forKey: "editor.clampToSongLength")
+            if clampToSongLength == oldValue { return }
+            recomputeTotal()            // 曲の長さとシークバーの密度を、次に読むときに作り直す
+            if clampToSongLength {
+                viewBeat = min(max(0, viewBeat), maxBeat)
+                if ignoredBeatCount > 0 {
+                    showToast("異常に遠い位置の点が\(ignoredBeatCount)個あります(曲の長さの計算から除外)")
+                }
+            }
+        }
+    }
+    /// 範囲の制限をオフにしたときの、再生ラインの絶対値の上限 (拍)。壊れた値が描画の計算 (Int への変換など) を壊さないための安全弁
+    static let hardBeatLimit = 1.0e9
+
     // 選択したノーツを上下 (時間軸方向) に動かしたとき、動かした先を LFB (分割 = 1/n 拍) の線に「再スナップ」するか。次回起動時も保存される。初期値はオフ
     //   オン: 以前の動き。触れたノーツが動かした先でいちばん近い 1/n 拍の線に吸着する (グリッドに乗っていなかったズレは消える)
     //   オフ: 指の移動量を「1/n 拍の整数倍」に丸めて、動かす前の拍からその量だけずらす (固定変位)。
@@ -531,6 +558,10 @@ final class EditorState: ObservableObject {
         }
         if let v = ud.object(forKey: "editor.allowSegVerticalMove") as? Bool { self.allowSegVerticalMove = v }
         if let v = ud.object(forKey: "editor.snapViewToLFB") as? Bool { self.snapViewToLFB = v }
+        if let v = ud.object(forKey: "editor.clampToSongLength") as? Bool {
+            self.clampToSongLength = v
+            recomputeTotal()                    // 曲の長さは、読み込んだ設定で計算し直す (init の中は didSet が動かない)
+        }
         if let v = ud.object(forKey: "editor.gridCenterAlign") as? Bool { self.gridCenterAlign = v }
         if let v = ud.object(forKey: "editor.allowNoteOverflow") as? Bool { self.allowNoteOverflow = v }
         if let v = ud.object(forKey: "editor.resnapExistingNotes") as? Bool { self.resnapExistingNotes = v }
@@ -662,8 +693,10 @@ final class EditorState: ObservableObject {
         // 壊れた値 (何億拍も先にある seg など) が1つあるだけで、曲の長さが何万分にもなってしまう。
         // → 「曲の長さ + 60秒」(曲が無いときは3時間) より遠い点(マイナス側も)は、長さの計算から除く。
         //   データそのものは書き換えない (保存時もそのまま)。
+        //   SETTING の「範囲の制限」(clampToSongLength) がオフのときは、この距離の制限をかけない
+        //   (有限でない値 = nan / inf だけは、曲の長さが壊れるので、オフでも除く)。
         let limitSec = audioSec > 1 ? audioSec + 60.0 : 3.0 * 3600.0
-        let limitBeat = timeMap.beat(atSec: limitSec)
+        let limitBeat = clampToSongLength ? timeMap.beat(atSec: limitSec) : Double.infinity
         var last = 0.0
         var ignored = 0
         for n in chart.notes {
@@ -698,7 +731,8 @@ final class EditorState: ObservableObject {
     /// 譜面・BPM・曲の長さを触ったとき (recomputeTotal) だけ作り直す。毎フレーム呼んでも、中身は使い回すだけ
     func seekDensityRatios() -> [Double] {
         if densityDirty || densityTotal != totalSec || densityRatios.isEmpty {
-            let counts = SeekDensity.counts(notes: chart.notes, timeMap: timeMap, totalSec: totalSec)
+            let counts = SeekDensity.counts(notes: chart.notes, timeMap: timeMap, totalSec: totalSec,
+                                            clampOutside: !clampToSongLength)
             densityRatios = SeekDensity.ratios(counts)
             densityTotal = totalSec
             densityDirty = false
@@ -727,14 +761,17 @@ final class EditorState: ObservableObject {
     func geo(_ size: CGSize) -> LaneGeo {
         var g = LaneGeo(W: size.width, H: size.height, viewBeat: currentBeat(), ppb: Double(size.height) / visibleBeats)
         g.noteScale = CGFloat(noteHeightScale)
+        g.showNegativeBeats = !clampToSongLength
         if fxMode { g.fx = FXWarp(map: fxEffectMap, time: timeMap, nowSec: currentSec()) }
         return g
     }
 
     func timeString(_ sec: Double) -> String {
-        let s = max(0, sec)
+        // 制限オフでマイナスの位置にいるときだけ、"-" を付けて表示する (オンのときは、これまでどおり 0 で止める)
+        let negative = !clampToSongLength && sec < 0
+        let s = negative ? -sec : max(0, sec)
         let ms = Int((s * 1000).rounded())
-        return String(format: "%02d:%02d.%03d", ms / 60000, (ms / 1000) % 60, ms % 1000)
+        return (negative ? "-" : "") + String(format: "%02d:%02d.%03d", ms / 60000, (ms / 1000) % 60, ms % 1000)
     }
 
     // MARK: - 再生
@@ -817,11 +854,20 @@ final class EditorState: ObservableObject {
         }
         KeySound.shared.cancelScheduled()
         isPlaying = false
-        viewBeat = min(max(0, b), maxBeat)
+        viewBeat = clampedViewBeat(b)
+    }
+
+    /// 再生ラインの位置を、動かせる範囲に収める。
+    /// 制限オン (初期値): 0 〜 maxBeat。オフ: 範囲は設けない (マイナスの拍にも、曲の外にも動ける)。
+    /// ただし有限でない値は受けつけず (いまの位置のまま)、絶対値は hardBeatLimit までにする
+    private func clampedViewBeat(_ b: Double) -> Double {
+        if clampToSongLength { return min(max(0, b), maxBeat) }
+        guard b.isFinite else { return viewBeat }
+        return min(max(-Self.hardBeatLimit, b), Self.hardBeatLimit)
     }
 
     func setViewBeat(_ b: Double) {
-        viewBeat = min(max(0, b), maxBeat)
+        viewBeat = clampedViewBeat(b)
     }
 
     /// 上下スクロール / シークバーで現在位置を動かすときに使う。
@@ -833,6 +879,11 @@ final class EditorState: ObservableObject {
             return
         }
         let den = Double(max(1, snapDen))
+        if !clampToSongLength {
+            // 制限オフ: 0 より前も、曲の終わりより先も、そのまま 1/n 拍の線にそろえる
+            setViewBeat((b * den).rounded() / den)
+            return
+        }
         var s = (max(0, b) * den).rounded() / den
         let hi = maxBeat
         if s > hi { s = (hi * den).rounded(.down) / den }
