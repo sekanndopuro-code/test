@@ -13,6 +13,8 @@ import UIKit
 //   ・右ボタン列の左端をドラッグ → 列の幅が広がる (`EditorState.rightPanelWidth`。iPad は 58pt、iPhone は 82pt が初めの幅)。
 //       アイコンが幅に比例して大きくなる。ただし、縦に収まらなくなったり、アイコン同士の間隔
 //       (アイコンの縁から縁まで) が従来より狭くなる大きさにはならない (そこが限界。`RightPanel.iconScaleLimit`)。
+//       EDIT 中の列は、SETTING の「Undo / Redo を 2 点 / 3 点同時押しで行う」がオンだと ↶ ↷ の行が無くなる (アイコンが 9 → 8 個)。
+//       そのぶん縦に収まる上限が上がり、「EDIT中は ◯%」が増える。幅そのものの上限 (maxPanelWidth) は、通常の列 (6 個) で決まるので変わらない
 //       列の上下には、画面の角の丸みに合わせた余白を空ける (`DisplayShape.edgeMargin`。丸みが小さい機種ほど小さく、
 //       直角の画面 (iPhone SE など) は 0)。そのぶん、丸みが小さい機種ほど限界が広い
 //   ・「完了」で通常の画面に戻る。「リセット」で初めの幅 (帯 145pt / 右ボタン列 58pt (iPhone は 82pt)) に戻す
@@ -416,7 +418,9 @@ struct UIAdjustLayer: View {
         let buttonPct = Int((layout.scale * 100).rounded())
         let want = state.rightPanelWidth / UIAdjust.panelWidthDefault
         let mainPct = Int((min(want, RightPanel.iconScaleLimit(forHeight: H, editing: false, compact: compact)) * 100).rounded())
-        let editPct = Int((min(want, RightPanel.iconScaleLimit(forHeight: H, editing: true, compact: compact)) * 100).rounded())
+        // EDIT 中の列は、SETTING の「Undo / Redo を 2 点 / 3 点同時押しで行う」がオンだと ↶ ↷ の行が無くなり、そのぶん縦に大きくできる
+        let editPct = Int((min(want, RightPanel.iconScaleLimit(forHeight: H, editing: true, compact: compact,
+                                                               hideUndoRedo: state.twoFingerUndoRedo)) * 100).rounded())
         let laneLeft = state.stripWidth + SeekPanel.totalWidth
         let laneW = max(1, W - state.rightPanelWidth - laneLeft)
 

@@ -247,6 +247,7 @@ extension EditorState {
             if dragMode == .moving { finishMove() }      // 前のタッチが途中で途切れていた場合の保険
             if dragMode == .segDrag { finishSegDrag() }
             resetDragState()
+            selectionBeforeLaneTouch = selectedIDs      // 2 本 / 3 本指のタップになったら、この選択へ戻す (cancelLaneTouchForMultiFinger)
             if isPlaying {
                 dragMode = .ignore
             } else {
@@ -284,6 +285,29 @@ extension EditorState {
         }
 
         if phase == .ended { resetDragState() }
+    }
+
+    /// 2 本 / 3 本指のタップ (Undo / Redo) の途中だったとき、レーンに触れていた 1 本目の指の操作を取り消す。
+    /// 指を離した (.ended) とき、laneTouch の代わりに呼ぶ。取り消せたら true (呼ぶ側は laneTouch(.ended) を呼ばない)。
+    /// 置く・選択を変える・タップで消す、などは何もしないで、指を置いた直前の選択に戻す。
+    /// すでに動かし始めたもの (ノーツの移動・seg のドラッグ・プラグイン) と、10pt 以上動いたタッチは、取り消さない (false)
+    func cancelLaneTouchForMultiFinger() -> Bool {
+        guard !dragMoved else { return false }
+        switch dragMode {
+        case .moving, .segDrag, .plugin:
+            return false
+        case .lasso:
+            lassoPoints = []
+        case .idle, .place, .ignore, .pendingMove, .legacy:
+            break
+        }
+        if ghost != nil { ghost = nil }
+        if selectedIDs != selectionBeforeLaneTouch {
+            selectedIDs = selectionBeforeLaneTouch
+            pruneSelection()                // Undo で消えたノーツが、選択に戻らないように
+        }
+        resetDragState()
+        return true
     }
 
     private func resetDragState() {

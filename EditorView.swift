@@ -166,7 +166,13 @@ struct LaneView: View {
                     beginSession(v, size: size)
                 }
                 if session == .tool {
-                    state.laneTouch(start: v.startLocation, current: v.location, size: size, phase: .ended)
+                    // 2 本 / 3 本指のタップ (Undo / Redo) の途中だったら、1 本目の指の操作 (ノーツを置く・選択を変える) は取り消す
+                    // (オフのときは multiFingerTouchActive が立たないので、これまでどおり)
+                    if state.multiFingerTouchActive && state.cancelLaneTouchForMultiFinger() {
+                        // 取り消した
+                    } else {
+                        state.laneTouch(start: v.startLocation, current: v.location, size: size, phase: .ended)
+                    }
                 }
                 session = .idle
                 touchStart = nil
@@ -181,6 +187,9 @@ struct LaneView: View {
             .updating($pinchActive) { _, active, _ in active = true }
             .onChanged { scale in
                 if state.laneToolActive { return }
+                // 2 本指のタップ (Undo) のとき、指の間隔がほんの少し揺れただけでズームが動かないように、
+                // 「2 本 / 3 本指で Undo / Redo」がオンのあいだは、5% 以上の変化があるまで、ピンチを始めない
+                if pinchStart == nil && state.twoFingerUndoRedo && abs(scale - 1) < 0.05 { return }
                 state.holdCancel()                      // ピンチは長押しではない
                 if !panBlocked { panBlocked = true }    // ピンチ中は上下スクロールしない
                 if pinchStart == nil {
@@ -713,44 +722,60 @@ struct RightPanel: View {
     /// 上の並びのボタン数は、EDIT 中は 9 (アイコンが増える。LASSO は More メニューの中)、通常は 6
     /// iconScale > 1 (UI調整モードでアイコンを大きくしているとき) は、アイコンの縁から縁までのすき間を従来のまま保つため、
     /// 大きくなったぶんだけ間隔を広げる。広げられる限度は iconScaleLimit (それ以下の拡大率で呼ぶこと)
-    static func pitch(forHeight height: CGFloat, editing: Bool, compact: Bool = false, iconScale: CGFloat = 1) -> CGFloat {
-        let base = basePitch(forHeight: height, editing: editing, compact: compact)
+    /// hideUndoRedo = true (SETTING の「Undo / Redo を 2 点 / 3 点同時押しで行う」がオン) のときは、EDIT 中の ↶ ↷ の行が無いので、1 つ少ない 8 で数える
+    static func pitch(forHeight height: CGFloat, editing: Bool, compact: Bool = false, iconScale: CGFloat = 1,
+                      hideUndoRedo: Bool = false) -> CGFloat {
+        let base = basePitch(forHeight: height, editing: editing, compact: compact, hideUndoRedo: hideUndoRedo)
         return base + PanelIconView.refHeight * max(0, iconScale - 1)
     }
 
+    /// 上に並ぶアイコンの数。通常は 6、EDIT 中は 9 (↶ ↷ を消しているときは 8)
+    private static func topCount(editing: Bool, hideUndoRedo: Bool) -> Int {
+        guard editing else { return 6 }
+        return hideUndoRedo ? 8 : 9
+    }
+
     /// 従来の間隔 (アイコンを大きくしていないとき)
-    private static func basePitch(forHeight height: CGFloat, editing: Bool, compact: Bool) -> CGFloat {
-        let topCount = editing ? 9 : 6
-        return min(slotPitch, (height - edgeInset(compact: compact) * 2) / CGFloat(topCount + bottomCount))
+    private static func basePitch(forHeight height: CGFloat, editing: Bool, compact: Bool, hideUndoRedo: Bool) -> CGFloat {
+        let count = topCount(editing: editing, hideUndoRedo: hideUndoRedo)
+        return min(slotPitch, (height - edgeInset(compact: compact) * 2) / CGFloat(count + bottomCount))
     }
 
     /// 縦に収まる範囲での、アイコンの拡大率の上限 (1 = 従来の大きさ)。
     /// 従来の「アイコンの縁から縁までのすき間」(間隔 − アイコンの高さ) を保ったまま、並ぶ数ぶんが画面の高さに収まる最大の大きさ。
     /// EDIT 中はアイコンが多く、従来の間隔がすでに縦いっぱいなので、通常の列より上限が低い
     /// (iPhone では 1 = 大きくならない。iPad で約 1.1 倍)
-    static func iconScaleLimit(forHeight height: CGFloat, editing: Bool, compact: Bool) -> CGFloat {
-        let count = CGFloat((editing ? 9 : 6) + bottomCount)
+    /// hideUndoRedo = true のときは、EDIT 中の列のアイコンが 1 つ少ない (8 個) ので、そのぶん上限が高くなる
+    /// (UI調整モードの「EDIT中は ◯%」が増える。通常の列 (6 個) の上限は変わらないので、右メニューの幅の上限 `UIAdjust.maxPanelWidth` はそのまま)
+    static func iconScaleLimit(forHeight height: CGFloat, editing: Bool, compact: Bool, hideUndoRedo: Bool = false) -> CGFloat {
+        let count = CGFloat(topCount(editing: editing, hideUndoRedo: hideUndoRedo) + bottomCount)
         let room = (height - edgeInset(compact: compact) * 2) / count      // 1つぶんに使える縦の長さ
-        let gap = basePitch(forHeight: height, editing: editing, compact: compact) - PanelIconView.refHeight
+        let gap = basePitch(forHeight: height, editing: editing, compact: compact, hideUndoRedo: hideUndoRedo) - PanelIconView.refHeight
         return max(1, (room - gap) / PanelIconView.refHeight)
     }
 
     /// いまの列 (EDIT 中か) で実際に使うアイコンの拡大率 = 要求 (列の幅 ÷ 58) と、縦に収まる上限の小さいほう
-    static func effectiveIconScale(requested: CGFloat, forHeight height: CGFloat, editing: Bool, compact: Bool) -> CGFloat {
-        max(1, min(requested, iconScaleLimit(forHeight: height, editing: editing, compact: compact)))
+    static func effectiveIconScale(requested: CGFloat, forHeight height: CGFloat, editing: Bool, compact: Bool,
+                                   hideUndoRedo: Bool = false) -> CGFloat {
+        max(1, min(requested, iconScaleLimit(forHeight: height, editing: editing, compact: compact, hideUndoRedo: hideUndoRedo)))
     }
 
     /// EDIT 中の More ボタン (上から 8 番目) の中心の高さ。More メニューは、これを基準に置く
-    static func moreCenterY(forHeight height: CGFloat, compact: Bool = false, iconScale: CGFloat = 1) -> CGFloat {
-        edgeInset(compact: compact) + pitch(forHeight: height, editing: true, compact: compact, iconScale: iconScale) * 7.5
+    static func moreCenterY(forHeight height: CGFloat, compact: Bool = false, iconScale: CGFloat = 1,
+                            hideUndoRedo: Bool = false) -> CGFloat {
+        let p = pitch(forHeight: height, editing: true, compact: compact, iconScale: iconScale, hideUndoRedo: hideUndoRedo)
+        return edgeInset(compact: compact) + p * 7.5
     }
 
     var body: some View {
         GeometryReader { proxy in
             // UI調整モードで広げた幅に比例して、アイコンを大きくする (縦に収まる範囲まで。EDIT 中は上限が低い)
+            let hideUR = state.twoFingerUndoRedo        // ↶ ↷ を出さないとき (指のタップで Undo / Redo)
             let iconScale = Self.effectiveIconScale(requested: state.rightPanelWidth / Self.width,
-                                                    forHeight: proxy.size.height, editing: state.editing, compact: compact)
-            let pitch = Self.pitch(forHeight: proxy.size.height, editing: state.editing, compact: compact, iconScale: iconScale)
+                                                    forHeight: proxy.size.height, editing: state.editing, compact: compact,
+                                                    hideUndoRedo: hideUR)
+            let pitch = Self.pitch(forHeight: proxy.size.height, editing: state.editing, compact: compact, iconScale: iconScale,
+                                   hideUndoRedo: hideUR)
             VStack(spacing: 0) {
                 // EDIT / Back で、アイコン列が右へ滑って入れ替わる (入れ替わり中は 2つが重なるので ZStack に入れる)
                 ZStack(alignment: .top) {
@@ -812,8 +837,9 @@ struct RightPanel: View {
 
     /// EDIT 中のアイコンの左に出る名前 (上から、editButtons の並びと同じ順)
     private var editLabels: [String] {
-        ["Back", "Note", "Wipe", state.slideDraft != nil ? "Done" : "Slide", "Remove",
-         "Order", "Adv.", "More", "Undo / Redo"]
+        let labels = ["Back", "Note", "Wipe", state.slideDraft != nil ? "Done" : "Slide", "Remove",
+                      "Order", "Adv.", "More"]
+        return state.twoFingerUndoRedo ? labels : labels + ["Undo / Redo"]      // 指のタップで Undo / Redo するときは、ボタンが無い
     }
 
     /// META 中のアイコンの左に出る名前 (上から、metaButtons の並びと同じ順)
@@ -964,13 +990,16 @@ struct RightPanel: View {
                 state.popup = state.popup == .more ? .none : .more
             }
             .frame(height: pitch)
-            HStack(spacing: 0) {
-                PanelButton(glyph: "↶", dimmed: state.undoCount == 0) { state.undo() }      // Undo
-                    .disabled(state.undoCount == 0)
-                PanelButton(glyph: "↷", dimmed: state.redoCount == 0) { state.redo() }      // Redo
-                    .disabled(state.redoCount == 0)
+            // SETTING の「Undo / Redo を 2 点 / 3 点同時押しで行う」がオンのときは、このボタンは出さない (2 本指 / 3 本指のタップで行う)
+            if !state.twoFingerUndoRedo {
+                HStack(spacing: 0) {
+                    PanelButton(glyph: "↶", dimmed: state.undoCount == 0) { state.undo() }      // Undo
+                        .disabled(state.undoCount == 0)
+                    PanelButton(glyph: "↷", dimmed: state.redoCount == 0) { state.redo() }      // Redo
+                        .disabled(state.redoCount == 0)
+                }
+                .frame(height: pitch)
             }
-            .frame(height: pitch)
         }
     }
 }
@@ -1112,6 +1141,12 @@ struct EditorView: View {
         // SETTING の「タッチエフェクト」。画面 (UIWindow) に取り付けるので、置く場所はどこでもよい。
         // テストプレイが出ている間は外す (テストプレイが自分で同じものを出すので、二重になるのを避ける)
         .background(TouchEffectInstaller(enabled: state.touchEffect && state.testLaunch == nil))
+        // SETTING の「Undo / Redo を 2 点 / 3 点同時押しで行う」。これも画面 (UIWindow) に取り付けるので、置く場所はどこでもよい (MultiFingerTap.swift)
+        .background(MultiFingerTapInstaller(
+            enabled: state.twoFingerUndoRedo && state.testLaunch == nil,
+            onSequenceBegan: { state.multiFingerSequenceBegan() },
+            onSecondFinger: { state.multiFingerSecondFingerLanded() },
+            onTap: { state.multiFingerTapped(fingers: $0) }))
         .ignoresSafeArea(.keyboard, edges: .bottom)      // 数値入力のキーボードで、エディタ全体が縮まないように
         .overlay(popupLayer)
         .overlay(PluginDialogLayer(state: state))
@@ -1298,9 +1333,11 @@ struct EditorView: View {
     /// (scale: メニューを拡大している倍率。拡大したぶん、下へ長くなる)
     private func moreMenuTop(height: CGFloat, scale: CGFloat = 1) -> CGFloat {
         // EDIT 中のアイコンの拡大率 (UI調整モードで列を広げたとき。EDIT 中は縦に収まる上限が低い)
+        let hideUR = state.twoFingerUndoRedo
         let iconScale = RightPanel.effectiveIconScale(requested: state.rightPanelWidth / RightPanel.width,
-                                                      forHeight: height, editing: true, compact: compact)
-        let top = RightPanel.moreCenterY(forHeight: height, compact: compact, iconScale: iconScale) - Self.moreTopAboveButton
+                                                      forHeight: height, editing: true, compact: compact, hideUndoRedo: hideUR)
+        let centerY = RightPanel.moreCenterY(forHeight: height, compact: compact, iconScale: iconScale, hideUndoRedo: hideUR)
+        let top = centerY - Self.moreTopAboveButton
         let menuHeight = (Self.moreRowHeight * CGFloat(Self.moreRowCount) + Self.morePad * 2) * scale
         return max(4, min(top, height - menuHeight - 4))
     }
