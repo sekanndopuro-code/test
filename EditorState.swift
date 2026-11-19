@@ -396,6 +396,15 @@ final class EditorState: ObservableObject {
     /// 範囲の制限をオフにしたときの、再生ラインの絶対値の上限 (拍)。壊れた値が描画の計算 (Int への変換など) を壊さないための安全弁
     static let hardBeatLimit = 1.0e9
 
+    // Undo / Redo を、指のタップで行うか (お絵描きソフトと同じ)。次回起動時も保存される。初期値はオフ
+    //   オン: EDIT 中に、画面を 2 本指でタップすると Undo、3 本指でタップすると Redo。
+    //         EDIT の右メニューの ↶ ↷ ボタンは消える (そのぶん、アイコンを縦に大きくできる。UI調整モードの EDIT 中の上限も変わる)。
+    //         2 本 / 3 本の指が動いたとき (ピンチ・スクロール) や、長く触れていたときは、タップとは見なさない (MultiFingerTap.swift)
+    //   オフ: これまでどおり、右メニューのボタンだけ
+    @Published var twoFingerUndoRedo = false {
+        didSet { UserDefaults.standard.set(twoFingerUndoRedo, forKey: "editor.twoFingerUndoRedo") }
+    }
+
     // 選択したノーツを上下 (時間軸方向) に動かしたとき、動かした先を LFB (分割 = 1/n 拍) の線に「再スナップ」するか。次回起動時も保存される。初期値はオフ
     //   オン: 以前の動き。触れたノーツが動かした先でいちばん近い 1/n 拍の線に吸着する (グリッドに乗っていなかったズレは消える)
     //   オフ: 指の移動量を「1/n 拍の整数倍」に丸めて、動かす前の拍からその量だけずらす (固定変位)。
@@ -487,6 +496,11 @@ final class EditorState: ObservableObject {
     var dragMoved = false                 // 10pt 以上動かしたか (一度動いたら true のまま)
     var dragTouchedID: NoteID? = nil      // 最初に触れたノーツ
     var dragToggleOnTap = false           // 動かさず離したとき、そのノーツの選択を外すか
+    /// 2 本 / 3 本指のタップ (Undo / Redo) になりそうな、複数の指のタッチが、いまのタッチの中で始まったか。
+    /// 画面のタッチを見る MultiFingerTap.swift が、2 本目の指が触れたときに true、新しいタッチの始まりで false にする。
+    /// レーンは、指を離したときにこれを見て、1 本目の指の操作 (ノーツを置く・選択を変える) を取り消す
+    var multiFingerTouchActive = false
+    var selectionBeforeLaneTouch: Set<NoteID> = []     // レーンに指を置く直前の選択 (複数の指のタップで取り消すとき、元に戻す)
     var moveTargets: [(index: Int, orig: Note)] = []   // 移動対象と、移動前の状態
     var moveAnchorBeat: Beat = .zero      // 最初に触れたノーツの移動前の拍 (グリッドに吸着させる基準)
     var moveMinBeat: Beat = .zero         // 移動対象の先頭の拍 (0拍より前へ行かせないため)
@@ -562,6 +576,7 @@ final class EditorState: ObservableObject {
             self.clampToSongLength = v
             recomputeTotal()                    // 曲の長さは、読み込んだ設定で計算し直す (init の中は didSet が動かない)
         }
+        if let v = ud.object(forKey: "editor.twoFingerUndoRedo") as? Bool { self.twoFingerUndoRedo = v }
         if let v = ud.object(forKey: "editor.gridCenterAlign") as? Bool { self.gridCenterAlign = v }
         if let v = ud.object(forKey: "editor.allowNoteOverflow") as? Bool { self.allowNoteOverflow = v }
         if let v = ud.object(forKey: "editor.resnapExistingNotes") as? Bool { self.resnapExistingNotes = v }
