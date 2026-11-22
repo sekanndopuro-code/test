@@ -34,7 +34,7 @@
 | SlideCore.swift | **本家 Slide モードの判定・スコア・時間計算エンジン** (UIKit 非依存。仕様書 SLIDE_SPEC-7.md と、本家の libmalodycpp.so の逆アセンブルで確かめた式)。拍→ms の時間鎖 / seg の量子化 / タッチ 10 スロット / 頭の登録・追従・解放の判定 / スコア・ゲージ・Acc・ランク / スクロール (キャリア) の `SlideChart` `SlideEngine` `SlideScore` |
 | SlideLayout.swift | 画面の幾何 (UIKit 非依存): 3D に傾いた板 (本家の画面収録から測った射影) の `SlidePlane`、スクロール速度 `SlideScroll`、HUD の数字の並べ方 `SlideHUD`、判定文字 `SlideJudgeText`、ヒット光 `SlideHitLight` |
 | SlideSkin.swift / SlideSkinData*.swift | 本家のスキン画像 (背景の縁・判定線・ノーツ・ヒット光・数字・HP・ポーズ) を base64 で埋め込んだもの (`gen_skin.py` で生成) と、その読み込み |
-| SlideGameView.swift | **プレイ画面 `GameView`** (CALayer + CADisplayLink + マルチタッチ)。傾いた板の上に、スライドの帯 (seg ごとの回転した白 40% の長方形) / ノーツ (3 分割) / 判定線 / 判定文字、画面に平らなヒット光・HUD (score・combo・acc・HP)・ポーズボタン |
+| SlideGameView.swift | **プレイ画面 `GameView`** (CALayer + CADisplayLink + マルチタッチ)。傾いた板の上に、スライドの帯 (各点の高さでレーン幅の水平な辺を取り、隣り合う点を台形で結んだ白 40%。重ならない台形は 1 枚の `CAShapeLayer` のパスにまとめ、重なる台形は別の層に分けて重ねるので、重なった所は濃くなる) / 判定線 (ノーツの下) / ノーツ (3 分割) / 判定文字、画面に平らなヒット光・HUD (score・combo・acc・HP)・ポーズボタン |
 | MalodyChartBuilder.swift | エディタの譜面 (`ChartData`) → テストプレイ用 `MalodyChart` (= `SlideChart`) の変換 (メモリ上で直接) |
 | TouchEffect.swift         | SETTING の **タッチエフェクト**。画面 (UIWindow) に「触れたことを見るだけ」のジェスチャを付けて、白い輪 (広がって消える) と赤い丸 (指についてくる) を CALayer で描く。**テストプレイ中も、このチェックの ON / OFF に従う** (`TestPlayScreen` が自分で取り付ける) |
 | PCMCache.swift | **使わなくなった** (中身は空)。曲を開くときに全部展開する `SongPCM` になったので、背景の先読み展開は要らない。GitHub 上で削除してよい |
@@ -137,6 +137,9 @@
 ## 枠 (レーンの幅) からはみ出したノーツの描画 / ホームバー
 - ノーツ (リボン・点・棒) は、レーンの幅の外 (左の帯・シークバー・右のボタン列の下) まで描く。本家と同じ見え方。`LaneView` (EditorView.swift) が、描画用の Canvas だけを左右に広げ (左は画面の左端まで、右はボタン列の幅 `RightPanel.width` ぶん)、座標はこれまでのレーンのまま左へ平行移動して描く。レーンの層は `EditorView` で `zIndex(-1)` にして、左の帯・シークバー・Adv. メニュー・右ボタン列より下に置いている。**当たり判定は変わらない**: タッチを受けるのはレーンの幅と同じ大きさの透明な層だけで、描画の Canvas は `allowsHitTesting(false)`
 - テストプレイ画面 (`SlideGameView.swift`) は、画面全体に本家のレイアウト (高さ 1080 単位) を敷いている
+  - **本家の画面収録から測った寸法** (平面の単位。`SlideLayout.swift` の `SlideFrame` / `SlideHUD`): wipe の高さ 約 37 (本家 約 15。端の細い部分も同じ倍率) / タップは 24 (本家と一致) / レーンの枠 (bar0) は横 約 175 単位幅 (元の画像の 約 2.82 倍。縦は等倍)、内側の端は左右とも平面の端から 約 23 単位内側 / HUD の字の大きさ score・acc 約 0.443、combo 約 0.40 (間隔 16.8 / 55.8 は元のまま)、縦位置 score 約 98.5 / combo 約 136 / acc 約 177.3
+  - **スライドの帯の描き方**: 隣り合う 2 点を結ぶ台形 (上下の辺は水平で、幅は `note.w`)。以前は区間ごとに進行方向へ回した長方形を並べていたため、曲がり角の外側に扇形の隙間が出ていた。高さの範囲が重ならない台形は同じ層のパスに入れ (P が単調なスライドは必ず 1 枚)、重なる台形は空いている次の層へ回す (`emitRibbon`。最大 8 枚。白 40% を 8 枚重ねるとほぼ不透明なので、それより深い重なりは最後の層にまとめる)。高さのない区間 (同じ時刻の seg) は面積が 0 なので描かない (エディタと同じ)
+  - **ヒット光は暗黙アニメーションを切って置く** (`spawnHit` の `noAnimation`)。判定は `render` の外 (`tick` の `engine.update` / `touchesBegan`) から呼ばれるので、切らないと、使い回した層が「前の光の位置 → 今の位置」へ 0.25 秒かけて滑り、tap / wipe の光が左右に動いて見える
 - ホームバー (画面下の横棒): `RootView` / `MalodySlideEditorApp` で `defersSystemGestures(on: .bottom)` だけを付けている (下端からの1回目の上スワイプではホームへ戻らず、2回目で戻る)。**バーは隠さない**: 隠す (`persistentSystemOverlays(.hidden)`) と、下端に触れた瞬間に白く出て反応するため。隠さずに遅延にすると、バーは半透明のまま残り、はっきり上へ持ち上げるまで反応しない (本家 Malody と同じ)。ノーツ幅スライダーは、画面の下端 19pt (`LaneWidthSlider.edgeDead`) から始まったタッチを受けない (そこから横になぞり始めると、iPad がホームバーの操作と見なすため)。`TestPlayScreen` は、まだ `persistentSystemOverlays(.hidden)` のまま。iPadOS の「ゲームモード」(Info.plist の `GCSupportsGameMode` / `LSSupportsGameMode`) とは別の機能で、ホームバーには関係しない
 
 ## 画面の下端 / 幅スライダー

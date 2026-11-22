@@ -85,6 +85,19 @@ struct SlidePlane {
     }
 }
 
+// MARK: - 平面の部品の寸法 (本家の画面収録からの実測。平面の単位)
+
+enum SlideFrame {
+    /// レーンの枠 (bar0)。元の画像は 62 単位幅。本家に当てはめると、横に約 2.8〜2.85 倍 (約 175 単位幅)、縦は等倍
+    static let barWidth = 175.0
+    /// 枠の内側の端は、左右とも平面の端から この距離だけ内側 (約 23 単位)
+    static let barInset = 23.0
+    /// wipe の高さ。本家は約 15 単位、自作は 16 単位で 約 6.4 単位 (理論値 6.37 と一致) だったので、倍率 15 / 6.4 ≒ 2.34 を掛けて約 37
+    static let wipeHeight = 37.0
+    /// wipe の画像 (note1.png) の高さ (px)。端の細い部分 (左右の 21px) も、高さと同じ倍率で広げるために使う
+    static let wipeImagePx = 46.0
+}
+
 // MARK: - スクロール速度
 
 enum SlideScroll {
@@ -98,21 +111,23 @@ enum SlideScroll {
 
 // MARK: - 数字の並べ方 (HUD)
 // 画面収録の測定 (1334 高): 数字は等間隔に並び、各字は自分の枠の中央に置かれる。
-//   score / acc (font-number): 字の大きさ 0.27 単位/px、間隔 16.8 単位
-//   combo (font-combo)       : 字の大きさ 0.314 単位/px、間隔 55.8 単位
+//   score / acc (font-number): 字の大きさ 約 0.443 単位/px、間隔 16.8 単位
+//   combo (font-combo)       : 字の大きさ 約 0.40 単位/px、間隔 55.8 単位
+//   縦位置 (上端から): score 約 98.5 / combo 約 136 / acc 約 177.3 単位
+// (間隔は元から合っていて、字の大きさが小さすぎた。大きさだけ直した)
 
 enum SlideHUD {
     struct Font {
         var glyphScale: Double      // 元の画像 1px あたりの単位
         var pitch: Double           // 字の中心から次の字の中心まで (単位)
     }
-    static let number = Font(glyphScale: 0.27, pitch: 16.8)
-    static let combo = Font(glyphScale: 0.314, pitch: 55.8)
+    static let number = Font(glyphScale: 0.443, pitch: 16.8)
+    static let combo = Font(glyphScale: 0.40, pitch: 55.8)
 
     // 位置 (上端からの距離。単位)
-    static let scoreY = 100.0
-    static let comboY = 138.0
-    static let accY = 178.0
+    static let scoreY = 98.5
+    static let comboY = 136.0
+    static let accY = 177.3
 
     // 文字コード → font-number の番号 (0-9 = 数字, 10 = "%", 11 = ".", 12 = "-")
     static func glyphIndex(_ ch: Character) -> Int? {

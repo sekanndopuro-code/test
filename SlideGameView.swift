@@ -9,7 +9,8 @@ import AVFoundation
 // 構成 (奥 → 手前):
 //   背景画像 + 暗幕 (エディタの bgDim)            ・・・ 画面全体 (flat)
 //   板 (planeLayer) … 3D 傾斜の台形になる、幅 fw × 高さ 1080 単位の平面
-//      背景の暗幕 (#09090C 85%)・左右の縁 (bar0)・スライドの帯・ノーツ・判定線 (judge)・判定文字
+//      背景の暗幕 (#09090C 85%)・左右の縁 (bar0)・スライドの帯・判定線 (judge)・ノーツ・判定文字
+//      (判定線はノーツの下。スライドの帯は、各点の高さでレーン幅の水平な辺を取り、隣り合う点を台形で結んだもの)
 //   ヒット光 light2 (横に流れる光)                ・・・ 判定線の画面位置 (flat)
 //   HUD: score / combo / acc / HP / ポーズボタン  ・・・ flat
 //   ヒット光 light (六角形)                       ・・・ いちばん手前 (flat)
@@ -56,6 +57,66 @@ private final class LayerPool {
         items.removeAll()
         used = 0
     }
+}
+
+// MARK: 形の層の使い回し (スライドの帯)
+
+/// 白い半透明で塗る CAShapeLayer の使い回し。層の座標は板 (planeLayer) と同じ (層の大きさは 0、原点は板の左上)。
+/// 1 枚の層には、重ならない台形だけを 1 つのパスにまとめて入れる (台形どうしの継ぎ目に線が出ない)。
+/// 重なる台形は別の層に分けて、層どうしを重ねる (重なった所が濃くなる。エディタと同じ)。
+private final class ShapePool {
+    private var items: [CAShapeLayer] = []
+    private var used = 0
+    private weak var host: CALayer?
+    private let fill: CGColor
+
+    init(host: CALayer, fill: CGColor) {
+        self.host = host
+        self.fill = fill
+    }
+
+    func begin() { used = 0 }
+
+    func next() -> CAShapeLayer {
+        let l: CAShapeLayer
+        if used < items.count {
+            l = items[used]
+        } else {
+            l = CAShapeLayer()
+            l.fillColor = fill
+            l.strokeColor = nil
+            l.fillRule = .nonZero
+            host?.addSublayer(l)
+            items.append(l)
+        }
+        used += 1
+        l.isHidden = false
+        return l
+    }
+
+    /// 今回使わなかった分を隠す (パスも手放す)
+    func end() {
+        if used < items.count {
+            for i in used..<items.count where !items[i].isHidden {
+                items[i].isHidden = true
+                items[i].path = nil
+            }
+        }
+    }
+
+    func clear() {
+        for l in items { l.removeFromSuperlayer() }
+        items.removeAll()
+        used = 0
+    }
+}
+
+/// スライドの 1 区間 (隣り合う 2 点を結ぶ台形)。y は平面の Y (判定線から上向き)、yLo < yHi。x は中心 (層の単位)
+private struct RibbonQuad {
+    var yLo: Double
+    var yHi: Double
+    var xLo: Double
+    var xHi: Double
 }
 
 // MARK: 数字 (HUD)
@@ -168,7 +229,8 @@ final class GameView: UIView {
     private var tapPool: LayerPool!
     private var wipePool: LayerPool!
     private var headPool: LayerPool!
-    private var bandPool: LayerPool!
+    private var ribbonPool: ShapePool!
+    private var quadBuf: [RibbonQuad] = []        // drawSlide が集める台形 (使い回し)
 
     // 描画の状態
     private var drawHead = 0                  // まだ退場していない先頭のノーツ
@@ -245,8 +307,8 @@ final class GameView: UIView {
         barL.zPosition = 2
         barR.zPosition = 2
         judgeBar.contents = skin.image("judge")
-        judgeBar.zPosition = 5
         bandHost.zPosition = 3
+        judgeBar.zPosition = 3.5            // 判定線はノーツの下 (本家はノーツが判定線の上に重なる)。スライドの帯の上
         noteHost.zPosition = 4
         judgeText.zPosition = 50
         judgeText.opacity = 0
@@ -263,7 +325,8 @@ final class GameView: UIView {
             let l = CALayer()
             l.contents = SlideSkin.shared.image("note1")
             l.contentsCenter = CGRect(x: 21.0 / 46, y: 0, width: 4.0 / 46, height: 1)
-            l.contentsScale = 46.0 / 16.0
+            // 高さ SlideFrame.wipeHeight (約 37 単位) に画像がそのまま収まる倍率。端の細い部分 (左右 21px) も同じ倍率で広がる
+            l.contentsScale = CGFloat(SlideFrame.wipeImagePx / SlideFrame.wipeHeight)
             return l
         }
         headPool = LayerPool(host: noteHost) {
@@ -273,11 +336,7 @@ final class GameView: UIView {
             l.contentsScale = 56.0 / 24.0
             return l
         }
-        bandPool = LayerPool(host: bandHost) {
-            let l = CALayer()
-            l.backgroundColor = UIColor(white: 1, alpha: 102.0 / 255).cgColor      // note2.png (一様な白 40%)
-            return l
-        }
+        ribbonPool = ShapePool(host: bandHost, fill: UIColor(white: 1, alpha: 102.0 / 255).cgColor)      // note2.png (一様な白 40%)
 
         // ヒット光・HUD (flat)
         hitHost2.zPosition = 20
@@ -326,11 +385,15 @@ final class GameView: UIView {
                 planeLayer.transform = GameView.matrix(plane.layerMatrix)
                 fieldBG.frame = CGRect(x: 0, y: 0, width: fw, height: 1080)
                 underBG.frame = CGRect(x: 0, y: 1080, width: fw, height: 120)
-                // 左の縁は右端が x=1、右の縁 (左右反転) は左端が x=fw−1。反転しているので frame ではなく bounds+position で置く
-                barL.bounds = CGRect(x: 0, y: 0, width: 62, height: 1080)
-                barL.position = CGPoint(x: 1 - 31, y: 540)
-                barR.bounds = CGRect(x: 0, y: 0, width: 62, height: 1080)
-                barR.position = CGPoint(x: fw - 1 + 31, y: 540)
+                // 枠 (bar0) は横に約 175 単位幅 (元の画像 62 単位の約 2.82 倍。縦は等倍の 1080)。
+                // 左の縁は内側の端 (右端) が x = 23、右の縁 (左右反転) は内側の端 (左端) が x = fw − 23。
+                // 反転しているので frame ではなく bounds + position で置く
+                let barW = CGFloat(SlideFrame.barWidth)
+                let inset = CGFloat(SlideFrame.barInset)
+                barL.bounds = CGRect(x: 0, y: 0, width: barW, height: 1080)
+                barL.position = CGPoint(x: inset - barW / 2, y: 540)
+                barR.bounds = CGRect(x: 0, y: 0, width: barW, height: 1080)
+                barR.position = CGPoint(x: fw - inset + barW / 2, y: 540)
                 judgeBar.frame = CGRect(x: 0, y: 1080 - 14, width: fw, height: 28)
                 judgeText.bounds = CGRect(x: 0, y: 0, width: CGFloat(SlideJudgeText.size.w), height: CGFloat(SlideJudgeText.size.h))
                 judgeText.position = CGPoint(x: fw / 2, y: 1080 - CGFloat(SlideJudgeText.centerY))
@@ -546,7 +609,7 @@ final class GameView: UIView {
         let fw = plane.fieldWidth
         let toLX = fw / 255.0
 
-        tapPool.begin(); wipePool.begin(); headPool.begin(); bandPool.begin()
+        tapPool.begin(); wipePool.begin(); headPool.begin(); ribbonPool.begin()
         var holding = Set<ObjectIdentifier>()
         let notes = slide.notes
         var i = drawHead
@@ -566,13 +629,13 @@ final class GameView: UIView {
                 drawSlide(note, pNow: pNow, scale: scale, fw: fw, toLX: toLX, nowMs: nowMs, holding: &holding)
             } else if note.isType4 {
                 if note.hit { if i - 1 == drawHead && note.judged { drawHead += 1 }; continue }
-                placeNote(wipePool.next(), x: Double(note.x), h: 16, w: Double(note.w), y: dist * scale, toLX: toLX)
+                placeNote(wipePool.next(), x: Double(note.x), h: SlideFrame.wipeHeight, w: Double(note.w), y: dist * scale, toLX: toLX)
             } else {
                 if note.hit { if i - 1 == drawHead && note.judged { drawHead += 1 }; continue }
                 placeNote(tapPool.next(), x: Double(note.x), h: 24, w: Double(note.w), y: dist * scale, toLX: toLX)
             }
         }
-        tapPool.end(); wipePool.end(); headPool.end(); bandPool.end()
+        tapPool.end(); wipePool.end(); headPool.end(); ribbonPool.end()
 
         updateHold(holding: holding, nowMs: nowMs, wall: wall)
         updateEffects(wall: wall)
@@ -595,7 +658,9 @@ final class GameView: UIView {
         l.position = CGPoint(x: CGFloat(x * toLX), y: CGFloat(1080 - y))
     }
 
-    /// スライド: 頭 + seg 区間ごとの回転した白い長方形 (本家の「帯ボディ」)
+    /// スライド: 頭 + 帯 (本家の「帯ボディ」)。
+    /// 帯は、各点の高さでレーン幅 (note.w) の水平な辺を取り、隣り合う点を台形で結んだもの (エディタ・README の仕様と同じ)。
+    /// 曲がり角でも、隣り合う台形は同じ辺を共有するので隙間が出ない
     private func drawSlide(_ note: SlideNote, pNow: Double, scale: Double, fw: Double, toLX: Double,
                            nowMs: Double, holding: inout Set<ObjectIdentifier>) {
         // 保持している間、通過した帯は消える (一度消えた所は、離しても戻らない。本家の機構 D)
@@ -629,8 +694,9 @@ final class GameView: UIView {
         var headX = Double(note.x) * toLX
         let headP = cut ? note.cutP : note.pStart
         var gotHead = !cut
-        var drawn = 0
-        while k < m && drawn < 2400 {
+        quadBuf.removeAll(keepingCapacity: true)
+        let yMin = -160.0, yMax = Double(SlidePlane.planeHeight) + 160      // これより外は描かない (外へ伸びる分は切り詰める)
+        while k < m && quadBuf.count < 2400 {
             var a = point(k)
             let b = point(k + 1)
             if note.pMonotone && a.p > pHigh { break }
@@ -642,18 +708,21 @@ final class GameView: UIView {
             if !gotHead { headX = a.x; gotHead = true }
             let yA = (a.p - pNow) * scale, yB = (b.p - pNow) * scale
             k += 1
-            // 画面の外なら描かない
-            if max(yA, yB) < -160 || min(yA, yB) > 1080 + 160 { continue }
-            let dx = b.x - a.x
-            let dy = -(yB - yA)                     // レイヤー座標 (下向きが +)
-            let len = (dx * dx + dy * dy).squareRoot()
-            if len < 0.05 { continue }
-            let l = bandPool.next()
-            l.bounds = CGRect(x: 0, y: 0, width: CGFloat(bandW), height: CGFloat(len))
-            l.position = CGPoint(x: CGFloat((a.x + b.x) / 2), y: CGFloat(1080 - (yA + yB) / 2))
-            l.transform = CATransform3DMakeRotation(CGFloat(atan2(-dx, dy)), 0, 0, 1)
-            drawn += 1
+            // 画面の外なら描かない。高さのない区間 (同じ時刻の seg) は面積が 0 なので描かない (エディタと同じ)
+            if max(yA, yB) < yMin || min(yA, yB) > yMax { continue }
+            let dy = yB - yA
+            if abs(dy) < 1e-9 { continue }
+            // y の小さい点を下 (Lo) にそろえて、描く範囲 [yMin, yMax] に切り詰める (jump で巨大な値になっても壊れない)
+            let lo = yA < yB ? (x: a.x, y: yA) : (x: b.x, y: yB)
+            let hi = yA < yB ? (x: b.x, y: yB) : (x: a.x, y: yA)
+            let span = hi.y - lo.y
+            let y0 = max(lo.y, yMin), y1 = min(hi.y, yMax)
+            // 切り詰めないときは元の x のまま (隣り合う台形の共有する辺を、きっちり同じ座標にする)
+            let x0 = y0 == lo.y ? lo.x : lo.x + (hi.x - lo.x) * (y0 - lo.y) / span
+            let x1 = y1 == hi.y ? hi.x : lo.x + (hi.x - lo.x) * (y1 - lo.y) / span
+            quadBuf.append(RibbonQuad(yLo: y0, yHi: y1, xLo: x0, xHi: x1))
         }
+        emitRibbon(halfWidth: bandW / 2, monotone: note.pMonotone)
         // 頭 (キャップ)。切れた所が範囲外 (x が分からない) なら、画面の外なので描かない
         let yH = (headP - pNow) * scale
         if gotHead && yH >= -80 && yH <= 1080 + 80 {
@@ -661,6 +730,54 @@ final class GameView: UIView {
             l.bounds = CGRect(x: 0, y: 0, width: CGFloat(bandW), height: 24)
             l.position = CGPoint(x: CGFloat(headX), y: CGFloat(1080 - yH))
         }
+    }
+
+    /// 集めた台形 (quadBuf) を、CAShapeLayer に入れる。
+    /// 1 枚の層のパスには、高さの範囲が重ならない台形だけを入れる (継ぎ目なし)。高さの範囲が重なる台形は次の層へ回し、
+    /// 層どうしを重ねて、重なった所を濃くする (白 40% が重なるごとに濃くなる)。P が単調なスライドは、重なりが無いので必ず 1 枚
+    private func emitRibbon(halfWidth hw: Double, monotone: Bool) {
+        let n = quadBuf.count
+        if n == 0 { return }
+        let maxLayers = 8                       // 白 40% を 8 枚重ねるとほぼ不透明 (98%)。これより深い重なりは最後の層にまとめる
+        var depth = [Int](repeating: 0, count: n)
+        var layers = 1
+        if !monotone {
+            // 低い順に並べて、空いている最初の層へ (区間の重なりの最大数ぶんだけ層ができる)
+            let order = (0..<n).sorted { quadBuf[$0].yLo < quadBuf[$1].yLo }
+            var ends: [Double] = []             // 各層の、いま入っている台形の最高点
+            for i in order {
+                let q = quadBuf[i]
+                var d = 0
+                while d < ends.count && ends[d] > q.yLo + 1e-6 { d += 1 }
+                if d >= maxLayers {
+                    d = maxLayers - 1
+                    ends[d] = max(ends[d], q.yHi)
+                } else if d == ends.count {
+                    ends.append(q.yHi)
+                } else {
+                    ends[d] = q.yHi
+                }
+                depth[i] = d
+            }
+            layers = ends.count
+        }
+        var paths: [CGMutablePath] = []
+        for _ in 0..<layers { paths.append(CGMutablePath()) }
+        let h = CGFloat(hw)
+        let H = CGFloat(SlidePlane.planeHeight)
+        for i in 0..<n {
+            let q = quadBuf[i]
+            let p = paths[depth[i]]
+            let ly0 = H - CGFloat(q.yLo), ly1 = H - CGFloat(q.yHi)       // 層の座標 (下向きが +)
+            let c0 = CGFloat(q.xLo), c1 = CGFloat(q.xHi)
+            // 全部同じ向きに回す (同じパスの中で、向きがそろっていれば隣り合う台形がきれいにつながる)
+            p.move(to: CGPoint(x: c0 - h, y: ly0))
+            p.addLine(to: CGPoint(x: c0 + h, y: ly0))
+            p.addLine(to: CGPoint(x: c1 + h, y: ly1))
+            p.addLine(to: CGPoint(x: c1 - h, y: ly1))
+            p.closeSubpath()
+        }
+        for p in paths { ribbonPool.next().path = p }
     }
 
     // MARK: ヒット光
@@ -679,14 +796,19 @@ final class GameView: UIView {
         return f
     }
 
+    /// ヒット光を出す。判定 (tick の engine.update / touchesBegan) から呼ばれるときは、render の noAnimation の外なので、
+    /// ここでも暗黙アニメーションを切る。切らないと、使い回した層が「前の光の位置 → 今の位置」へ 0.25 秒かけて
+    /// 滑って見える (tap / wipe の光が左右に動いて見える原因)
     private func spawnHit(x: Int, loop: Bool, note: SlideNote?, wall: Double) {
-        let fx = makeFX()
-        fx.born = wall
-        fx.x = x
-        fx.loop = loop
-        fx.note = note
-        if loop, let n = note { holdFX[ObjectIdentifier(n)] = fx } else { fxLive.append(fx) }
-        place(fx, wall: wall)
+        noAnimation {
+            let fx = makeFX()
+            fx.born = wall
+            fx.x = x
+            fx.loop = loop
+            fx.note = note
+            if loop, let n = note { holdFX[ObjectIdentifier(n)] = fx } else { fxLive.append(fx) }
+            place(fx, wall: wall)
+        }
     }
 
     /// 保持中のスライド: 光を出し続け、離したら消す。位置は指ではなく軌跡の上 (本家の判定の位置)
