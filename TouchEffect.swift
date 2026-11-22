@@ -4,7 +4,8 @@ import UIKit.UIGestureRecognizerSubclass
 
 // MARK: - タッチエフェクト (SETTING の「タッチエフェクト」)
 //
-// テストプレイ (TestPlay.swift の GameView.showDot / spawnRing) と同じ見た目を、エディタの画面にも出す。
+// 指を置いた位置に出す演出。エディタの画面と、テストプレイ中 (TestPlayScreen が同じものを取り付ける) の両方で、
+// SETTING の「タッチエフェクト」のチェックに合わせてオン / オフする。
 //   - 指を置いた瞬間: 白い輪 (直径 90pt・線 3pt) が、0.5 倍 → 1.5 倍に広がりながら 0.3 秒で透明になる
 //   - 触れている間:   赤い半透明の丸 (直径 56pt) が、指についてくる
 //

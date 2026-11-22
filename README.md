@@ -30,8 +30,13 @@
 | GridSettingsDialog.swift | **Grid settings** (More メニューから)。シートではなく、EditorView に重ねる本家風の中央ダイアログ (`GridSettingsDialog`)。背景のぼかし `BackdropBlur` もここ |
 | MoreMenuIcons.swift | More メニューのアイコン (`MoreMenuIcon`)。本家の画面収録から起こした輪郭 (`MoreMenuIconData`) と、自作の Time range (正方形 + 上矢印) |
 | RootView.swift | 起動時のファイル選択。**まとめて選んだファイルを拡張子で mc / 音源 / 背景画像に自動で振り分ける** + **mcz の展開読み込み** (下の「起動画面のファイル選択」) |
-| TestPlay.swift | テストプレイ。MalodySlideTestplayer の判定・音声・描画をそのまま組み込み (Note→PlayNote に改名) |
-| TouchEffect.swift         | SETTING の **タッチエフェクト**。画面 (UIWindow) に「触れたことを見るだけ」のジェスチャを付けて、白い輪 (広がって消える) と赤い丸 (指についてくる) を CALayer で描く。テストプレイと同じ見た目 |
+| TestPlay.swift | テストプレイの **音声 (自前の Ogg デコーダー + `GameAudio` + 時計)**、`GameSession` (ポーズ画面で変える値: 速度 n / 判定レベル / ヒット音 / オフセット。保存される)、`PauseOverlay`、`TestPlayLaunch` / `TestPlayScreen` (エディタとの橋渡し) |
+| SlideCore.swift | **本家 Slide モードの判定・スコア・時間計算エンジン** (UIKit 非依存。仕様書 SLIDE_SPEC-7.md と、本家の libmalodycpp.so の逆アセンブルで確かめた式)。拍→ms の時間鎖 / seg の量子化 / タッチ 10 スロット / 頭の登録・追従・解放の判定 / スコア・ゲージ・Acc・ランク / スクロール (キャリア) の `SlideChart` `SlideEngine` `SlideScore` |
+| SlideLayout.swift | 画面の幾何 (UIKit 非依存): 3D に傾いた板 (本家の画面収録から測った射影) の `SlidePlane`、スクロール速度 `SlideScroll`、HUD の数字の並べ方 `SlideHUD`、判定文字 `SlideJudgeText`、ヒット光 `SlideHitLight` |
+| SlideSkin.swift / SlideSkinData*.swift | 本家のスキン画像 (背景の縁・判定線・ノーツ・ヒット光・数字・HP・ポーズ) を base64 で埋め込んだもの (`gen_skin.py` で生成) と、その読み込み |
+| SlideGameView.swift | **プレイ画面 `GameView`** (CALayer + CADisplayLink + マルチタッチ)。傾いた板の上に、スライドの帯 (seg ごとの回転した白 40% の長方形) / ノーツ (3 分割) / 判定線 / 判定文字、画面に平らなヒット光・HUD (score・combo・acc・HP)・ポーズボタン |
+| MalodyChartBuilder.swift | エディタの譜面 (`ChartData`) → テストプレイ用 `MalodyChart` (= `SlideChart`) の変換 (メモリ上で直接) |
+| TouchEffect.swift         | SETTING の **タッチエフェクト**。画面 (UIWindow) に「触れたことを見るだけ」のジェスチャを付けて、白い輪 (広がって消える) と赤い丸 (指についてくる) を CALayer で描く。**テストプレイ中も、このチェックの ON / OFF に従う** (`TestPlayScreen` が自分で取り付ける) |
 | PCMCache.swift | **使わなくなった** (中身は空)。曲を開くときに全部展開する `SongPCM` になったので、背景の先読み展開は要らない。GitHub 上で削除してよい |
 | RubberBandPCMSource.swift | **Rubber Band 版の時間伸縮** (0.75 / 0.5 / 0.25 / 0.1 倍の音)。`CRubberBand` (C++) があるビルド = GitHub Actions のときだけ有効。Swift Playgrounds では中身が空になり、`TimeStretch.swift` の自前版で動く。組み込み方は `RubberBand導入手順.md` |
 | Effects.swift | effect (scroll / jump) から「表示位置 P(t)」を決める `EffectMap` (テストプレイと、エディタの **FX 表示** の見た目だけが変わる。判定は変わらない) |
@@ -57,7 +62,7 @@
 - **ノーツの縦幅** (SETTING の「メニューの文字の大きさ」の下のスライダー。100% 〜 **240%**、5% 刻み、初期値 100% = 従来どおり。保存される: UserDefaults `editor.noteHeightScale`。`EditorState.noteHeightScale` / `noteHeightScaleRange`): iPhone でタップ / ウィップに触りにくいときのために、**タップとウィップの棒の見た目の縦幅と、触れて選べる範囲 (当たり判定) の縦幅を、同じ倍率で**広げる。`EditorState.geo(_:)` が倍率を `LaneGeo.noteScale` に入れ、描画 (`LaneRenderer.drawNotes` / FX 表示の `drawFXNotes`)・当たり判定 (`EditorState.noteHit` / `hitNote`)・投げ縄選択 (`selectInLasso`) が、同じ `LaneRenderer.barCenterY` で棒の位置をそろえる
   - 見た目: タップは高さ 11.5pt、ウィップは 12pt (どちらも 100% のとき) に倍率を掛ける。**棒の下端 (拍の線のすぐ上) は動かさず、上へ伸びる**。ウィップは「<」「>」の矢印の縦も伸びる (幅と端のとがりの深さは変えない)。240% のときタップは約 27.6pt
   - 当たり判定: 棒の真ん中から上下に 14pt (100% のとき) × 倍率。240% で上下に 33.6pt (全体で約 67pt)。横は従来どおり (幅 + 6pt)
-  - 効かないもの: スライドの始点・seg の点・リボン (見た目も当たり判定も従来どおり)。テストプレイ (`GameView`) のノーツの太さと判定 (x と時刻だけで判定するので、縦の当たり判定は無い)
+  - 効かないもの: スライドの始点・seg の点・リボン (見た目も当たり判定も従来どおり)。テストプレイ (`GameView`) のノーツの太さと判定 (本家と同じく x と時刻だけで判定するので、縦の当たり判定は無い。判定の幅は `SlideCore.swift` の仕様どおり)
   - 画面の外にある拍の線の棒が、伸びて画面に掛かるぶん、`hitNote` の絞り込み幅と、FX 表示の `fxRanges` の余白は、倍率に合わせて広がる (100% のときは従来と同じ)。通常表示の `visibleNoteIndices` の余白 (40pt) は、240% の棒の張り出し (約 33pt) まで収まるので、そのまま
 - **UI調整モード** (SETTING のチェックボックス。保存はしない = 開くたびにオフ):
   - オンにすると SETTING が閉じて、**譜面の編集・再生・ボタンは全部効かなくなり** (一番上の層 `UIAdjustLayer` が画面全体のタッチを止める)、画面構成だけを編集するモードになる。画面の上の札の **「完了」** で戻る / **「リセット」** で初めの幅 (帯 145pt、右ボタン列は iPad 58pt・iPhone 82pt) に戻す
@@ -131,7 +136,7 @@
 
 ## 枠 (レーンの幅) からはみ出したノーツの描画 / ホームバー
 - ノーツ (リボン・点・棒) は、レーンの幅の外 (左の帯・シークバー・右のボタン列の下) まで描く。本家と同じ見え方。`LaneView` (EditorView.swift) が、描画用の Canvas だけを左右に広げ (左は画面の左端まで、右はボタン列の幅 `RightPanel.width` ぶん)、座標はこれまでのレーンのまま左へ平行移動して描く。レーンの層は `EditorView` で `zIndex(-1)` にして、左の帯・シークバー・Adv. メニュー・右ボタン列より下に置いている。**当たり判定は変わらない**: タッチを受けるのはレーンの幅と同じ大きさの透明な層だけで、描画の Canvas は `allowsHitTesting(false)`
-- テストプレイ画面 (`TestPlay.swift`) のはみ出しは、まだ手を付けていない
+- テストプレイ画面 (`SlideGameView.swift`) は、画面全体に本家のレイアウト (高さ 1080 単位) を敷いている
 - ホームバー (画面下の横棒): `RootView` / `MalodySlideEditorApp` で `defersSystemGestures(on: .bottom)` だけを付けている (下端からの1回目の上スワイプではホームへ戻らず、2回目で戻る)。**バーは隠さない**: 隠す (`persistentSystemOverlays(.hidden)`) と、下端に触れた瞬間に白く出て反応するため。隠さずに遅延にすると、バーは半透明のまま残り、はっきり上へ持ち上げるまで反応しない (本家 Malody と同じ)。ノーツ幅スライダーは、画面の下端 19pt (`LaneWidthSlider.edgeDead`) から始まったタッチを受けない (そこから横になぞり始めると、iPad がホームバーの操作と見なすため)。`TestPlayScreen` は、まだ `persistentSystemOverlays(.hidden)` のまま。iPadOS の「ゲームモード」(Info.plist の `GCSupportsGameMode` / `LSSupportsGameMode`) とは別の機能で、ホームバーには関係しない
 
 ## 画面の下端 / 幅スライダー
@@ -179,7 +184,9 @@
     - 仕組み: 通常は「見えている拍の範囲」が 1 つだが、scroll / jump があると時刻の順と画面の順が一致しない。そこで、見える表示位置の範囲を `EffectMap.timeRanges` で時刻の範囲 → 拍の範囲に直し (`LaneRenderer.fxRanges`)、その範囲のノーツだけを描く。`LaneGeo.py` は、FX 表示のときだけ `LaneGeo.fx` (`FXWarp`) を通して高さを返す
     - 制限: 1 画面に描くのは、タップ / ウィップ 600 個、リボンの台形 8000 個まで
   - 未保存の編集内容も含めて、その場で mc を組み立てて遊ぶ (ファイルへは書かない)
-  - PAUSE → 終了 でエディタへ戻る。判定/ACCは Testplayer と同じ (PC版C判定)
+  - 判定・スコア・ACC・ゲージは **本家の仕様 (`SlideCore.swift`)**: 窓 BEST 45 / COOL 85 / GOOD 130 / MISS 170 ms (+ 判定レベルのずれ)、スコアは 1000 / 750 / 400 に判定レベルの倍率とゲージ A を掛けて整数で切り捨て、スライドは 100ms ごとのティック (+200)、追従は直近 20 回の誤差の平均、解放は終了の 130ms 前から。判定は **指が触れた時刻そのもの** で行う (フレームの時刻ではない。本家は判定時刻をフレームから渡している点だけ違う)
+  - 見た目は本家の画面収録とスキンに合わせる。左上のポーズボタン → ポーズ画面 (**ヒット音のチェックボックス**、スクロール速度 n、判定レベル、オフセット、コンティニュー / リトライ / 終了)。ヒット音は既定でオン (頭を BEST / COOL / GOOD で叩いたときと type 4 を捌いたときに、エディタと同じキー音が鳴る。ミス・ティック・早期解放では鳴らない)
+  - スクロール速度 n は整数 (既定 10。速度係数 = exp(n × 0.05) × 0.7。本家の画面収録のノーツの速さから逆算した値)
 - ポーズ画面の待ち時間対策: `GameAudio.halt()` がデコードスレッドの完了を待たない作りに変更 (待つのは再開時の `prepare` のみ)。ポーズ画面の上部に「pause処理 〇 ms」を診断用に表示 (不要なら PauseOverlay の Text を削除)
 
 ## 編集ツール / ノーツの選択・移動 / 未選択時の操作
@@ -391,7 +398,7 @@ BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.inform
   - **ノーツサウンドの種類**: `hit` / `hit-1` / `hit-2` / `sample-normal` の 4 つから選ぶ (2×2 のボタン。選んでいるものが水色。初期値は `sample-normal`)。押すと 1 発鳴って確かめられる。次回起動時も保存される (UserDefaults: `editor.noteSound`。値は音の名前そのまま)。再生中に切り替えると、次に予約するノーツから新しい音になる (すでに予約した 0.25 秒ぶんは前の音のまま)
   - 曲を再生したまま開いて、音量を調整できる (開いても再生は止まらない。ウィンドウより左を触ると閉じる)
   - ノーツサウンドのスライダーは、指を離した時に1発鳴って音量を確かめられる。0% でキー音オフ
-  * **タッチエフェクト** (チェックボックス、初期値オフ。保存される: UserDefaults `editor.touchEffect`)。オンのとき、画面のどこを触っても、触れた所に白い輪 (直径 90pt・0.3 秒で 0.5 倍 → 1.5 倍に広がって透明になる) が出て、触れている間は赤い半透明の丸 (直径 56pt) が指についてくる。テストプレイ (`GameView.showDot` / `spawnRing`) と同じ見た目・大きさ・色
+  * **タッチエフェクト** (チェックボックス、初期値オフ。保存される: UserDefaults `editor.touchEffect`)。オンのとき、画面のどこを触っても、触れた所に白い輪 (直径 90pt・0.3 秒で 0.5 倍 → 1.5 倍に広がって透明になる) が出て、触れている間は赤い半透明の丸 (直径 56pt) が指についてくる。テストプレイ中も、このチェックに合わせて同じものが出る (オフなら出ない。以前は常に出ていた)
     + 軽さ: 描くのは CALayer だけで、SwiftUI の再描画は起こさない。輪の動きは Core Animation が描くので、アプリ側は毎フレーム何もしない。層は使い回す。オフのときはジェスチャも層も画面から外す
     + 他の操作に影響しない: タッチを見るだけのジェスチャで、他のジェスチャを止めない・遅らせない・タッチを奪わない。複数の指も出る。テストプレイが出ている間はエディタ側を外す (二重表示を避ける)
     + 関連コード: `TouchEffect.swift` (`TouchEffectInstaller` / `TouchEffectOverlay` / `TouchObserver`)、`EditorView.swift` の `.background(TouchEffectInstaller(...))`、`EditorState.touchEffect`、`SideWindow.swift` の `touchEffectRow`
@@ -403,7 +410,7 @@ BPM list / Effect list と同じ作りに統一した。`SidePanel` に `.inform
     + 関連コード: `AudioVisualDSP.swift` (計算・位置)、`AudioVisuals.swift` (`AudioVisualCache` / `LaneRenderer.drawAudioVisuals`)、`Renderers.swift` の `LaneRenderer.draw` と `RenderersFX.swift` の `drawFX` (拍の線より前に `drawAudioVisuals` を呼ぶ)、`EditorState.swift` (`showWaveform` / `showSpectrogram` / `audioVisuals`)、`SideWindow.swift` の `audioVisualRows`
 - キー音が鳴るタイミング
   - エディタ再生中: ノーツ先頭が再生ライン(シアンの横棒)に触れる瞬間。同時押し(1ms以内)は1発にまとめ、まとめた個数 (`keyCounts`) だけ大きい音で鳴らす
-  - テストプレイ: tap / wipe / スライド始点を捌いた瞬間 (`GameCore.onHit`)。ほぼ同時 (最初の音から 20ms 以内) に捌いた分は、個数ぶん大きい音に差し替える (`KeySound.chordWindow`)
+  - テストプレイ: tap の頭 (BEST / COOL / GOOD) と type 4 を捌いた瞬間 (`SlideEngine.onHitSound`。ポーズ画面のチェックでオフにできる)。ほぼ同時 (最初の音から 20ms 以内) に捌いた分は、個数ぶん大きい音に差し替える (`KeySound.chordWindow`)
   - 再生中のキー音は「鳴る時刻を指定して先行予約」(0.25秒先まで)。フレームレートに依存せず、曲と同じ時計から予約する (下の「再生クロック」参照)
 - **同時ノーツで音が大きくなる決まり** (`KeySound.chordGain`): n 個同時のときの大きさ = 元の音 × n^0.75 (2 個で +4.5dB / 3 個で +7.2dB / 4 個で +9.0dB / 6 個で +11.7dB)。`KeySound.maxChord` (= 6) 個以上は同じ大きさ。
   * 同じ波形を重ねて鳴らすのではなく、個数 1〜6 ぶんの「大きくした波形」を、種類を選んだ時に作っておき (`KeySound.buffers`)、1 つの声で鳴らす。1.0 を越えそうな山は、`limiterKnee` (0.6) から上をなめらかに丸める (`softLimit`) ので、割れない。1 個のときは元の波形のまま

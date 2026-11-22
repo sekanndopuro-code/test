@@ -1,432 +1,15 @@
-// テストプレイ機能 (MalodySlideTestplayer の中身をエディタ用に組み込んだもの)
-// 元: MalodySlideTestplayer / ContentView.swift
-//  - 判定・ACC・音声(自前oggデコーダー)・UIKit描画/マルチタッチ はそのまま流用
-//  - エディタの Note / ChartError と名前が衝突するので PlayNote / PlayChartError に改名
-//  - 「エディタの現在位置から始める」ための startAt を GameCore / GameView に追加
-//  - 内蔵サンプル譜面・ファイル選択メニュー(ContentView)は不要なので削除
+// テストプレイ機能 (本家の Slide モードの仕様・見た目に合わせた版)
+//
+// このファイルに残っているもの:
+//   ・音声 (自前の Ogg デコーダー + AVAudioEngine + 時計: GameAudio)
+//   ・ゲーム設定 (GameSession: ポーズ画面で変える値)
+//   ・SwiftUI の橋渡し (GameRepresentable / PauseOverlay / TestPlayLaunch / TestPlayScreen)
+// 判定・スコア・時間計算は SlideCore.swift、画面の幾何は SlideLayout.swift、画像は SlideSkin.swift、
+// プレイ画面そのもの (GameView) は SlideGameView.swift、エディタの譜面からの変換は MalodyChartBuilder.swift。
 
 import SwiftUI
 import UIKit
 import AVFoundation
-
-// MARK: - ルール(判定・ACCはPC版C判定)
-
-enum Rule {
-    static let best = 0.036          // 秒
-    static let cool = 0.076
-    static let good = 0.110
-    static let miss = 0.150
-    static let xMargin = 6.0         // レーン座標での横の余裕
-    static let comboInterval = 0.1   // スライド中は100msごとに+1コンボ
-    static let slideWindow = 20      // 符号付き誤差の移動平均のサンプル数
-    static let sampleRate = 60.0     // そのサンプリング周波数(フレームレートに依存させない)
-    static let freeTail = 0.2        // 終点の200ms前からはなぞらなくても繋がる
-}
-
-enum Judge {
-    case best, cool, good, miss
-    
-    init(dt: Double) {
-        let a = abs(dt)
-        if a <= Rule.best { self = .best }
-        else if a <= Rule.cool { self = .cool }
-        else if a <= Rule.good { self = .good }
-        else { self = .miss }
-    }
-    
-    var weight: Double {
-        switch self {
-        case .best: return 100
-        case .cool: return 75
-        case .good: return 40
-        case .miss: return 0
-        }
-    }
-    
-    var name: String {
-        switch self {
-        case .best: return "BEST"
-        case .cool: return "COOL"
-        case .good: return "GOOD"
-        case .miss: return "MISS"
-        }
-    }
-}
-
-// MARK: - 譜面データ
-
-final class PlayNote {
-    enum Kind { case tap, wipe, slide }
-    enum State { case waiting, active, done }
-    
-    let kind: Kind
-    let t: Double                          // 判定時刻(秒, beat 0 = 0)
-    let x: Double                          // 中心のレーン座標(0...255)
-    let w: Double                          // 幅
-    let path: [(t: Double, x: Double)]     // slideのみ: 判定のある区間(始点〜最初に時間が巻き戻る手前まで。xは絶対座標)
-    let ribbon: [(t: Double, x: Double)]   // slideのみ: 描画用。始点を含む全点を mc に書かれた順のまま(巻き戻り・負のbeatもそのまま)
-    
-    var state = State.waiting
-    var connected = false
-    var errs: [Double] = []
-    var nextSample = 0.0
-    var lastTick = 0.0
-    
-    init(kind: Kind, t: Double, x: Double, w: Double,
-         path: [(t: Double, x: Double)] = [], ribbon: [(t: Double, x: Double)] = []) {
-        self.kind = kind
-        self.t = t
-        self.x = x
-        self.w = w
-        self.path = path
-        self.ribbon = ribbon
-    }
-    
-    var endT: Double { path.last?.t ?? t }
-    
-    func reset() {
-        state = .waiting
-        connected = false
-        errs = []
-        nextSample = 0
-        lastTick = 0
-    }
-    
-    /// スライド中心線のx(区間ごとに線形補間)
-    func centerX(at time: Double) -> Double {
-        guard path.count > 1 else { return x }
-        if time <= path[0].t { return path[0].x }
-        if time > path[path.count - 1].t { return path[path.count - 1].x }
-        // path は時刻が昇順なので二分探索(segが何万個あっても毎回全部は舐めない)。
-        // time <= path[i].t となる最初の i を探す
-        var lo = 1, hi = path.count - 1
-        while lo < hi {
-            let mid = (lo + hi) / 2
-            if time <= path[mid].t { hi = mid } else { lo = mid + 1 }
-        }
-        let a = path[lo - 1], b = path[lo]
-        let span = b.t - a.t
-        return span <= 0 ? b.x : a.x + (b.x - a.x) * (time - a.t) / span
-    }
-}
-
-private struct RawChart: Decodable {
-    struct Meta: Decodable {
-        struct Song: Decodable { let title: String? }
-        let song: Song?
-    }
-    struct Time: Decodable { let beat: [Double]; let bpm: Double }
-    struct Seg: Decodable { let beat: [Double]; let x: Double }
-    struct RawNote: Decodable {
-        let beat: [Double]
-        let x: Double?
-        let w: Double?
-        let type: Int?
-        let seg: [Seg]?
-        let offset: Double?
-    }
-    let meta: Meta?
-    let time: [Time]
-    let note: [RawNote]
-}
-
-/// effect (scroll / jump) は譜面本体とは別に読む (形が想定と違っても、譜面全体が読めなくならないように)
-private struct RawEffects: Decodable {
-    struct Item: Decodable {
-        let beat: [Double]?
-        let scroll: Double?
-        let jump: Double?
-        enum Keys: String, CodingKey { case beat, scroll, jump }
-        init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: Keys.self)
-            beat = try? c.decode([Double].self, forKey: .beat)
-            scroll = try? c.decode(Double.self, forKey: .scroll)
-            jump = try? c.decode(Double.self, forKey: .jump)
-        }
-    }
-    let effect: [Item]?
-    enum Keys: String, CodingKey { case effect }
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: Keys.self)
-        effect = try? c.decode([Item].self, forKey: .effect)
-    }
-}
-
-enum PlayChartError: Error { case noTiming }
-
-struct MalodyChart {
-    let title: String
-    let offset: Double      // 秒。曲の頭が来る譜面時刻(大きいほど曲の開始が遅れる)
-    let notes: [PlayNote]
-    let effects: EffectMap  // scroll / jump (見た目だけが変わる。判定は notes の時刻のまま)
-    
-    private static func beat(_ v: [Double]) -> Double {
-        guard v.count == 3, v[2] != 0 else { return 0 }
-        return v[0] + v[1] / v[2]
-    }
-    
-    static func load(_ data: Data) throws -> MalodyChart {
-        let raw = try JSONDecoder().decode(RawChart.self, from: data)
-        
-        let timing = raw.time
-            .map { (beat: beat($0.beat), bpm: $0.bpm) }
-            .filter { $0.bpm > 0 }
-            .sorted { $0.beat < $1.beat }
-        guard let head = timing.first else { throw PlayChartError.noTiming }
-        
-        // beat -> 秒(BPM変化対応)
-        func sec(_ b: Double) -> Double {
-            var t = 0.0, pb = head.beat, bpm = head.bpm
-            for e in timing.dropFirst() {
-                if b <= e.beat { break }
-                t += (e.beat - pb) * 60 / bpm
-                pb = e.beat
-                bpm = e.bpm
-            }
-            return t + (b - pb) * 60 / bpm
-        }
-        
-        var notes: [PlayNote] = []
-        var offset = 0.0
-        for n in raw.note {
-            if n.type == 1 { offset = (n.offset ?? 0) / 1000; continue }   // 音源ノート
-            guard let x = n.x else { continue }
-            let w = n.w ?? 32
-            let b = beat(n.beat)
-            let t0 = sec(b)
-            if n.type == 4 {
-                notes.append(PlayNote(kind: .wipe, t: t0, x: x, w: w))
-            } else if let segs = n.seg, !segs.isEmpty {
-                // segのbeatとxは始点からの相対値
-                var all: [(t: Double, x: Double)] = [(t: t0, x: x)]
-                for s in segs { all.append((t: sec(b + beat(s.beat)), x: x + s.x)) }
-                // 判定があるのは「最初に時系列順に並んでいる所」だけ。最初に時間が巻き戻った所から先は
-                // 装飾(リボンの描画だけ)で、判定には使わない。
-                var path = [all[0]]
-                for p in all.dropFirst() {
-                    if p.t < path[path.count - 1].t - 0.000001 { break }
-                    path.append(p)
-                }
-                notes.append(PlayNote(kind: .slide, t: t0, x: x, w: w, path: path, ribbon: all))
-            } else {
-                notes.append(PlayNote(kind: .tap, t: t0, x: x, w: w))
-            }
-        }
-        notes.sort { $0.t < $1.t }
-        
-        // effect (scroll / jump)。jump は ms の単位 (1000 = 1 秒間に scroll で進む距離)。scroll との掛け算は EffectMap 側でする
-        var events: [EffectMap.Event] = []
-        for e in (try? JSONDecoder().decode(RawEffects.self, from: data))?.effect ?? [] {
-            guard let bv = e.beat, bv.count == 3, bv[2] != 0, e.scroll != nil || e.jump != nil else { continue }
-            let b = beat(bv)
-            events.append(EffectMap.Event(t: sec(b), scroll: e.scroll, jumpMs: e.jump ?? 0))
-        }
-        return MalodyChart(title: raw.meta?.song?.title ?? "", offset: offset, notes: notes,
-                           effects: EffectMap.make(events))
-    }
-}
-
-// MARK: - ゲームの核(UI非依存: 入力イベント + 時刻 -> 判定・スコア)
-
-final class GameCore {
-    let notes: [PlayNote]
-    let endTime: Double
-    private(set) var firstIndex = 0          // 未処理の先頭ノーツ
-    private(set) var combo = 0
-    private(set) var maxCombo = 0
-    private(set) var score = 0
-    private(set) var lastJudge: Judge?
-    private(set) var lastJudgeAt = 0.0
-    private(set) var fingers: [Int: Double] = [:]   // 指ID -> レーンx
-    private var accSum = 0.0
-    private var accCount = 0
-    var onHit: (() -> Void)? = nil               // ノーツを捌いた瞬間(キー音用。エディタ追加分)
-    
-    var accuracy: Double { accCount == 0 ? 0 : accSum / Double(accCount) }
-    var isFinished: Bool { firstIndex >= notes.count }
-    
-    /// startTime: この譜面時刻より前のノーツは最初から処理済み扱い(エディタの途中からテストするため)
-    init(notes: [PlayNote], startTime: Double = -.infinity) {
-        self.notes = notes
-        notes.forEach { $0.reset() }
-        self.endTime = notes.map { $0.endT }.max() ?? 0
-        var i = 0
-        while i < notes.count && notes[i].t < startTime {
-            notes[i].state = .done
-            i += 1
-        }
-        firstIndex = i
-    }
-    
-    // ---- 入力 ----
-    
-    func touchBegan(id: Int, x: Double, at t: Double) {
-        fingers[id] = x
-        // tapと、スライド始点を「叩いた」場合: 最も時刻が近い1つを判定する
-        var target: PlayNote?
-        var bestGap = Double.infinity
-        var i = firstIndex
-        while i < notes.count {
-            let n = notes[i]
-            i += 1
-            if n.t - t > Rule.miss { break }
-            guard n.state == .waiting, n.kind != .wipe else { continue }
-            let gap = abs(t - n.t)
-            if gap <= Rule.miss, gap < bestGap, abs(x - n.x) <= n.w / 2 + Rule.xMargin {
-                target = n
-                bestGap = gap
-            }
-        }
-        if let n = target {
-            onHit?()
-            register(Judge(dt: t - n.t), at: t)
-            if n.kind == .tap { n.state = .done } else { activate(n, at: t) }
-        }
-        trace(at: t)
-    }
-    
-    func touchMoved(id: Int, x: Double, at t: Double) {
-        fingers[id] = x
-        trace(at: t)
-    }
-    
-    func touchEnded(id: Int) {
-        fingers[id] = nil
-    }
-    
-    /// ポーズ時: 押さえている指をすべて離した扱いにする
-    func releaseFingers() {
-        fingers.removeAll()
-    }
-    
-    // ---- 毎フレーム ----
-    
-    func update(to t: Double) {
-        var i = firstIndex
-        while i < notes.count {
-            let n = notes[i]
-            i += 1
-            if n.t - t > Rule.miss { break }
-            switch n.kind {
-            case .tap:
-                if n.state == .waiting && t > n.t + Rule.miss {
-                    n.state = .done
-                    register(.miss, at: t)
-                }
-            case .wipe:
-                if n.state == .waiting && t >= n.t {
-                    if covered(n) { n.state = .done; onHit?(); gain(100) }
-                    else if t > n.t + Rule.cool { n.state = .done }     // 取り逃しはノーペナルティ
-                }
-            case .slide:
-                if n.state == .waiting {
-                    if t >= n.t && t <= n.t + Rule.cool && covered(n) {
-                        onHit?()
-                        gain(100)                                       // なぞり始点: ACCは動かない
-                        activate(n, at: t)
-                    } else if t > n.t + Rule.miss {
-                        register(.miss, at: t)                          // 始点を取り逃し
-                        activate(n, at: t)
-                    }
-                }
-                if n.state == .active { follow(n, at: t) }
-            }
-        }
-        while firstIndex < notes.count && notes[firstIndex].state == .done { firstIndex += 1 }
-    }
-    
-    // ---- 内部 ----
-    
-    /// wipe と「なぞり始点」: 判定バー到達後、COOLのlate幅までに指が乗っていれば捌ける
-    private func trace(at t: Double) {
-        var i = firstIndex
-        while i < notes.count {
-            let n = notes[i]
-            i += 1
-            if n.t > t { break }
-            guard n.kind != .tap, n.state == .waiting, t <= n.t + Rule.cool, covered(n) else { continue }
-            onHit?()
-            gain(100)
-            if n.kind == .wipe { n.state = .done } else { activate(n, at: t) }
-        }
-    }
-    
-    private func activate(_ n: PlayNote, at t: Double) {
-        n.state = .active
-        n.nextSample = max(t, n.t)
-        n.lastTick = max(t, n.t)
-    }
-    
-    /// スライドの追従: 符号付き誤差の20サンプル移動平均が幅内なら「繋がっている」
-    private func follow(_ n: PlayNote, at t: Double) {
-        if t > n.endT {
-            n.state = .done
-            n.connected = false
-            return
-        }
-        if t - n.nextSample > 0.5 { n.nextSample = t }       // 長時間止まった後の追い付き防止
-        let step = 1.0 / Rule.sampleRate
-        while n.nextSample <= t {
-            if let e = nearestError(to: n.centerX(at: n.nextSample)) {
-                n.errs.append(e)
-                if n.errs.count > Rule.slideWindow { n.errs.removeFirst() }
-            } else {
-                n.errs.removeAll()
-            }
-            n.nextSample += step
-        }
-        if n.errs.isEmpty {
-            n.connected = false
-        } else {
-            let mean = n.errs.reduce(0, +) / Double(n.errs.count)
-            n.connected = abs(mean) <= n.w / 2 + Rule.xMargin
-        }
-        if t >= n.endT - Rule.freeTail { n.connected = true }
-        if n.connected {
-            while t - n.lastTick >= Rule.comboInterval {
-                n.lastTick += Rule.comboInterval
-                gain(50)
-            }
-        } else {
-            n.lastTick = t
-        }
-    }
-    
-    private func covered(_ n: PlayNote) -> Bool {
-        fingers.values.contains { abs($0 - n.x) <= n.w / 2 + Rule.xMargin }
-    }
-    
-    private func nearestError(to cx: Double) -> Double? {
-        var best: Double?
-        for f in fingers.values {
-            let e = f - cx
-            if best == nil || abs(e) < abs(best!) { best = e }
-        }
-        return best
-    }
-    
-    /// tap(とスライド始点を叩いた時)だけがACCに関与する
-    private func register(_ j: Judge, at t: Double) {
-        accSum += j.weight
-        accCount += 1
-        if j == .miss {
-            combo = 0
-        } else {
-            combo += 1
-            maxCombo = max(maxCombo, combo)
-            score += Int(j.weight) * 10
-        }
-        lastJudge = j
-        lastJudgeAt = t
-    }
-    
-    /// wipe・なぞり始点・スライド中の100msごと: コンボとスコアだけ増える
-    private func gain(_ s: Int) {
-        combo += 1
-        maxCombo = max(maxCombo, combo)
-        score += s
-    }
-}
 
 // MARK: - Ogg Vorbis デコーダー(自前実装・ストリーミング対応)
 // 変換不要でoggをそのまま読めるようにする部分。ファイルはメモリマップで開き、
@@ -1805,1213 +1388,42 @@ final class GameAudio: @unchecked Sendable {
 final class GameSession: ObservableObject {
     @Published var paused = false
     @Published var pauseInfo = ""                   // ポーズ処理の所要時間(診断用)
-    @Published var speed: Double {                  // スクロール速度の倍率 0.5〜2.0
-        didSet { UserDefaults.standard.set(speed, forKey: "slide.speed") }
+    /// スクロール速度 n (整数。速度係数 = exp(n × 0.05)。本家の「速度」設定の整数。既定 10 は本家の画面収録の実測から)
+    @Published var speedN: Int {
+        didSet { UserDefaults.standard.set(speedN, forKey: "slide.speedN") }
+    }
+    /// 判定レベル 0...4 (窓のずれ +20/+10/0/−8/−16 ms とスコア倍率 78/85/100/110/120 %。既定 2 = 標準)
+    @Published var judgeLevel: Int {
+        didSet { UserDefaults.standard.set(judgeLevel, forKey: "slide.judgeLevel") }
+    }
+    /// ヒット音 (頭を叩いたとき。エディタのノーツサウンドと同じ音)。既定はオン
+    @Published var hitSound: Bool {
+        didSet { UserDefaults.standard.set(hitSound, forKey: "slide.hitSound") }
     }
     @Published var offsetMs: Double {               // ±300ms。+で音に対してノーツが遅く、−で早くなる
         didSet { UserDefaults.standard.set(offsetMs, forKey: "slide.offset") }
     }
     weak var view: GameView?
     var quit: () -> Void = {}
-    
+
+    static let speedRange = 1...30
+
     init() {
-        let s = UserDefaults.standard.double(forKey: "slide.speed")
-        speed = s == 0 ? 1.0 : min(max(s, 0.5), 2.0)
-        offsetMs = min(max(UserDefaults.standard.double(forKey: "slide.offset"), -300), 300)
+        let ud = UserDefaults.standard
+        let n = ud.object(forKey: "slide.speedN") == nil ? 10 : ud.integer(forKey: "slide.speedN")
+        speedN = min(max(n, Self.speedRange.lowerBound), Self.speedRange.upperBound)
+        let k = ud.object(forKey: "slide.judgeLevel") == nil ? 2 : ud.integer(forKey: "slide.judgeLevel")
+        judgeLevel = min(max(k, 0), 4)
+        hitSound = ud.object(forKey: "slide.hitSound") == nil ? true : ud.bool(forKey: "slide.hitSound")
+        offsetMs = min(max(ud.double(forKey: "slide.offset"), -300), 300)
     }
-    
+
     func pause() { view?.pause() }
     func resume() { view?.resume() }
     func retry() { view?.retry() }
     func quitGame() {
         paused = false
         quit()
-    }
-}
-
-// MARK: - スライドのリボン(描画専用)
-// リボンの形は「時刻 × x」で最初から決まっていて、動くのは画面の縦位置だけ。
-// そこで形(CGPath)は表示に入る時に1回だけ作り、毎フレームはレイヤーの位置を動かすだけにする。
-// 形は mc に書かれた順に「隣り合う2点を結ぶ台形」を並べたもの(エディタと同じ)。
-// 台形が重なるほど濃く見せるため、重ならない台形同士を1枚のレイヤーにまとめ、
-// そのレイヤーを最大 maxLayers 枚だけ重ねる(エディタの「台形ごとに半透明で塗る」と同じ濃さになる)。
-
-/// リボンの1区間: 時刻 ta→tb (ta < tb) の間に、中心xが xa→xb へ動く台形
-private struct RibbonQuad {
-    let ta: Double              // 縦の位置 (effect が無ければ時刻そのもの。effect があれば表示位置 P(t))
-    let tb: Double
-    let xa: Double
-    let xb: Double
-    /// この台形を描くのは、この時刻 (実際の時刻) より前だけ。区間の終わりの点を判定が過ぎたら、その区間は消える。
-    /// -infinity = 時刻では消さない (scroll でマイナス = 逆走する譜面だけ、これを使う)
-    var gate: Double = -Double.infinity
-    
-    func cx(_ t: Double) -> Double { xa + (xb - xa) * (t - ta) / (tb - ta) }
-    
-    /// 縦の位置 lo...hi の範囲だけに切り詰めた台形 (範囲の外なら nil)。
-    /// jump で何百万秒も先へ飛ばした台形を、そのまま描かない (座標が大きすぎると描画が壊れる) ためのもの
-    func clipped(lo: Double, hi: Double) -> RibbonQuad? {
-        if tb < lo || ta > hi { return nil }
-        if ta >= lo && tb <= hi { return self }
-        let a = max(ta, lo)
-        let b = min(tb, hi)
-        return RibbonQuad(ta: a, tb: b, xa: cx(a), xb: cx(b), gate: gate)
-    }
-}
-
-private struct RibbonKey: Hashable {
-    let a: Int
-    let b: Int
-    let c: Int
-    let d: Int
-}
-
-private final class RibbonView {
-    let root = CALayer()
-    var shapes: [CAShapeLayer] = []
-}
-
-// ---- 前処理: 判定にも描画にも状態を持たない「値」だけ。別スレッドで作る ----
-
-private struct RibbonInput: Sendable {
-    let pts: [(t: Double, x: Double)]
-    let w: Double
-    var times: [Double]? = nil      // effect があるとき: pts の t は「表示位置」になっている。実際の時刻は、ここに持つ
-    var needsGate = false           // 逆走 (scroll < 0) があって、通り過ぎた区間を時刻で消す必要があるか
-}
-
-private struct RibbonGeometry: Sendable {
-    let groups: [[RibbonQuad]]
-    let lo: Double
-    let hi: Double
-    let xMin: Double        // 帯の左端(レーン座標, 半幅込み)
-    let xMax: Double
-    let peak: Int           // 1.75秒の間に始まる台形の最大数 = 同時に画面へ出る形の複雑さ
-    let startT: Double      // 始点の縦の位置 (= リボンが画面に入る目安)
-    let endT: Double        // リボン全体で最も遅い「実際の時刻」(これを過ぎたら全部消す)
-    let gateTimes: [Double] // needsGate のとき: 台形の gate を昇順に並べたもの (どこまで消えたかを数える用)
-    let needsGate: Bool
-    
-    static func make(_ input: RibbonInput) -> RibbonGeometry {
-        var a = Double.infinity
-        var b = -Double.infinity
-        for p in input.pts {
-            a = min(a, p.t)
-            b = max(b, p.t)
-        }
-        let groups = RibbonSlot.makeGroups(input.pts, width: input.w, times: input.times)
-        let half = input.w / 2
-        var xl = Double.infinity
-        var xr = -Double.infinity
-        var buckets: [Int: Int] = [:]
-        for g in groups {
-            for q in g {
-                xl = min(xl, min(q.xa, q.xb) - half)
-                xr = max(xr, max(q.xa, q.xb) + half)
-                buckets[Int((q.ta / 0.25).rounded(.down)), default: 0] += 1
-            }
-        }
-        var peak = 0
-        for (k, _) in buckets {
-            var s = 0
-            for d in 0..<7 { s += buckets[k + d] ?? 0 }
-            peak = max(peak, s)
-        }
-        var gateTimes: [Double] = []
-        if input.needsGate {
-            for g in groups { for q in g { gateTimes.append(q.gate) } }
-            gateTimes.sort()
-        }
-        return RibbonGeometry(groups: groups, lo: a, hi: b, xMin: xl, xMax: xr, peak: peak,
-                              startT: input.pts.first?.t ?? a, endT: input.times?.max() ?? b,
-                              gateTimes: gateTimes, needsGate: input.needsGate)
-    }
-}
-
-/// 別スレッドで作った RibbonGeometry の受け渡し箱(メインスレッドが毎フレーム覗く)
-private final class RibbonPrepBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var slots: [RibbonGeometry?]
-    private var done = false
-    private var ms = 0.0
-    
-    init(count: Int) { slots = Array(repeating: nil, count: count) }
-    
-    func set(_ i: Int, _ g: RibbonGeometry) {
-        lock.lock()
-        slots[i] = g
-        lock.unlock()
-    }
-    func finish(ms: Double) {
-        lock.lock()
-        self.ms = ms
-        done = true
-        lock.unlock()
-    }
-    func result() -> (slots: [RibbonGeometry?], ms: Double)? {
-        lock.lock()
-        defer { lock.unlock() }
-        return done ? (slots, ms) : nil
-    }
-}
-
-// ---- ビットマップ方式(台形が多すぎて、毎フレームのベクター描画が重いリボン用) ----
-// 巻き戻りで絵を描くようなスライドは、同じ時間帯に何万個もの台形が重なる。ベクターだと「画面に見えている分」
-// だけでも毎フレーム描き直しになって重い。そこで形を一定の高さ(tileRows px)のタイルに分けて画像にしておき、
-// 毎フレームは画像のレイヤーを動かすだけにする(描画コストが台形の数に依存しなくなる)。
-//  - 画像は別スレッドで、画面に入る数秒前から焼く(メインスレッドは待たない)
-//  - 焼く時は「縦 = 時刻 × ppsPx」というグローバルなピクセル格子に合わせ、レイヤー位置もピクセルに揃える。
-//    だからタイルの継ぎ目は出ないし、拡大縮小のボケもない
-//  - 重なりの濃さは、従来と同じく maxLayers 枚のレイヤーを順に半透明で塗って再現する(ベクター方式と同じ濃さ)
-//  - 「繋がっている/いない」の2色ぶんを最初から焼いて、色が変わった時は画像を差し替えるだけ
-
-private struct BakeConfig: Equatable {
-    let scale: CGFloat
-    let unit: CGFloat
-    let px: CGFloat
-    let width: CGFloat
-}
-
-private struct BakeJob: Sendable {
-    let groups: [[RibbonQuad]]
-    let halfW: Double
-    let tile: Int
-    let rows: Int
-    let ppsPx: Double           // 縦: 1秒あたりのピクセル数
-    let pxPerLane: Double       // 横: レーン1単位あたりのピクセル数
-    let x0: Int                 // 画像の左端(画面左端からのピクセル数)
-    let width: Int
-    let epoch: Int
-}
-
-private struct BakeResult: @unchecked Sendable {
-    let tile: Int
-    let epoch: Int
-    let on: CGImage?            // nil = そのタイルには何も描かれない
-    let off: CGImage?
-}
-
-private final class TileBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var items: [BakeResult] = []
-    private var minEpoch = 0
-    
-    func put(_ r: BakeResult) {
-        lock.lock()
-        if r.epoch >= minEpoch { items.append(r) }
-        lock.unlock()
-    }
-    func take() -> [BakeResult] {
-        lock.lock()
-        defer { lock.unlock() }
-        if items.isEmpty { return [] }
-        let r = items
-        items.removeAll()
-        return r
-    }
-    /// 古い設定で焼いた分は、届いていても・これから届いても捨てる
-    func discard(below epoch: Int) {
-        lock.lock()
-        minEpoch = epoch
-        items.removeAll { $0.epoch < epoch }
-        lock.unlock()
-    }
-}
-
-private enum RibbonBaker {
-    static let queue = DispatchQueue(label: "malody.ribbon.bake", qos: .userInitiated, attributes: .concurrent)
-    
-    private static func context(_ w: Int, _ h: Int) -> CGContext? {
-        CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                  space: CGColorSpaceCreateDeviceRGB(),
-                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
-    }
-    
-    /// 1タイル分を焼く。CGContext は y が上向き = 「未来が上」の時刻軸とそのまま対応する
-    static func run(_ j: BakeJob) -> BakeResult {
-        let originY = Double(j.tile * j.rows)               // このタイルの下端(グローバルなピクセル行)
-        let tLo = originY / j.ppsPx                         // このタイルが受け持つ時刻範囲
-        let tHi = (originY + Double(j.rows)) / j.ppsPx
-        let originX = Double(j.x0)
-        let hw = j.halfW * j.pxPerLane
-        
-        var paths: [CGPath] = []
-        for quads in j.groups {
-            let p = CGMutablePath()
-            var any = false
-            for q0 in quads where q0.tb >= tLo && q0.ta <= tHi {
-                // jump で遠くへ飛ばした台形は、このタイルの範囲に切り詰める (座標が大きすぎると描画が壊れるので)
-                let q = (q0.tb - q0.ta > 50) ? (q0.clipped(lo: tLo - 0.05, hi: tHi + 0.05) ?? q0) : q0
-                any = true
-                let ya = q.ta * j.ppsPx - originY
-                let yb = q.tb * j.ppsPx - originY
-                let xa = q.xa * j.pxPerLane - originX
-                let xb = q.xb * j.pxPerLane - originX
-                p.move(to: CGPoint(x: xa - hw, y: ya))
-                p.addLine(to: CGPoint(x: xa + hw, y: ya))
-                p.addLine(to: CGPoint(x: xb + hw, y: yb))
-                p.addLine(to: CGPoint(x: xb - hw, y: yb))
-                p.closeSubpath()
-            }
-            if any { paths.append(p) }
-        }
-        guard !paths.isEmpty,
-              let on = context(j.width, j.rows),
-              let off = context(j.width, j.rows) else {
-            return BakeResult(tile: j.tile, epoch: j.epoch, on: nil, off: nil)
-        }
-        // グループ(=重ならない台形の集まり)ごとに半透明で塗る。重なった所だけ濃くなる
-        for p in paths {
-            on.setFillColor(red: 1, green: 1, blue: 1, alpha: RibbonSlot.onAlpha)
-            on.addPath(p)
-            on.fillPath()
-            off.setFillColor(red: 1, green: 1, blue: 1, alpha: RibbonSlot.offAlpha)
-            off.addPath(p)
-            off.fillPath()
-        }
-        return BakeResult(tile: j.tile, epoch: j.epoch, on: on.makeImage(), off: off.makeImage())
-    }
-}
-
-private final class BakedTile {
-    let layer = CALayer()
-    let on: CGImage
-    let off: CGImage
-    var lastOn: Bool?
-    
-    init(on: CGImage, off: CGImage, scale: CGFloat) {
-        self.on = on
-        self.off = off
-        layer.anchorPoint = .zero
-        layer.bounds = CGRect(x: 0, y: 0, width: CGFloat(on.width) / scale, height: CGFloat(on.height) / scale)
-        layer.contentsScale = scale
-        layer.magnificationFilter = .nearest
-        layer.minificationFilter = .nearest
-        layer.isHidden = true
-    }
-}
-
-// ---- 台形の重なり判定を速くする粗いマス目(時刻 × x) ----
-
-private struct QuadGrid {
-    struct Span {
-        let t0: Int
-        let t1: Int
-        let x0: Int
-        let x1: Int
-        var cells: Int { (t1 - t0 + 1) * (x1 - x0 + 1) }
-    }
-    
-    static let tStep = 0.05         // 秒
-    static let xStep = 8.0          // レーン
-    static let bigCells = 400       // これを超えて広い台形はマス目に入れず、毎回全部と比べる
-    
-    var cells: [Int: [Int]] = [:]
-    var big: [Int] = []
-    
-    private static func cell(_ v: Double, _ step: Double) -> Int {
-        Int(max(-1_000_000.0, min(1_000_000.0, (v / step).rounded(.down))))
-    }
-    private static func key(_ t: Int, _ x: Int) -> Int { t &* 100_003 &+ x }
-    
-    static func span(_ q: RibbonQuad, half: Double) -> Span {
-        let xl = min(q.xa, q.xb) - half
-        let xr = max(q.xa, q.xb) + half
-        return Span(t0: cell(q.ta, tStep), t1: cell(q.tb, tStep), x0: cell(xl, xStep), x1: cell(xr, xStep))
-    }
-    
-    func clashes(_ q: RibbonQuad, _ s: Span, in quads: [RibbonQuad], width: Double) -> Bool {
-        if s.cells > QuadGrid.bigCells {
-            for o in quads where RibbonSlot.overlaps(o, q, width: width) { return true }
-            return false
-        }
-        for ti in s.t0...s.t1 {
-            for xi in s.x0...s.x1 {
-                guard let list = cells[QuadGrid.key(ti, xi)] else { continue }
-                for idx in list where RibbonSlot.overlaps(quads[idx], q, width: width) { return true }
-            }
-        }
-        for idx in big where RibbonSlot.overlaps(quads[idx], q, width: width) { return true }
-        return false
-    }
-    
-    mutating func insert(_ index: Int, _ s: Span) {
-        if s.cells > QuadGrid.bigCells {
-            big.append(index)
-            return
-        }
-        for ti in s.t0...s.t1 {
-            for xi in s.x0...s.x1 {
-                cells[QuadGrid.key(ti, xi), default: []].append(index)
-            }
-        }
-    }
-}
-
-private final class RibbonSlot {
-    static let maxLayers = 5        // 重なりを濃く表現する上限(これ以上重ねても見た目はほぼ変わらない)
-    static let onAlpha: CGFloat = 0.45      // 繋がっている時の濃さ
-    static let offAlpha: CGFloat = 0.22     // 繋がっていない時の濃さ
-    
-    // ---- 調整用 ----
-    static let bitmapThreshold = 500        // 1.75秒の間に始まる台形がこの数以上 → ビットマップ方式。Int.max にすると従来方式のみ
-    static let tileRows = 1024              // タイルの高さ(px)
-    static let prefetch = 3.0               // 秒: ビットマップ方式は、画面に入る何秒前から焼き始めるか
-    // ----------------
-    
-    let note: PlayNote
-    let appear: Double              // リボンが現れる時刻 = 始点ノーツが画面上端に入る時刻(始点より前に伸びる部分もここで一気に出る)
-    let lo: Double                  // リボン全体の最も早い時刻
-    let hi: Double                  // 最も遅い時刻(これが判定バーを過ぎたら消す)
-    let halfW: Double               // 半幅(レーン座標)
-    let groups: [[RibbonQuad]]      // 重ならない台形ごとのレイヤー分け
-    let xMin: Double
-    let xMax: Double
-    let heavy: Bool                 // true = ビットマップ方式
-    let endT: Double                // 全体が判定バーを過ぎる「実際の時刻」(effect が無ければ hi と同じ)
-    let needsGate: Bool             // 逆走があるので、通り過ぎた区間を時刻で消す
-    let gateTimes: [Double]
-    var admitted = false            // effect があるとき: 画面に入れた (一度入れたら、終わるまで外さない)
-    var shown = false               // effect があるとき: 始点が画面に入って、描き始めた (逆走で始点が遠ざかっても消さない)
-    var builtPassed = -1            // 今のパスを作った時に、消えていた区間の数
-    
-    // ベクター方式の状態
-    var view: RibbonView?           // 表示中だけ持つ
-    var builtUnit: CGFloat = -1     // パスを作った時の unit / pxPerSec
-    var builtPx: CGFloat = -1
-    var winLo = 0.0                 // 今のパスに入れている時刻の範囲(パスの原点は winLo)。
-    var winHi = 0.0                 // 画面外の台形は入れない = 長いスライドでも1回に描く量が一定になる
-    var lastOn: Bool?               // 今の塗り色(繋がっているか)
-    
-    // ビットマップ方式の状態
-    var tiles: [Int: BakedTile] = [:]
-    var requested = Set<Int>()
-    var epoch = 0                   // 設定(速度・画面サイズ)が変わるたび・捨てるたびに進める。古い焼き上がりを見分ける
-    var cfg: BakeConfig?
-    var x0 = 0                      // 画像の左端 / 幅 (px)
-    var pxW = 0
-    let box = TileBox()
-    
-    init(note n: PlayNote, geo: RibbonGeometry) {
-        note = n
-        appear = geo.startT             // effect が無ければ n.t と同じ
-        endT = geo.endT
-        needsGate = geo.needsGate
-        gateTimes = geo.gateTimes
-        halfW = n.w / 2
-        lo = geo.lo
-        hi = geo.hi
-        groups = geo.groups
-        xMin = geo.xMin
-        xMax = geo.xMax
-        heavy = geo.peak >= RibbonSlot.bitmapThreshold
-    }
-    
-    /// 全スライドの形を別スレッドで作る(重なり判定はスライドごとに独立なので並列にできる)
-    static func prepare(_ inputs: [RibbonInput], into box: RibbonPrepBox) {
-        if inputs.isEmpty {
-            box.finish(ms: 0)
-            return
-        }
-        DispatchQueue.global(qos: .userInitiated).async {
-            let t0 = ProcessInfo.processInfo.systemUptime
-            DispatchQueue.concurrentPerform(iterations: inputs.count) { i in
-                box.set(i, RibbonGeometry.make(inputs[i]))
-            }
-            box.finish(ms: (ProcessInfo.processInfo.systemUptime - t0) * 1000)
-        }
-    }
-    
-    /// 台形に分けて、重ならないもの同士を同じグループにまとめる(先頭から順に入る所へ入れる)。
-    /// maxLayers を超えて重なる分は最後のグループにまとめて塗る(その部分は濃さが頭打ち)
-    static func makeGroups(_ pts: [(t: Double, x: Double)], width: Double, times: [Double]? = nil) -> [[RibbonQuad]] {
-        if pts.count < 2 { return [] }
-        let k = maxLayers
-        let half = width / 2
-        var groups: [[RibbonQuad]] = Array(repeating: [], count: k)
-        var grids = Array(repeating: QuadGrid(), count: k - 1)   // 最後のグループは重なっても良いので判定不要
-        var seen: [RibbonKey: Int] = [:]
-        for i in 0..<(pts.count - 1) {
-            var p = pts[i]
-            var q = pts[i + 1]
-            if q.t < p.t { (p, q) = (q, p) }                     // 時間が戻る区間も、同じ向きの台形として扱う
-            if q.t - p.t < 0.0001 { continue }                   // 同時刻の横移動は面積ゼロ
-            var gate = -Double.infinity
-            if let ts = times, i + 1 < ts.count { gate = max(ts[i], ts[i + 1]) }   // 区間の終わりの点を判定が過ぎたら消す
-            let quad = RibbonQuad(ta: p.t, tb: q.t, xa: p.x, xb: q.x, gate: gate)
-            let key = RibbonKey(a: Int((p.t * 100000).rounded()), b: Int((q.t * 100000).rounded()),
-                                c: Int((p.x * 100).rounded()), d: Int((q.x * 100).rounded()))
-            let count = (seen[key] ?? 0) + 1
-            seen[key] = count
-            if count > k { continue }                            // 全く同じ形が k 回を超えて重なっても、これ以上濃くならない
-            let span = QuadGrid.span(quad, half: half)
-            var placed = false
-            for g in 0..<(k - 1) {
-                // 近くにある台形とだけ比べる(全部と比べると、台形が何万個もある時に2乗で遅くなる)
-                if grids[g].clashes(quad, span, in: groups[g], width: width) { continue }
-                grids[g].insert(groups[g].count, span)
-                groups[g].append(quad)
-                placed = true
-                break
-            }
-            if !placed { groups[k - 1].append(quad) }
-        }
-        return groups.filter { !$0.isEmpty }
-    }
-    
-    /// 昇順の配列のうち、x 以下の個数
-    static func countAtMost(_ a: [Double], _ x: Double) -> Int {
-        var lo = 0, hi = a.count
-        while lo < hi {
-            let mid = (lo + hi) / 2
-            if a[mid] <= x { lo = mid + 1 } else { hi = mid }
-        }
-        return lo
-    }
-    
-    /// 同じ幅の2つの台形が、面積を持って重なるか(辺が接しているだけなら false)
-    static func overlaps(_ p: RibbonQuad, _ q: RibbonQuad, width: Double) -> Bool {
-        let t0 = max(p.ta, q.ta)
-        let t1 = min(p.tb, q.tb)
-        if t1 - t0 < 0.0001 { return false }
-        let d0 = p.cx(t0) - q.cx(t0)
-        let d1 = p.cx(t1) - q.cx(t1)
-        let nearest = ((d0 < 0) != (d1 < 0)) ? 0 : min(abs(d0), abs(d1))   // 中心線の横ずれの最小値
-        return nearest < width - 0.05
-    }
-}
-
-// MARK: - 画面(UIKit: CALayerの使い回し + CADisplayLink + マルチタッチ)
-// 毎フレーム全画面を再描画せず、ノーツ用のレイヤーを数個だけ動かす軽量構成
-
-final class GameView: UIView {
-    // ---- 調整用 ----
-    private let baseApproach = 0.55          // 秒: 速度1.0のとき、画面上端 → 判定バーまで落ちる時間
-    private let judgeRatio: CGFloat = 0.82   // 判定バーの縦位置(画面の高さに対する比)
-    private let judgeShift = 0.0             // 秒: 全体的に判定が早い/遅いと感じたらここで補正
-    private static let countIn = 2.0         // 秒: 開始前のカウント
-    // ----------------
-    
-    private var core: GameCore
-    private let startAt: Double               // 譜面時刻(秒): テストを始める位置(0 = 最初から)
-    private let chart: MalodyChart
-    private let fx: EffectMap                 // scroll / jump (空なら従来どおり。判定は変わらず、見た目の位置だけが変わる)
-    private var hasFX: Bool { !fx.isEmpty }
-    private let audio: GameAudio?
-    private let session: GameSession
-    private var link: CADisplayLink?
-    private var running = false
-    private var pausedT = 0.0
-    private var silentHost = 0.0             // 無音時の時計: この時刻に譜面時刻 silentChart
-    private var silentChart = 0.0
-    private var observers: [NSObjectProtocol] = []
-    
-    // 表示用の部品(使い回し)
-    private let judgeLine = CALayer()
-    private var bars: [CALayer] = []
-    private let ribbonHost = CALayer()                    // リボン置き場。判定バーより下を切り落とす
-    private var ribbons: [RibbonSlot] = []                // 全スライド(始点の時刻順)。形の前処理が終わってから入る
-    private let ribbonSources: [PlayNote]                 // ribbons の元になるスライド(前処理の結果と同じ順)
-    private let ribbonPrep: RibbonPrepBox                 // 別スレッドで作っている形の受け取り箱
-    private var ribbonsReady = false
-    private var ribbonNext = 0                            // まだ画面に入っていない先頭
-    private var ribbonLive: [RibbonSlot] = []             // 今 描いているリボン
-    private var ribbonPool: [RibbonView] = []             // 使い回し用
-    private var dots: [Int: CALayer] = [:]
-    private var rings: [(layer: CALayer, born: Double)] = []
-    private var freeRings: [CALayer] = []
-    private let comboLabel = GameView.makeLabel(72, .bold, .white)
-    private let accLabel = GameView.makeLabel(24, .bold, UIColor(red: 1, green: 0.4, blue: 0.45, alpha: 1))
-    private let scoreLabel = GameView.makeLabel(28, .bold, .white)
-    private let fpsLabel = GameView.makeLabel(14, .regular, UIColor(white: 0.7, alpha: 1))
-    private let judgeLabel = GameView.makeLabel(56, .bold, .white)
-    private let resultLabel = GameView.makeLabel(30, .bold, .white)
-    
-    private var frames = 0
-    private var fpsStamp = 0.0
-    private var touchCount = 0
-    
-    // 診断用(ポーズ画面に出す)
-    private let createdAt = ProcessInfo.processInfo.systemUptime
-    private var firstFrameMs = -1.0
-    private var prepMs = 0.0
-    private var bakedCount = 0
-    
-    private var approach: Double { baseApproach / min(max(session.speed, 0.5), 2.0) }
-    
-    private var firstTime: Double { startAt - Self.countIn }
-
-    init(chart: MalodyChart, audio: GameAudio?, session: GameSession, startAt: Double = 0) {
-        self.chart = chart
-        self.fx = chart.effects
-        self.startAt = startAt
-        self.core = GameCore(notes: chart.notes, startTime: startAt - GameView.countIn)
-        self.audio = audio
-        self.session = session
-        let slides = chart.notes.filter { $0.kind == .slide && $0.ribbon.count > 1 }
-        self.ribbonSources = slides
-        self.ribbonPrep = RibbonPrepBox(count: slides.count)
-        super.init(frame: .zero)
-        backgroundColor = UIColor(white: 0.03, alpha: 1)
-        isMultipleTouchEnabled = true
-        
-        judgeLine.backgroundColor = UIColor(red: 1, green: 0.2, blue: 0.25, alpha: 0.9).cgColor
-        judgeLine.zPosition = 1
-        layer.addSublayer(judgeLine)
-        
-        ribbonHost.masksToBounds = true
-        ribbonHost.zPosition = 1
-        layer.addSublayer(ribbonHost)
-        // リボンの形づくり(台形の重なり判定など)は重いので、別スレッドで始める。
-        // カウントイン(2秒)の間に終わるので、起動は待たせない
-        let fxMap = chart.effects
-        RibbonSlot.prepare(slides.map { s -> RibbonInput in
-            if fxMap.isEmpty { return RibbonInput(pts: s.ribbon, w: s.w) }
-            // effect があるときは、リボンの形を「表示位置 × x」で作る (実際の時刻は、消すタイミングの判定用に別で持つ)
-            let times = s.ribbon.map { $0.t }
-            let pts = s.ribbon.map { (t: fxMap.p($0.t), x: $0.x) }
-            return RibbonInput(pts: pts, w: s.w, times: times, needsGate: (times.max() ?? 0) > fxMap.negFrom)
-        }, into: ribbonPrep)
-        
-        fpsLabel.textAlignment = .left
-        scoreLabel.textAlignment = .right
-        resultLabel.numberOfLines = 2
-        resultLabel.isHidden = true
-        for l in [comboLabel, accLabel, scoreLabel, fpsLabel, judgeLabel, resultLabel] { addSubview(l) }
-        attachHitSound()
-    }
-    
-    /// ノーツを捌いたらキー音を鳴らす (core を作り直すたびに付け直す)
-    private func attachHitSound() {
-        core.onHit = { KeySound.shared.playNow() }
-    }
-    
-    required init?(coder: NSCoder) { fatalError("not used") }
-    
-    private static func makeLabel(_ size: CGFloat, _ weight: UIFont.Weight, _ color: UIColor) -> UILabel {
-        let l = UILabel()
-        l.font = UIFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
-        l.textColor = color
-        l.textAlignment = .center
-        return l
-    }
-    
-    private func noAnimation(_ body: () -> Void) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        body()
-        CATransaction.commit()
-    }
-    
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let w = bounds.width, h = bounds.height
-        noAnimation {
-            judgeLine.frame = CGRect(x: 0, y: h * judgeRatio - 2, width: w, height: 4)
-            ribbonHost.frame = CGRect(x: 0, y: 0, width: w, height: h * judgeRatio)
-        }
-        comboLabel.frame = CGRect(x: 0, y: h * 0.05, width: w, height: 84)
-        accLabel.frame = CGRect(x: 0, y: h * 0.05 + 84, width: w, height: 30)
-        scoreLabel.frame = CGRect(x: w - 280, y: 16, width: 260, height: 34)
-        fpsLabel.frame = CGRect(x: 150, y: 20, width: 260, height: 24)
-        judgeLabel.frame = CGRect(x: 0, y: h * 0.38, width: w, height: 70)
-        resultLabel.frame = CGRect(x: 0, y: h * 0.50, width: w, height: 90)
-    }
-    
-    // MARK: 開始・停止・ポーズ
-    
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        if window != nil {
-            if link == nil { startGame() }
-        } else {
-            teardown()
-        }
-    }
-    
-    private func startGame() {
-        session.view = self
-        let l = CADisplayLink(target: self, selector: #selector(tick(_:)))
-        l.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
-        l.add(to: .main, forMode: .common)
-        link = l
-        let nc = NotificationCenter.default
-        observers.append(nc.addObserver(forName: UIApplication.willResignActiveNotification,
-                                        object: nil, queue: .main) { [weak self] _ in self?.pause() })
-        observers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification,
-                                        object: nil, queue: .main) { [weak self] _ in self?.pause() })
-        begin(at: firstTime)
-    }
-    
-    private func teardown() {
-        link?.invalidate()
-        link = nil
-        running = false
-        audio?.shutdown()
-        for o in observers { NotificationCenter.default.removeObserver(o) }
-        observers.removeAll()
-    }
-    
-    private func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
-    
-    /// 譜面時刻 tc から(音も含めて)再生を始める。最初・コンティニュー・リトライ共通。
-    /// 毎回「曲のサンプル位置」から時刻を作り直すので、何度繰り返してもズレない
-    private func begin(at tc: Double) {
-        let off = chart.offset - session.offsetMs / 1000
-        if let a = audio {
-            a.begin(chartTime: tc, offsetTotal: off)
-        } else {
-            silentHost = uptime() + 0.05
-            silentChart = tc
-        }
-        running = true
-        link?.isPaused = false
-        if session.paused { session.paused = false }
-    }
-    
-    private func chartTime(at h: Double) -> Double {
-        if let a = audio { return a.chartTime(atUptime: h) }
-        return silentChart + (h - silentHost)
-    }
-    
-    func pause() {
-        guard running else { return }
-        let tStart = uptime()
-        pausedT = chartTime(at: tStart)
-        running = false
-        link?.isPaused = true
-        core.releaseFingers()
-        clearTouchEffects()
-        let tAudio = uptime()
-        audio?.halt()
-        let tEnd = uptime()
-        var info = String(format: "pause処理 %.1f ms (うち音声停止 %.1f ms)", (tEnd - tStart) * 1000, (tEnd - tAudio) * 1000)
-        if ribbonsReady {
-            info += String(format: "\n画面作成→最初のフレーム %.0f ms / リボン準備(別スレッド) %.0f ms / ビットマップ方式 %ld本",
-                           firstFrameMs, prepMs, bakedCount)
-        }
-        session.pauseInfo = info
-        session.paused = true
-    }
-    
-    func resume() {
-        guard !running else { return }
-        begin(at: pausedT)
-    }
-    
-    func retry() {
-        core = GameCore(notes: chart.notes, startTime: firstTime)
-        attachHitSound()
-        noAnimation { resetRibbons() }
-        resultLabel.isHidden = true
-        judgeLabel.alpha = 0
-        clearTouchEffects()
-        begin(at: firstTime)
-    }
-    
-    private func clearTouchEffects() {
-        for d in dots.values { d.removeFromSuperlayer() }
-        dots.removeAll()
-        noAnimation {
-            for r in rings {
-                r.layer.isHidden = true
-                freeRings.append(r.layer)
-            }
-        }
-        rings.removeAll()
-    }
-    
-    @objc private func tick(_ l: CADisplayLink) {
-        guard running else { return }
-        audio?.refreshAnchor()
-        let now = uptime()
-        if firstFrameMs < 0 { firstFrameMs = (now - createdAt) * 1000 }
-        core.update(to: chartTime(at: now))
-        let tView = chartTime(at: l.targetTimestamp)          // 画面に出る時刻で描く
-        noAnimation { render(tView, now: now) }
-    }
-    
-    // MARK: 入力(タッチが起きた時刻そのもので判定する)
-    
-    private func lane(_ sx: CGFloat) -> Double {
-        Double(sx / max(bounds.width, 1)) * 255
-    }
-    
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard running else { return }
-        let now = uptime()
-        for tc in touches {
-            let p = tc.location(in: self)
-            let id = ObjectIdentifier(tc).hashValue
-            core.touchBegan(id: id, x: lane(p.x), at: chartTime(at: tc.timestamp) + judgeShift)
-            touchCount += 1
-            showDot(id, at: p)
-            spawnRing(at: p, now: now)
-        }
-    }
-    
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard running else { return }
-        for tc in touches {
-            let p = tc.location(in: self)
-            let id = ObjectIdentifier(tc).hashValue
-            core.touchMoved(id: id, x: lane(p.x), at: chartTime(at: tc.timestamp) + judgeShift)
-            showDot(id, at: p)
-        }
-    }
-    
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for tc in touches {
-            let id = ObjectIdentifier(tc).hashValue
-            core.touchEnded(id: id)
-            dots[id]?.removeFromSuperlayer()
-            dots[id] = nil
-        }
-    }
-    
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchesEnded(touches, with: event)
-    }
-    
-    // MARK: 描画
-    
-    private func showDot(_ id: Int, at p: CGPoint) {
-        let d: CALayer
-        if let e = dots[id] {
-            d = e
-        } else {
-            d = CALayer()
-            d.bounds = CGRect(x: 0, y: 0, width: 56, height: 56)
-            d.cornerRadius = 28
-            d.backgroundColor = UIColor(red: 1, green: 0.3, blue: 0.35, alpha: 0.45).cgColor
-            d.zPosition = 3
-            layer.addSublayer(d)
-            dots[id] = d
-        }
-        noAnimation { d.position = p }
-    }
-    
-    private func spawnRing(at p: CGPoint, now: Double) {
-        let r: CALayer
-        if let f = freeRings.popLast() {
-            r = f
-        } else {
-            r = CALayer()
-            r.bounds = CGRect(x: 0, y: 0, width: 90, height: 90)
-            r.cornerRadius = 45
-            r.borderWidth = 3
-            r.borderColor = UIColor.white.cgColor
-            r.zPosition = 4
-            layer.addSublayer(r)
-        }
-        noAnimation {
-            r.position = p
-            r.opacity = 1
-            r.isHidden = false
-            r.transform = CATransform3DMakeScale(0.5, 0.5, 1)
-        }
-        rings.append((layer: r, born: now))
-    }
-    
-    private func bar(_ i: Int) -> CALayer {
-        while bars.count <= i {
-            let l = CALayer()
-            l.zPosition = 2
-            layer.addSublayer(l)
-            bars.append(l)
-        }
-        bars[i].isHidden = false
-        return bars[i]
-    }
-    
-    // MARK: スライドのリボン
-    
-    private func acquireRibbonView(shapes need: Int) -> RibbonView {
-        let v: RibbonView
-        if let e = ribbonPool.popLast() {
-            v = e
-        } else {
-            v = RibbonView()
-            ribbonHost.addSublayer(v.root)
-        }
-        while v.shapes.count < need {
-            let sh = CAShapeLayer()
-            v.root.addSublayer(sh)
-            v.shapes.append(sh)
-        }
-        v.root.isHidden = false
-        return v
-    }
-    
-    /// ビットマップ方式: 持っているタイルを全部捨てる。進行中の焼き込みも epoch を進めて無効にする
-    private func dropTiles(_ r: RibbonSlot) {
-        for tl in r.tiles.values { tl.layer.removeFromSuperlayer() }
-        r.tiles.removeAll()
-        r.requested.removeAll()
-        r.epoch += 1
-        r.box.discard(below: r.epoch)
-    }
-    
-    private func releaseRibbon(_ r: RibbonSlot) {
-        if r.heavy {
-            dropTiles(r)
-            r.cfg = nil
-            return
-        }
-        if let v = r.view {
-            v.root.isHidden = true
-            for sh in v.shapes { sh.path = nil }
-            ribbonPool.append(v)
-        }
-        r.view = nil
-        r.builtUnit = -1
-        r.builtPx = -1
-        r.builtPassed = -1
-        r.lastOn = nil
-    }
-    
-    private func resetRibbons() {
-        for r in ribbonLive { releaseRibbon(r) }
-        ribbonLive.removeAll()
-        ribbonNext = 0
-        for r in ribbons {
-            r.admitted = false
-            r.shown = false
-        }
-    }
-    
-    /// レイヤー内の座標: x = レーン座標 × unit / y = -(時刻 - origin) × pxPerSec (上が未来)
-    /// 時刻が origin...upTo にかかる台形だけをパスに入れる(台形は切らずに丸ごと入れるので継ぎ目も出ない。
-    /// はみ出た分は ribbonHost の masksToBounds で切れる)
-    private func ribbonPath(_ quads: [RibbonQuad], _ r: RibbonSlot, origin: Double, upTo: Double,
-                            unit: CGFloat, pxPerSec: CGFloat, gateT: Double? = nil, clip: Bool = false) -> CGPath {
-        let hw = CGFloat(r.halfW) * unit
-        let path = CGMutablePath()
-        for q0 in quads where q0.tb >= origin && q0.ta <= upTo {
-            if let g = gateT, q0.gate <= g { continue }          // 中継点などを判定が過ぎた区間は、もう描かない
-            var q = q0
-            if clip {                                            // effect の譜面: jump で遠くへ飛んだ台形は、範囲に切り詰める
-                guard let c = q0.clipped(lo: origin, hi: upTo) else { continue }
-                q = c
-            }
-            let ya = -CGFloat(q.ta - origin) * pxPerSec
-            let yb = -CGFloat(q.tb - origin) * pxPerSec
-            let xa = CGFloat(q.xa) * unit
-            let xb = CGFloat(q.xb) * unit
-            path.move(to: CGPoint(x: xa - hw, y: ya))
-            path.addLine(to: CGPoint(x: xa + hw, y: ya))
-            path.addLine(to: CGPoint(x: xb + hw, y: yb))
-            path.addLine(to: CGPoint(x: xb - hw, y: yb))
-            path.closeSubpath()
-        }
-        return path
-    }
-    
-    /// ビットマップ方式のリボンを描く(焼き込みの要求・受け取り・古いタイルの破棄・位置合わせ)
-    private func renderBaked(_ r: RibbonSlot, t: Double, approach: Double, judgeY: CGFloat,
-                             unit: CGFloat, pxPerSec: CGFloat, width: CGFloat) {
-        let scale = max(contentScaleFactor, 1)
-        let cfg = BakeConfig(scale: scale, unit: unit, px: pxPerSec, width: width)
-        if r.cfg != cfg {                                       // 初回 / 速度や画面サイズが変わった時は焼き直し
-            dropTiles(r)
-            r.cfg = cfg
-            let perLane = Double(unit * scale)
-            let x0 = max(0, Int((r.xMin * perLane).rounded(.down)))
-            let x1 = min(Int(Double(width * scale).rounded(.up)), Int((r.xMax * perLane).rounded(.up)))
-            r.x0 = x0
-            r.pxW = max(0, x1 - x0)
-        }
-        if r.pxW <= 0 { return }                                // 画面の外にしか無い
-        
-        let rows = RibbonSlot.tileRows
-        let ppsPx = Double(pxPerSec * scale)                    // 縦: 1秒あたりのピクセル数
-        func tileIndex(_ time: Double) -> Int { Int((time * ppsPx / Double(rows)).rounded(.down)) }
-        
-        // 1. 焼き上がったタイルを受け取る
-        for res in r.box.take() where res.epoch == r.epoch {
-            guard let on = res.on, let off = res.off, r.tiles[res.tile] == nil else { continue }
-            let tl = BakedTile(on: on, off: off, scale: scale)
-            ribbonHost.addSublayer(tl.layer)
-            r.tiles[res.tile] = tl
-        }
-        
-        // 2. これから見える所(+先読み2枚)で、まだ頼んでいないタイルを焼いてもらう。
-        //    画面に出る前(prefetch 秒前)から頼むので、出る時にはもう焼けている
-        let tShow = max(t, r.appear - approach - 0.05)
-        let reqLo = max(tileIndex(tShow), tileIndex(r.lo))
-        let reqHi = min(tileIndex(tShow + approach) + 2, tileIndex(r.hi))
-        if reqLo <= reqHi {
-            for i in reqLo...reqHi where !r.requested.contains(i) {
-                r.requested.insert(i)
-                startBake(r, tile: i, cfg: cfg)
-            }
-        }
-        
-        // 3. 判定バーより下に過ぎ去ったタイルは捨てる(メモリを持ち続けない)
-        let visLo = tileIndex(t)
-        let visHi = tileIndex(t + approach)
-        for i in Array(r.tiles.keys) where i < visLo {
-            r.tiles[i]?.layer.removeFromSuperlayer()
-            r.tiles[i] = nil
-            r.requested.remove(i)                               // 逆走で戻ってきたとき、焼き直せるように
-        }
-        
-        // 4. 位置合わせ。ピクセルに揃えるので、タイルの継ぎ目も出ずボケもしない
-        let visible = r.appear - t <= approach + 0.05
-        let isOn = r.note.connected
-        let baseY = (judgeY * scale + CGFloat(t * ppsPx)).rounded()
-        let x = CGFloat(r.x0) / scale
-        for (i, tl) in r.tiles {
-            let show = visible && i <= visHi
-            tl.layer.isHidden = !show
-            if show {
-                tl.layer.position = CGPoint(x: x, y: (baseY - CGFloat((i + 1) * rows)) / scale)
-                if tl.lastOn != isOn {
-                    tl.layer.contents = isOn ? tl.on : tl.off
-                    tl.lastOn = isOn
-                }
-            }
-        }
-    }
-    
-    private func startBake(_ r: RibbonSlot, tile: Int, cfg: BakeConfig) {
-        let job = BakeJob(groups: r.groups, halfW: r.halfW, tile: tile, rows: RibbonSlot.tileRows,
-                          ppsPx: Double(cfg.px * cfg.scale), pxPerLane: Double(cfg.unit * cfg.scale),
-                          x0: r.x0, width: r.pxW, epoch: r.epoch)
-        let box = r.box
-        RibbonBaker.queue.async { box.put(RibbonBaker.run(job)) }
-    }
-    
-    /// t = 実際の時刻 / pt = 表示位置 (effect が無ければ t と同じ)。リボンの縦位置は pt、消えるタイミングは t で決まる
-    private func renderRibbons(_ t: Double, pos pt: Double, approach: Double, judgeY: CGFloat, unit: CGFloat,
-                               pxPerSec: CGFloat, width: CGFloat) {
-        // 別スレッドで作っていた形が出来たら、ここで受け取る(出来るまでリボンは出さない)
-        if !ribbonsReady {
-            guard let res = ribbonPrep.result() else { return }
-            var list: [RibbonSlot] = []
-            for (i, g) in res.slots.enumerated() {
-                if let g = g, !g.groups.isEmpty { list.append(RibbonSlot(note: ribbonSources[i], geo: g)) }
-            }
-            ribbons = list
-            ribbonsReady = true
-            prepMs = res.ms
-            bakedCount = list.filter { $0.heavy }.count
-        }
-        // 始点ノーツが画面上端に入った時にリボンを出す(始点より前に伸びる部分も、ここで一気に現れる)。
-        // ビットマップ方式は焼く時間が要るので、その prefetch 秒前から対象に入れて先に焼き始める
-        if hasFX {
-            // scroll / jump があると、始点の時刻の順と、画面に入る順は一致しない。全部を毎フレーム見る (軽い比較だけ)
-            for r in ribbons where !r.admitted && r.appear - pt <= approach + 0.05 + RibbonSlot.prefetch {
-                r.admitted = true
-                if r.endT > t { ribbonLive.append(r) }
-            }
-        } else {
-            while ribbonNext < ribbons.count
-                    && ribbons[ribbonNext].appear - t <= approach + 0.05 + RibbonSlot.prefetch {
-                let r = ribbons[ribbonNext]
-                ribbonNext += 1
-                if r.hi > t { ribbonLive.append(r) }
-            }
-        }
-        let on = UIColor(white: 1, alpha: RibbonSlot.onAlpha).cgColor
-        let off = UIColor(white: 1, alpha: RibbonSlot.offAlpha).cgColor
-        var k = 0
-        while k < ribbonLive.count {
-            let r = ribbonLive[k]
-            if r.endT <= t {                                    // 全体が判定バーを過ぎた (effect が無ければ r.hi <= t と同じ)
-                releaseRibbon(r)
-                ribbonLive.remove(at: k)
-                continue
-            }
-            if r.heavy {
-                renderBaked(r, t: pt, approach: approach, judgeY: judgeY, unit: unit, pxPerSec: pxPerSec, width: width)
-                k += 1
-                continue
-            }
-            if hasFX {
-                // effect あり: 始点が画面に入るまでは出さない。入ったあとは、逆走で始点が遠ざかっても出し続ける
-                if !r.shown {
-                    if r.appear - pt > approach + 0.05 {
-                        k += 1
-                        continue
-                    }
-                    r.shown = true
-                }
-            } else if r.appear - pt > approach + 0.05 {         // ベクター方式: まだ画面に入らない
-                k += 1
-                continue
-            }
-            let v: RibbonView
-            if let e = r.view {
-                v = e
-            } else {
-                v = acquireRibbonView(shapes: r.groups.count)
-                r.view = v
-            }
-            // パスに入れているのは「今見えている範囲の前後」だけ。見える範囲 [t, t+approach] がそこから出そうに
-            // なった時だけ作り直す(スライド全体が短くて全部入っている時は作り直さない)
-            let sameScale = r.builtUnit == unit && r.builtPx == pxPerSec     // 速度や画面サイズが変わったら作り直し
-            let coversAll = r.winLo <= r.lo && r.winHi >= r.hi
-            let inWindow = pt >= r.winLo && pt + approach <= r.winHi
-            // 逆走のある譜面: 区間の終わりの点を判定が過ぎるたびに、その区間を消して作り直す
-            let passed = r.needsGate ? RibbonSlot.countAtMost(r.gateTimes, t) : 0
-            let sameGate = !r.needsGate || r.builtPassed == passed
-            if !(sameScale && sameGate && (coversAll || inWindow)) {
-                let wLo = pt - approach * 0.5
-                let wHi = pt + approach * 2.5
-                for (gi, quads) in r.groups.enumerated() {
-                    v.shapes[gi].path = ribbonPath(quads, r, origin: wLo, upTo: wHi, unit: unit, pxPerSec: pxPerSec,
-                                                   gateT: r.needsGate ? t : nil, clip: hasFX)
-                    v.shapes[gi].isHidden = false
-                }
-                r.builtPassed = passed
-                r.winLo = wLo
-                r.winHi = wHi
-                if v.shapes.count > r.groups.count {
-                    for gi in r.groups.count..<v.shapes.count {
-                        v.shapes[gi].path = nil
-                        v.shapes[gi].isHidden = true
-                    }
-                }
-                r.builtUnit = unit
-                r.builtPx = pxPerSec
-                r.lastOn = nil
-            }
-            v.root.position = CGPoint(x: 0, y: judgeY + CGFloat(pt - r.winLo) * pxPerSec)
-            let isOn = r.note.connected
-            if r.lastOn != isOn {
-                let col = isOn ? on : off
-                for sh in v.shapes { sh.fillColor = col }
-                r.lastOn = isOn
-            }
-            k += 1
-        }
-    }
-    
-    private func color(of j: Judge) -> UIColor {
-        switch j {
-        case .best: return UIColor(red: 1.0, green: 0.3, blue: 0.35, alpha: 1)
-        case .cool: return UIColor(red: 1.0, green: 0.85, blue: 0.2, alpha: 1)
-        case .good: return UIColor(red: 0.4, green: 1.0, blue: 0.5, alpha: 1)
-        case .miss: return UIColor(white: 0.6, alpha: 1)
-        }
-    }
-    
-    private func setText(_ l: UILabel, _ s: String) {
-        if l.text != s { l.text = s }
-    }
-    
-    /// 時刻 t 以降で最初のノーツの番号 (notes は時刻順)
-    private func firstNote(atOrAfter t: Double, in notes: [PlayNote]) -> Int {
-        var lo = 0, hi = notes.count
-        while lo < hi {
-            let mid = (lo + hi) / 2
-            if notes[mid].t < t { lo = mid + 1 } else { hi = mid }
-        }
-        return lo
-    }
-    
-    private func render(_ t: Double, now: Double) {
-        let approach = self.approach
-        let w = bounds.width, h = bounds.height
-        let judgeY = h * judgeRatio
-        let unit = w / 255                                   // レーン1単位あたりのpt
-        let barH = max(10, h * 0.016)
-        let pxPerSec = judgeY / CGFloat(approach)             // 1秒あたりの縦移動量
-        func yAt(_ dt: Double) -> CGFloat { judgeY * (1 - CGFloat(dt / approach)) }   // dt = 判定までの残り秒
-        
-        let white = UIColor(white: 1, alpha: 0.95).cgColor
-        let yellow = UIColor(red: 1, green: 0.85, blue: 0.1, alpha: 1).cgColor
-        
-        // 表示位置: effect (scroll / jump) が無ければ、時刻そのもの
-        let pt = hasFX ? fx.p(t) : t
-        renderRibbons(t, pos: pt, approach: approach, judgeY: judgeY, unit: unit, pxPerSec: pxPerSec, width: w)
-        
-        var bi = 0
-        let notes = core.notes
-        if hasFX {
-            // effect あり: 画面に見える位置 (表示位置が pt-0.3 〜 pt+approach) にいるノーツだけを、時刻の範囲に直して拾う。
-            // (scroll / jump で、時刻の順と画面の順は一致しない)
-            let firstIdx = core.firstIndex
-            for rng in fx.timeRanges(p: pt - 0.3, pt + approach + 0.05) {
-                var i = max(firstIdx, firstNote(atOrAfter: rng.lo, in: notes))
-                while i < notes.count && notes[i].t <= rng.hi && bi < 400 {
-                    let n = notes[i]
-                    i += 1
-                    if n.state == .done { continue }
-                    if n.kind == .slide && n.state != .waiting { continue }
-                    let d = fx.p(n.t) - pt
-                    if d > approach + 0.05 || d < -0.3 { continue }
-                    let b = bar(bi)
-                    bi += 1
-                    b.frame = CGRect(x: CGFloat(n.x - n.w / 2) * unit, y: yAt(d) - barH / 2,
-                                     width: CGFloat(n.w) * unit, height: barH)
-                    b.backgroundColor = n.kind == .wipe ? yellow : white
-                }
-            }
-        } else {
-            var i = core.firstIndex
-            while i < notes.count {
-                let n = notes[i]
-                i += 1
-                let dt = n.t - t
-                if dt > approach + 0.05 { break }
-                if n.state == .done { continue }
-                
-                if n.kind == .slide && n.state != .waiting { continue }   // リボンは renderRibbons で描く。始点の白い帯は未処理の間だけ
-                
-                let b = bar(bi)
-                bi += 1
-                b.frame = CGRect(x: CGFloat(n.x - n.w / 2) * unit, y: yAt(dt) - barH / 2,
-                                 width: CGFloat(n.w) * unit, height: barH)
-                b.backgroundColor = n.kind == .wipe ? yellow : white
-            }
-        }
-        for k in bi..<bars.count { bars[k].isHidden = true }
-        
-        // タッチエフェクト
-        var k = 0
-        while k < rings.count {
-            let age = now - rings[k].born
-            if age >= 0.3 {
-                rings[k].layer.isHidden = true
-                freeRings.append(rings[k].layer)
-                rings.remove(at: k)
-            } else {
-                let p = CGFloat(age / 0.3)
-                rings[k].layer.opacity = Float(1 - p)
-                rings[k].layer.transform = CATransform3DMakeScale(0.5 + p, 0.5 + p, 1)
-                k += 1
-            }
-        }
-        
-        // HUD
-        setText(comboLabel, core.combo > 0 ? "\(core.combo)" : "")
-        setText(accLabel, String(format: "%.2f%%", core.accuracy))
-        setText(scoreLabel, "\(core.score)")
-        if t < 0 {
-            setText(judgeLabel, "\(Int(ceil(-t)))")
-            judgeLabel.textColor = .white
-            judgeLabel.alpha = 1
-        } else if let j = core.lastJudge, t - core.lastJudgeAt < 0.6 {
-            setText(judgeLabel, j.name)
-            judgeLabel.textColor = color(of: j)
-            judgeLabel.alpha = CGFloat(1 - (t - core.lastJudgeAt) / 0.6)
-        } else {
-            judgeLabel.alpha = 0
-        }
-        if core.isFinished && t > core.endTime + 0.3 {
-            setText(resultLabel, "FINISH\n" + String(format: "ACC %.2f%%   MAX COMBO %ld", core.accuracy, core.maxCombo))
-            resultLabel.isHidden = false
-        }
-        
-        frames += 1
-        if now - fpsStamp >= 0.5 {
-            let fps = Double(frames) / (now - fpsStamp)
-            frames = 0
-            fpsStamp = now
-            setText(fpsLabel, String(format: "%.0f fps", fps) + "  touch \(touchCount)")
-        }
     }
 }
 
@@ -3022,21 +1434,30 @@ struct GameRepresentable: UIViewRepresentable {
     let audio: GameAudio?
     let session: GameSession
     var startAt: Double = 0
-    
+    var background: UIImage? = nil
+    var bgDim: Double = 0.7
+
     func makeUIView(context: Context) -> GameView {
-        GameView(chart: chart, audio: audio, session: session, startAt: startAt)
+        GameView(chart: chart, audio: audio, session: session, startAt: startAt,
+                 background: background, bgDim: bgDim)
     }
     func updateUIView(_ uiView: GameView, context: Context) {}
 }
 
 struct PauseOverlay: View {
     @ObservedObject var session: GameSession
-    
+
     private var offsetBinding: Binding<Double> {
         Binding(get: { session.offsetMs },
                 set: { session.offsetMs = min(max($0.rounded(), -300), 300) })
     }
-    
+
+    private var speedBinding: Binding<Double> {
+        Binding(get: { Double(session.speedN) },
+                set: { session.speedN = min(max(Int($0.rounded()), GameSession.speedRange.lowerBound),
+                                            GameSession.speedRange.upperBound) })
+    }
+
     var body: some View {
         ZStack {
             Color.black.opacity(0.7).ignoresSafeArea()
@@ -3048,16 +1469,33 @@ struct PauseOverlay: View {
                             .font(.caption2.monospacedDigit())
                             .foregroundColor(.gray)
                     }
-                    
+
+                    Toggle("ヒット音", isOn: $session.hitSound)
+                        .toggleStyle(CheckboxToggleStyle())
+
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text("スクロール速度")
                             Spacer()
-                            Text(String(format: "×%.1f", session.speed)).monospacedDigit()
+                            Text(String(format: "%ld  (×%.2f)", session.speedN, exp(Double(session.speedN) * 0.05)))
+                                .monospacedDigit()
                         }
-                        Slider(value: $session.speed, in: 0.5...2.0, step: 0.1)
+                        Slider(value: speedBinding,
+                               in: Double(GameSession.speedRange.lowerBound)...Double(GameSession.speedRange.upperBound),
+                               step: 1)
                     }
-                    
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("判定レベル")
+                        Picker("判定レベル", selection: $session.judgeLevel) {
+                            ForEach(0..<5, id: \.self) { Text("\($0)").tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        Text("0 = ゆるい (スコア ×0.78) 〜 2 = 標準 〜 4 = きびしい (スコア ×1.20)。コンティニュー / リトライから反映")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text("オフセット (ms)")
@@ -3073,7 +1511,7 @@ struct PauseOverlay: View {
                             .font(.caption)
                             .foregroundColor(.gray)
                     }
-                    
+
                     HStack(spacing: 12) {
                         Button("終了") { session.quitGame() }
                             .buttonStyle(.bordered)
@@ -3096,6 +1534,25 @@ struct PauseOverlay: View {
     }
 }
 
+/// ラベル + チェックボックス (iPadOS ではスイッチが標準なので、四角いチェックにする)
+private struct CheckboxToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: configuration.isOn ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 24))
+                    .foregroundColor(configuration.isOn ? .accentColor : .gray)
+                configuration.label
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 // MARK: - エディタ連携 (ここから下がエディタ用の追加分)
 
 /// テストプレイ開始時にエディタが作る「お膳立て」
@@ -3104,9 +1561,12 @@ struct TestPlayLaunch: Identifiable {
     let chart: MalodyChart
     let audio: GameAudio?
     let startSec: Double          // 譜面時間(秒)。エディタの現在位置
+    var background: UIImage? = nil    // エディタの背景画像 (プレイ画面にも敷く)
+    var bgDim: Double = 0.7           // その上に重ねる黒の濃さ (エディタの SETTING と同じ値)
+    var touchEffect: Bool = false     // エディタの「タッチエフェクト」のチェック (プレイ中に指の位置へ出す)
 }
 
-/// フルスクリーンで出すテストプレイ画面 (PAUSE → 終了 でエディタに戻る)
+/// フルスクリーンで出すテストプレイ画面 (左上のポーズボタン → 終了 でエディタに戻る)
 struct TestPlayScreen: View {
     let launch: TestPlayLaunch
     let onClose: () -> Void
@@ -3115,23 +1575,16 @@ struct TestPlayScreen: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             Color.black.ignoresSafeArea()
-            GameRepresentable(chart: launch.chart, audio: launch.audio, session: session, startAt: launch.startSec)
+            GameRepresentable(chart: launch.chart, audio: launch.audio, session: session, startAt: launch.startSec,
+                              background: launch.background, bgDim: launch.bgDim)
                 .ignoresSafeArea()
-            if !session.paused {
-                Button { session.pause() } label: {
-                    Label("PAUSE", systemImage: "pause.fill")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundColor(Color.white.opacity(0.85))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(Color.white.opacity(0.18)))
-                        .padding(16)
-                }
-            }
             if session.paused {
                 PauseOverlay(session: session)
             }
         }
+        // fullScreenCover が出ている間、エディタ側のタッチエフェクトは外れる (EditorView の .background を参照)。
+        // プレイ中の指の位置の表示は、エディタのチェックボックスと同じ ON/OFF に従う
+        .background(TouchEffectInstaller(enabled: launch.touchEffect))
         .statusBarHidden(true)      // fullScreenCover は別の画面扱いなので、ここにも付ける
         .persistentSystemOverlays(.hidden)      // ホームバーも同じ (EditorView と同じ設定。RootView を参照)
         .defersSystemGestures(on: .bottom)
