@@ -170,8 +170,9 @@ enum SlideJudgeText {
 enum SlideHitLight {
     static let size2 = (w: 900.0, h: 600.0)     // light2 (横に流れる光)。単位
     static let size = (w: 900.0, h: 900.0)      // light (六角形)。単位
-    /// 画面収録の測定: 六角形の見た目は 900 単位 × 0.53 (位置は判定線の画面位置)
-    static let visualScale = 0.53
+    /// 画面収録の測定: 六角形の見た目は 900 単位 × 1.05 (位置は判定線の画面位置)。
+    /// 本家とエディタの録画を同じ時刻で並べ、六角形がいちばん大きくなる瞬間の幅を比べた (本家は 0.53 のときの約 1.9〜2.1 倍)
+    static let visualScale = 1.05
     static let frameMs2 = 24.0                  // light2 の 1 枚あたり (ms)
     static let frameMs = 16.67                  // light の 1 枚あたり (ms)
     static let count2 = 13                      // light2-0 ... 12

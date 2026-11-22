@@ -101,6 +101,8 @@ final class SlideNote {
     var segDeltaP: [Double] = []    // 各 seg 点の「前の点からの P の差」(先頭の点は pStart から)
     var segP: [Double] = []         // 各 seg 点の P (絶対)
     var pMonotone = true            // pStart → seg の P が増え続ける (描く範囲を二分探索できる)
+    var judgedSeg: [Bool] = []      // seg ごと: 触れる判定が追う経路の区間か (false = 戻る区間・同じ時刻の区間。見た目だけで、保持しても消費されない)
+    var hasDecor = false            // 見た目だけの区間が、高さを持って 1 つでもある
     var cutP = -Double.infinity     // 保持で消費した帯の P (ここより手前は描かない。一度進んだら戻らない)
 
     // 判定の状態 (§8)
@@ -413,16 +415,28 @@ final class SlideChart {
             d.reserveCapacity(n.segRel.count)
             ps.reserveCapacity(n.segRel.count)
             var mono = true
-            for r in n.segRel {
+            var prefixMax = Int.min
+            var judged: [Bool] = []
+            var decor = false
+            judged.reserveCapacity(n.segRel.count)
+            for (idx, r) in n.segRel.enumerated() {
                 let p = pStatic(n.startMs + r)
                 d.append(p - prev)
                 ps.append(p)
                 if p < prev { mono = false }
+                // 触れる判定が追う経路 (trajectoryX) は「それまでの最大より後ろへ進む seg」だけ。
+                // 時間が戻る seg と同じ時刻の seg は、見た目だけの区間 (触れる判定がない)
+                let onPath = idx == 0 || r > prefixMax
+                judged.append(onPath)
+                if !onPath && abs(p - prev) > 1e-9 { decor = true }
+                prefixMax = max(prefixMax, r)
                 prev = p
             }
             n.segDeltaP = d
             n.segP = ps
             n.pMonotone = mono
+            n.judgedSeg = judged
+            n.hasDecor = decor
         }
     }
 

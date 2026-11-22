@@ -669,7 +669,8 @@ final class GameView: UIView {
         }
         if note.completed { note.cutP = max(note.cutP, note.pEnd) }
         if note.state & 4 != 0 && !note.completed { holding.insert(ObjectIdentifier(note)) }
-        if note.cutP >= note.pEnd && note.pEnd > note.pStart { return }       // すべて消費した
+        // すべて消費した (見た目だけの区間があるスライドは、その区間を最後まで描くので戻らない)
+        if note.cutP >= note.pEnd && note.pEnd > note.pStart && !note.hasDecor { return }
 
         let m = note.segRel.count
         let bandW = Double(note.w) * toLX
@@ -700,12 +701,16 @@ final class GameView: UIView {
             var a = point(k)
             let b = point(k + 1)
             if note.pMonotone && a.p > pHigh { break }
-            if b.p <= note.cutP && note.cutP > -Double.infinity { k += 1; continue }
-            if a.p < note.cutP && b.p > a.p {
-                let t = (note.cutP - a.p) / (b.p - a.p)
-                a = (a.x + (b.x - a.x) * t, note.cutP)
+            // 保持で消費されるのは、触れる判定が追う経路の区間だけ。時間が戻る区間など判定のない区間は、
+            // 保持しても消えず、そのまま流れて判定バーを過ぎていく (本家の録画と同じ)
+            if k >= note.judgedSeg.count || note.judgedSeg[k] {
+                if b.p <= note.cutP && note.cutP > -Double.infinity { k += 1; continue }
+                if a.p < note.cutP && b.p > a.p {
+                    let t = (note.cutP - a.p) / (b.p - a.p)
+                    a = (a.x + (b.x - a.x) * t, note.cutP)
+                }
+                if !gotHead { headX = a.x; gotHead = true }
             }
-            if !gotHead { headX = a.x; gotHead = true }
             let yA = (a.p - pNow) * scale, yB = (b.p - pNow) * scale
             k += 1
             // 画面の外なら描かない。高さのない区間 (同じ時刻の seg) は面積が 0 なので描かない (エディタと同じ)
