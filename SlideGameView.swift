@@ -131,7 +131,7 @@ private struct RibbonBox {
 
 /// 等間隔・中央置きの数字。画像は 1 枚ずつ CALayer (使い回し)
 private final class GlyphRow {
-    let host = CALayer()                      // 中心に置く (大きさ 0)。拡縮 (ポップ) はこの層に掛ける
+    let host = CALayer()                      // 中心に置く (大きさ 0)
     private var glyphs: [CALayer] = []
     private let font: SlideHUD.Font
     private let cell: (w: Double, h: Double)
@@ -247,8 +247,6 @@ final class GameView: UIView {
     private var holdFX: [ObjectIdentifier: HitFX] = [:]
     private var judgeGrade = -1
     private var judgeBorn = 0.0
-    private var lastCombo = 0
-    private var comboBorn = 0.0
     private var scoreFrom = 0.0, scoreTo = 0.0, scoreBorn = 0.0
     private var accFrom = 0.0, accTo = 0.0, accBorn = 0.0
 
@@ -548,7 +546,6 @@ final class GameView: UIView {
         clearEffects()
         resultLabel.isHidden = true
         judgeGrade = -1
-        lastCombo = 0
         scoreFrom = 0; scoreTo = 0; accFrom = 0; accTo = 0
         noAnimation { judgeText.opacity = 0 }
         fillHUD(force: true)
@@ -937,7 +934,7 @@ final class GameView: UIView {
         let u = CGFloat(plane.unit)
         scoreRow.set(text: String(Int(scoreTo)), unit: u)
         accRow.set(text: String(format: "%.2f%%", accTo), unit: u)
-        comboRow.set(text: engine.score.combo > 0 ? String(engine.score.combo) : "", unit: u)
+        comboRow.set(text: String(engine.score.combo), unit: u)        // コンボ 0 のときも「0」を出す
         updateHP(animated: false)
     }
 
@@ -950,15 +947,8 @@ final class GameView: UIView {
         if acc != accTo { accFrom = currentAcc(wall); accTo = acc; accBorn = wall }
         scoreRow.set(text: String(Int(currentScore(wall).rounded())), unit: u)
         accRow.set(text: String(format: "%.2f%%", currentAcc(wall)), unit: u)
-        // combo: 増えた瞬間に少し大きく → 元の大きさ (interval=150 を、ポップの長さに使う)
-        if s.combo != lastCombo {
-            if s.combo > lastCombo { comboBorn = wall }
-            lastCombo = s.combo
-        }
-        comboRow.set(text: s.combo > 0 ? String(s.combo) : "", unit: u)
-        let age = wall - comboBorn
-        let pop = age < 0.15 ? 1.0 + 0.2 * (1 - age / 0.15) : 1.0
-        comboRow.host.transform = CATransform3DMakeScale(CGFloat(pop), CGFloat(pop), 1)
+        // combo: 0 のときも「0」を出す。増えたときに文字が動く演出 (ポップ) は付けない
+        comboRow.set(text: String(s.combo), unit: u)
         updateHP(animated: false)
     }
 
