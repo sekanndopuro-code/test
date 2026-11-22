@@ -119,6 +119,14 @@ private struct RibbonQuad {
     var xHi: Double
 }
 
+/// 層に入っている台形の外接する長方形 (重なりの判定用)。y は平面の Y、x は層の単位
+private struct RibbonBox {
+    var yLo: Double
+    var yHi: Double
+    var xMin: Double
+    var xMax: Double
+}
+
 // MARK: 数字 (HUD)
 
 /// 等間隔・中央置きの数字。画像は 1 枚ずつ CALayer (使い回し)
@@ -663,12 +671,14 @@ final class GameView: UIView {
     /// 曲がり角でも、隣り合う台形は同じ辺を共有するので隙間が出ない
     private func drawSlide(_ note: SlideNote, pNow: Double, scale: Double, fw: Double, toLX: Double,
                            nowMs: Double, holding: inout Set<ObjectIdentifier>) {
+        // 終点の seg (記述順で最後の seg。時系列で最後とは限らない) を押さえられたら、スライド全体を描かない。
+        // 時間が戻る区間など見た目だけの区間も、いっしょに消える (本家と同じ)。終点を逃したときは消えず、そのまま流れる
+        if note.completed { return }
         // 保持している間、通過した帯は消える (一度消えた所は、離しても戻らない。本家の機構 D)
         if note.state & 4 != 0 && pNow > note.pStart {
             note.cutP = max(note.cutP, min(pNow, note.pEnd))
         }
-        if note.completed { note.cutP = max(note.cutP, note.pEnd) }
-        if note.state & 4 != 0 && !note.completed { holding.insert(ObjectIdentifier(note)) }
+        if note.state & 4 != 0 { holding.insert(ObjectIdentifier(note)) }      // completed はここへ来ない
         // すべて消費した (見た目だけの区間があるスライドは、その区間を最後まで描くので戻らない)
         if note.cutP >= note.pEnd && note.pEnd > note.pStart && !note.hasDecor { return }
 
@@ -738,33 +748,58 @@ final class GameView: UIView {
     }
 
     /// 集めた台形 (quadBuf) を、CAShapeLayer に入れる。
-    /// 1 枚の層のパスには、高さの範囲が重ならない台形だけを入れる (継ぎ目なし)。高さの範囲が重なる台形は次の層へ回し、
-    /// 層どうしを重ねて、重なった所を濃くする (白 40% が重なるごとに濃くなる)。P が単調なスライドは、重なりが無いので必ず 1 枚
+    /// 1 枚の層のパスには、重ならない台形だけを入れる (継ぎ目なし)。重なる台形は次の層へ回し、
+    /// 層どうしを重ねて、重なった所を濃くする (白 40% が重なるごとに濃くなる)。P が単調なスライドは、重なりが無いので必ず 1 枚。
+    /// 「重なる」は、高さの範囲 (y) と横の範囲 (x。台形の外接する長方形) の両方が重なること。
+    /// 高さだけで見ると、別のレーンの台形まで層を使ってしまい、同じレーンで何十回も行き来する (白くする) 所の層が足りなくなる
     private func emitRibbon(halfWidth hw: Double, monotone: Bool) {
         let n = quadBuf.count
         if n == 0 { return }
-        let maxLayers = 8                       // 白 40% を 8 枚重ねるとほぼ不透明 (98%)。これより深い重なりは最後の層にまとめる
+        let maxLayers = 10                      // 白 40% を 10 枚重ねると 99.4%。これ以上は層を増やさない
         var depth = [Int](repeating: 0, count: n)
         var layers = 1
         if !monotone {
-            // 低い順に並べて、空いている最初の層へ (区間の重なりの最大数ぶんだけ層ができる)
+            // 低い順に並べて、重ならない最初の層へ (その場所の重なりの最大数ぶんだけ層ができる)
             let order = (0..<n).sorted { quadBuf[$0].yLo < quadBuf[$1].yLo }
-            var ends: [Double] = []             // 各層の、いま入っている台形の最高点
+            // 各層に今入っている台形。y の小さい順に処理するので、上端が今の台形の下端以下になったものは、
+            // 以後だれとも重ならない → 捨てる
+            var active = [[RibbonBox]](repeating: [], count: maxLayers)
+            var used = 1
             for i in order {
                 let q = quadBuf[i]
-                var d = 0
-                while d < ends.count && ends[d] > q.yLo + 1e-6 { d += 1 }
-                if d >= maxLayers {
-                    d = maxLayers - 1
-                    ends[d] = max(ends[d], q.yHi)
-                } else if d == ends.count {
-                    ends.append(q.yHi)
-                } else {
-                    ends[d] = q.yHi
+                let box = RibbonBox(yLo: q.yLo, yHi: q.yHi,
+                                    xMin: min(q.xLo, q.xHi) - hw, xMax: max(q.xLo, q.xHi) + hw)
+                for k in 0..<maxLayers { active[k].removeAll { $0.yHi <= box.yLo + 1e-6 } }
+                // 重ならない最初の層
+                var d = -1
+                for k in 0..<maxLayers {
+                    var overlap = false
+                    for a in active[k] where a.xMin < box.xMax - 1e-6 && box.xMin < a.xMax - 1e-6 {
+                        overlap = true
+                        break
+                    }
+                    if !overlap { d = k; break }
                 }
+                if d < 0 {
+                    // 層が足りない (隣のレーンの台形と、横が半分重なるだけでも層を使うため、同じレーンの重なりが 10 を超えなくても起こる)。
+                    // 同じ層に入れた台形どうしは 1 回ぶんしか塗られないので、重なる面積がいちばん小さい層へ入れる
+                    var bestArea = Double.infinity
+                    d = maxLayers - 1
+                    for k in 0..<maxLayers {
+                        var area = 0.0
+                        for a in active[k] {
+                            let ow = min(box.xMax, a.xMax) - max(box.xMin, a.xMin)
+                            let oh = min(box.yHi, a.yHi) - max(box.yLo, a.yLo)
+                            if ow > 0 && oh > 0 { area += ow * oh }
+                        }
+                        if area < bestArea - 1e-9 { bestArea = area; d = k }
+                    }
+                }
+                active[d].append(box)
                 depth[i] = d
+                used = max(used, d + 1)
             }
-            layers = ends.count
+            layers = used
         }
         var paths: [CGMutablePath] = []
         for _ in 0..<layers { paths.append(CGMutablePath()) }
