@@ -923,14 +923,14 @@ final class EditorState: ObservableObject {
 
     // MARK: - テストプレイ
 
-    /// 現在の譜面(未保存の編集内容も含む)を MalodySlideTestplayer の中身でプレイする。
+    /// 現在の譜面(未保存の編集内容も含む)を、本家の Slide モードの仕様 (SlideCore.swift) でプレイする。
     /// 開始位置はエディタで表示中の位置。最初から遊ぶときは先頭へシークしてから押す。
     func startTestPlay() {
         if isPlaying { pause() }
         popup = .none
         do {
             let played = try MalodyChart.make(from: chart)      // 譜面を JSON にして読み直さず、メモリ上の譜面から直接作る
-            if played.notes.isEmpty {
+            if played.isEmpty {
                 showToast("ノーツがないのでテストできません")
                 return
             }
@@ -946,7 +946,9 @@ final class EditorState: ObservableObject {
             }
             KeySound.shared.prepare()
             let start = max(0, timeMap.sec(atBeat: viewBeat))
-            testLaunch = TestPlayLaunch(chart: played, audio: game, startSec: start)
+            // 背景画像・暗さ・タッチエフェクトは、エディタの今の設定をそのまま渡す (プレイ中もエディタのチェックと一致させる)
+            testLaunch = TestPlayLaunch(chart: played, audio: game, startSec: start,
+                                        background: bgImage, bgDim: bgDim, touchEffect: touchEffect)
         } catch {
             showToast("テストプレイを開始できませんでした")
         }

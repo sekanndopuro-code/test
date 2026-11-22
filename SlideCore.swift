@@ -99,12 +99,16 @@ final class SlideNote {
     var pStart = 0.0
     var pEnd = 0.0
     var segDeltaP: [Double] = []    // 各 seg 点の「前の点からの P の差」(先頭の点は pStart から)
+    var segP: [Double] = []         // 各 seg 点の P (絶対)
+    var pMonotone = true            // pStart → seg の P が増え続ける (描く範囲を二分探索できる)
+    var cutP = -Double.infinity     // 保持で消費した帯の P (ここより手前は描かない。一度進んだら戻らない)
 
     // 判定の状態 (§8)
     var state = 0               // bit0 判定済み / bit2 保持中 / bit3 完了
     var nextTick = Int(Int32.max)
     var slot = -1               // スライドが追っているタッチのスロット (-1 = なし)
     var skipped = false         // 「途中から始める」ときに最初から飛ばしたノーツ
+    var hit = false             // ミス以外で判定された (tap / type 4 のスプライトを消す合図。本家の toggle=1)
     var index = 0               // 整列後の番号
 
     // 追従誤差のリング (直近 20 回の評価)
@@ -158,6 +162,8 @@ final class SlideNote {
         nextTick = Int(Int32.max)
         slot = -1
         skipped = false
+        hit = false
+        cutP = -Double.infinity
         resetSamples()
     }
 
@@ -403,13 +409,20 @@ final class SlideChart {
             n.pEnd = pStatic(n.endMs)
             var prev = n.pStart
             var d: [Double] = []
+            var ps: [Double] = []
             d.reserveCapacity(n.segRel.count)
+            ps.reserveCapacity(n.segRel.count)
+            var mono = true
             for r in n.segRel {
                 let p = pStatic(n.startMs + r)
                 d.append(p - prev)
+                ps.append(p)
+                if p < prev { mono = false }
                 prev = p
             }
             n.segDeltaP = d
+            n.segP = ps
+            n.pMonotone = mono
         }
     }
 
@@ -795,6 +808,7 @@ final class SlideEngine {
     private func emit(_ code: UInt32, _ n: SlideNote, _ now: Double) {
         if code == SlideEngine.noCode { return }
         score.apply(code)
+        if (SlideScore.isGradedHead(code) && code & 1 == 0) || code == 0x400000 { n.hit = true }
         let early = code & 0x40 != 0
         var ev: SlideJudgeEvent?
         if SlideScore.isGradedHead(code) {
